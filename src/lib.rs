@@ -9,6 +9,12 @@ use std::fmt::Display;
 
 /// Global allocator: reduces Windows heap fragmentation on repeated large
 /// write alloc/free cycles (cell model + XML buffers + deflate).
+///
+/// Windows-only: the system allocators on Linux/macOS don't exhibit the same
+/// fragmentation, and pulling mimalloc into the Linux aarch64 cross-build
+/// breaks on the manylinux2014 toolchain (mimalloc's C build rejects an
+/// unknown `-Wdate-time` flag under its ancient GCC).
+#[cfg(windows)]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

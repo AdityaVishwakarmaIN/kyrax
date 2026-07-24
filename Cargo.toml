@@ -53,7 +53,11 @@ fast-float2 = "0.2"
 itoa = "1.0"
 ryu = "1.0"
 ahash = "0.8"
-# Windows heap fragmentation on repeated large write alloc/free cycles
+
+# Windows heap fragmentation on repeated large write alloc/free cycles.
+# Windows-only: avoids breaking the Linux aarch64 manylinux2014 cross-build,
+# where mimalloc's bundled C sources fail under the image's ancient GCC.
+[target.'cfg(windows)'.dependencies]
 mimalloc = "0.1"
 
 [dev-dependencies]
