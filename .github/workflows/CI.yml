@@ -132,7 +132,9 @@ jobs:
       - name: build (fast)
         uses: PyO3/maturin-action@v1
         with:
-          manylinux: auto
+          # manylinux_2_28 (GCC 12) is required to compile our C deps for
+          # aarch64; ignored on macOS/Windows. See release.yml.
+          manylinux: "2_28"
           command: build
           args: "-o dist -i python${{ matrix.python-version }}"
           target: ${{ steps.target.outputs.target }}
