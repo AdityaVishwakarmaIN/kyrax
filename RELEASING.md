@@ -21,7 +21,7 @@ The single source of truth for the version is **`Cargo.toml`**:
 
 ```toml
 [package]
-version = "1.0.0"
+version = "1.0.2"
 ```
 
 `pyproject.toml` declares `dynamic = ["version"]`, so maturin copies the version
