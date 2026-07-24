@@ -1,0 +1,85 @@
+[package]
+name = "kyrax"
+version = "1.0.0"
+description = "kyrax: a fast Excel engine"
+authors = ["Aditya Vishwakarma <aditya.vishwakarma@vertexconsulting.in>"]
+rust-version = "1.85.0"
+edition = "2024"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/AdityaVishwakarmaIN/kyrax"
+homepage = "https://github.com/AdityaVishwakarmaIN/kyrax"
+documentation = "https://github.com/AdityaVishwakarmaIN/kyrax"
+include = [
+    "/pyproject.toml",
+    "/README.md",
+    "/LICENSE",
+    "/Makefile",
+    "/src",
+    "/python/kyrax",
+    "!__pycache__",
+    "!*.pyc",
+    "!*.so",
+    "!*.pyd",
+    "!*.pdb",
+]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "kyrax"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+arrow-array = { version = "^59", features = ["ffi"], optional = true }
+arrow-pyarrow = { version = "^59", optional = true }
+arrow-schema = { version = "^59", optional = true }
+calamine = { version = "^0.35.0", features = ["chrono"] }
+chrono = { version = "^0.4.40", default-features = false }
+log = "^0.4"
+polars-core = { version = ">=0.53", features = [
+    "dtype-date",
+    "dtype-datetime",
+    "dtype-duration",
+], optional = true }
+pyo3 = { version = "^0.28", features = ["abi3-py310"], optional = true }
+pyo3-arrow = { version = "^0.18", default-features = false, optional = true }
+pyo3-log = { version = "^0.13.3", optional = true }
+# turbo fast-path (src/turbo/)
+libdeflater = "1.24"
+memchr = "2.7"
+rayon = "1.10"
+fast-float2 = "0.2"
+# turbo write path (src/turbo/write/)
+itoa = "1.0"
+ryu = "1.0"
+ahash = "0.8"
+# Windows heap fragmentation on repeated large write alloc/free cycles
+mimalloc = "0.1"
+
+[dev-dependencies]
+anyhow = "1.0.102"
+pretty_assertions = { version = "^1.4.1", features = ["unstable"] }
+rstest = { version = "^0.26.1", default-features = false }
+
+# NOTE: This is a hack to bypass pyo3 limitations when testing:
+# https://pyo3.rs/v0.22.3/faq.html#i-cant-run-cargo-test-or-i-cant-build-in-a-cargo-workspace-im-having-linker-issues-like-symbol-not-found-or-undefined-reference-to-_pyexc_systemerror
+[features]
+default = []
+__arrow = ["dep:arrow-schema", "dep:arrow-array"]
+python = ["__arrow", "dep:pyo3", "dep:pyo3-log", "dep:pyo3-arrow"]
+extension-module = ["pyo3/extension-module"]
+polars = ["dep:polars-core"]
+pyarrow = ["dep:arrow-pyarrow", "python"]
+# Private features for internal usage, should not be used directly as they may
+# change without notice
+__pyo3-tests = [
+    # feature for tests only. This makes Python::with_gil auto-initialize Python
+    # interpreters, which allows us to instantiate Python objects in tests
+    # (see https://pyo3.rs/v0.22.3/features#auto-initialize)
+    "pyo3/auto-initialize",
+    "pyarrow",
+]
+__rust-tests-standalone = ["__arrow"]
+__rust-tests-polars = ["polars"]
+# Private feature for maturin usage, should not be used directly
+__maturin = ["extension-module", "pyarrow"]

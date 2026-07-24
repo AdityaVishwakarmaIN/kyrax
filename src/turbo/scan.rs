@@ -1,0 +1,1548 @@
+//! Memchr single-pass sheet scanner with typed columnar output and rayon chunk-parallel parse.
+
+use super::decode::{atoi, decode};
+use super::error::{TurboError, TurboResult};
+use super::formula;
+use super::structural::CellRange;
+
+// ----------------------------------------------------------------------------
+// BitVec / Dict / StringArena / Column (from struct_proto)
+// ----------------------------------------------------------------------------
+
+pub(crate) struct BitVec {
+    pub bits: Vec<u64>,
+    pub len: usize,
+}
+impl BitVec {
+    fn new() -> Self {
+        BitVec {
+            bits: Vec::new(),
+            len: 0,
+        }
+    }
+    #[inline]
+    fn push(&mut self, v: bool) {
+        if self.len % 64 == 0 {
+            self.bits.push(0);
+        }
+        if v {
+            let w = self.len / 64;
+            self.bits[w] |= 1u64 << (self.len % 64);
+        }
+        self.len += 1;
+    }
+    fn extend(&mut self, other: &BitVec) {
+        for i in 0..other.len {
+            let w = i / 64;
+            let bit = (other.bits[w] >> (i % 64)) & 1 == 1;
+            self.push(bit);
+        }
+    }
+    #[inline]
+    pub fn get(&self, i: usize) -> bool {
+        if i >= self.len {
+            return false;
+        }
+        (self.bits[i / 64] >> (i % 64)) & 1 == 1
+    }
+}
+
+pub(crate) struct Dict {
+    map: std::collections::HashMap<Box<[u8]>, u32>,
+    offsets: Vec<usize>,
+    bytes: Vec<u8>,
+}
+impl Dict {
+    fn new() -> Self {
+        Dict {
+            map: std::collections::HashMap::new(),
+            offsets: vec![0],
+            bytes: Vec::new(),
+        }
+    }
+    #[inline]
+    fn intern(&mut self, key: &[u8]) -> u32 {
+        if let Some(&id) = self.map.get(key) {
+            return id;
+        }
+        let id = (self.offsets.len() - 1) as u32;
+        self.bytes.extend_from_slice(key);
+        self.offsets.push(self.bytes.len());
+        self.map.insert(key.into(), id);
+        id
+    }
+    /// Resolve an interned id. Returns empty slice if `id` is out of range
+    /// (defensive — Dict ids are always produced by [`Dict::intern`]).
+    #[inline]
+    pub fn resolve(&self, id: u32) -> &[u8] {
+        self.try_resolve(id).unwrap_or(b"")
+    }
+    #[inline]
+    fn try_resolve(&self, id: u32) -> Option<&[u8]> {
+        let i = id as usize;
+        if i + 1 >= self.offsets.len() {
+            return None;
+        }
+        Some(&self.bytes[self.offsets[i]..self.offsets[i + 1]])
+    }
+    fn ndistinct(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
+    }
+    pub fn strings(&self) -> Vec<String> {
+        let n = self.ndistinct();
+        (0..n)
+            .map(|i| String::from_utf8_lossy(self.resolve(i as u32)).into_owned())
+            .collect()
+    }
+}
+
+const NULL_IDX: u32 = u32::MAX;
+
+pub(crate) struct StringArena {
+    offsets: Vec<usize>,
+    bytes: Vec<u8>,
+}
+impl StringArena {
+    /// Resolve shared-string index `id`. Returns `None` when the index is past
+    /// the SST (corrupt / truncated sharedStrings.xml) so callers can null the cell.
+    #[inline]
+    pub fn try_resolve(&self, id: u32) -> Option<&[u8]> {
+        let i = id as usize;
+        if i + 1 >= self.offsets.len() {
+            return None;
+        }
+        Some(&self.bytes[self.offsets[i]..self.offsets[i + 1]])
+    }
+}
+
+pub(crate) fn parse_shared_strings(xml: &[u8]) -> StringArena {
+    let mut offsets = vec![0usize];
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut scratch: Vec<u8> = Vec::new();
+    let mut i = memchr::memmem::find(xml, b"<sst").unwrap_or(0);
+    let end = xml.len();
+    while let Some(so) = memchr::memmem::find(&xml[i..end], b"<si") {
+        let si_start = i + so;
+        let after = xml.get(si_start + 3).copied().unwrap_or(b'>');
+        if !(after == b' ' || after == b'>' || after == b'/') {
+            i = si_start + 3;
+            continue;
+        }
+        let Some(gt) = memchr::memchr(b'>', &xml[si_start..end]) else {
+            break; // truncated open tag
+        };
+        let si_tag_end = si_start + gt;
+        if si_tag_end == 0 || xml.get(si_tag_end.saturating_sub(1)) == Some(&b'/') {
+            offsets.push(bytes.len());
+            i = si_tag_end + 1;
+            continue;
+        }
+        let si_close = si_tag_end
+            + memchr::memmem::find(&xml[si_tag_end..end], b"</si>").unwrap_or(end - si_tag_end);
+        let mut p = si_tag_end;
+        while let Some(to) = memchr::memmem::find(&xml[p..si_close], b"<t") {
+            let topen = p + to;
+            let after = xml.get(topen + 2).copied().unwrap_or(b'>');
+            if !(after == b' ' || after == b'>' || after == b'/') {
+                p = topen + 2;
+                continue;
+            }
+            let topen_end =
+                topen + memchr::memchr(b'>', &xml[topen..si_close]).unwrap_or(si_close - topen);
+            if topen_end == 0 || xml.get(topen_end.saturating_sub(1)) == Some(&b'/') {
+                p = topen_end + 1;
+                continue;
+            }
+            let tclose = topen_end
+                + memchr::memmem::find(&xml[topen_end..si_close], b"</t>")
+                    .unwrap_or(si_close - topen_end);
+            if topen_end + 1 > tclose || tclose > xml.len() {
+                break;
+            }
+            let raw = &xml[topen_end + 1..tclose];
+            let decoded = decode(raw, &mut scratch);
+            bytes.extend_from_slice(decoded);
+            p = tclose + 4;
+        }
+        offsets.push(bytes.len());
+        i = si_close + 5;
+    }
+    StringArena { offsets, bytes }
+}
+
+// ----------------------------------------------------------------------------
+enum Column {
+    Unset,
+    Num { v: Vec<f64>, valid: BitVec },
+    Str(Vec<u32>),
+}
+impl Column {
+    #[inline]
+    fn push_num(&mut self, dr: usize, x: f64) {
+        if let Column::Unset = self {
+            *self = Column::Num {
+                v: Vec::new(),
+                valid: BitVec::new(),
+            };
+        }
+        if let Column::Num { v, valid } = self {
+            while v.len() < dr {
+                v.push(f64::NAN);
+                valid.push(false);
+            }
+            v.push(x);
+            valid.push(true);
+        } else if let Column::Str(s) = self {
+            while s.len() < dr {
+                s.push(NULL_IDX);
+            }
+            s.push(NULL_IDX);
+        }
+    }
+    #[inline]
+    fn push_str(&mut self, dr: usize, idx: u32) {
+        if let Column::Unset = self {
+            *self = Column::Str(Vec::new());
+        }
+        if let Column::Str(s) = self {
+            while s.len() < dr {
+                s.push(NULL_IDX);
+            }
+            s.push(idx);
+        } else if let Column::Num { v, valid } = self {
+            while v.len() < dr {
+                v.push(f64::NAN);
+                valid.push(false);
+            }
+            v.push(f64::NAN);
+            valid.push(false);
+        }
+    }
+    #[inline]
+    fn push_null(&mut self, dr: usize) {
+        match self {
+            Column::Unset => {}
+            Column::Num { v, valid } => {
+                while v.len() < dr {
+                    v.push(f64::NAN);
+                    valid.push(false);
+                }
+                v.push(f64::NAN);
+                valid.push(false);
+            }
+            Column::Str(s) => {
+                while s.len() < dr {
+                    s.push(NULL_IDX);
+                }
+                s.push(NULL_IDX);
+            }
+        }
+    }
+    fn pad_to(&mut self, n: usize) {
+        match self {
+            Column::Unset => {}
+            Column::Num { v, valid } => {
+                while v.len() < n {
+                    v.push(f64::NAN);
+                    valid.push(false);
+                }
+            }
+            Column::Str(s) => {
+                while s.len() < n {
+                    s.push(NULL_IDX);
+                }
+            }
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Formula sparse column types
+// ----------------------------------------------------------------------------
+#[derive(Clone, Debug)]
+pub enum FormulaKind {
+    Plain,
+    Shared { si: u32 },
+    Array {
+        r0: u32,
+        c0: u32,
+        r1: u32,
+        c1: u32,
+    },
+    DataTable,
+}
+
+#[derive(Clone, Debug)]
+pub struct FormulaRecord {
+    /// 0-based data-row index (header excluded; sheet row = row + 2 when header present).
+    pub row: u32,
+    /// 0-based column index.
+    pub col: u32,
+    pub kind: FormulaKind,
+}
+
+#[derive(Clone)]
+enum FCell {
+    Plain(u32),
+    Shared(u32),
+    Array {
+        r0: u32,
+        c0: u32,
+        r1: u32,
+        c1: u32,
+        text: u32,
+    },
+    DataTable(u32),
+}
+#[derive(Clone)]
+struct FEntry {
+    row: u32,
+    col: u32,
+    cell: FCell,
+}
+#[derive(Clone)]
+struct AnchorDef {
+    si: u32,
+    text: u32,
+    orow: u32,
+    ocol: u32,
+}
+
+/// One typed Excel error cache (`t="e"`) at a data-row cell.
+///
+/// `row`/`col` are 0-based data indices (header excluded), matching formulas().
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellError {
+    pub row: u32,
+    pub col: u32,
+    /// Error code from the cell's `<v>` payload (e.g. `"#DIV/0!"`).
+    pub code: String,
+}
+
+/// Sparse formula column with lazy shared-formula translation.
+pub struct FormulaColumn {
+    entries: Vec<FEntry>,
+    fdict: Dict,
+    anchors: Vec<AnchorDef>,
+}
+
+impl FormulaColumn {
+    /// Empty formula column (feature requested, sheet has no formulas).
+    pub fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+            fdict: Dict::new(),
+            anchors: Vec::new(),
+        }
+    }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+    pub fn shared_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| matches!(e.cell, FCell::Shared(_)))
+            .count()
+    }
+    pub fn records(&self) -> Vec<FormulaRecord> {
+        self.entries
+            .iter()
+            .map(|e| FormulaRecord {
+                row: e.row,
+                col: e.col,
+                kind: match &e.cell {
+                    FCell::Plain(_) => FormulaKind::Plain,
+                    FCell::Shared(si) => FormulaKind::Shared { si: *si },
+                    FCell::Array {
+                        r0,
+                        c0,
+                        r1,
+                        c1,
+                        ..
+                    } => FormulaKind::Array {
+                        r0: *r0,
+                        c0: *c0,
+                        r1: *r1,
+                        c1: *c1,
+                    },
+                    FCell::DataTable(_) => FormulaKind::DataTable,
+                },
+            })
+            .collect()
+    }
+    fn anchor_by_si(&self) -> Vec<Option<(u32, u32, u32)>> {
+        let maxsi = self
+            .anchors
+            .iter()
+            .map(|a| a.si)
+            .max()
+            .map(|m| m as usize + 1)
+            .unwrap_or(0);
+        let mut v = vec![None; maxsi];
+        for a in &self.anchors {
+            v[a.si as usize] = Some((a.text, a.orow, a.ocol));
+        }
+        v
+    }
+    fn formula_string(&self, e: &FEntry, anchor_by_si: &[Option<(u32, u32, u32)>]) -> String {
+        match &e.cell {
+            FCell::Plain(id) => String::from_utf8_lossy(self.fdict.resolve(*id)).into_owned(),
+            FCell::Array { text, .. } => {
+                String::from_utf8_lossy(self.fdict.resolve(*text)).into_owned()
+            }
+            FCell::DataTable(id) => String::from_utf8_lossy(self.fdict.resolve(*id)).into_owned(),
+            // Shared formula with no anchor (orphan `si=`) degrades to empty text.
+            FCell::Shared(si) => match anchor_by_si.get(*si as usize).and_then(|o| *o) {
+                Some((tid, orow, ocol)) => {
+                    let anchor = self.fdict.resolve(tid);
+                    let atext = std::str::from_utf8(anchor).unwrap_or("");
+                    formula::translate_body(
+                        atext,
+                        e.row as i32 - orow as i32,
+                        e.col as i32 - ocol as i32,
+                    )
+                }
+                None => String::new(),
+            },
+        }
+    }
+    /// Translate the formula at data-row/col (0-based, header excluded).
+    pub fn translate(&self, row: u32, col: u32) -> Option<String> {
+        let abs = self.anchor_by_si();
+        self.entries
+            .iter()
+            .find(|e| e.row == row && e.col == col)
+            .map(|e| self.formula_string(e, &abs))
+    }
+    /// Materialize every formula string (rayon-parallel).
+    pub fn materialize_all(&self) -> Vec<String> {
+        use rayon::prelude::*;
+        let abs = self.anchor_by_si();
+        self.entries
+            .par_iter()
+            .map(|e| self.formula_string(e, &abs))
+            .collect()
+    }
+
+    /// One-pass export rows: (row, col, kind tag, text, array ref A1).
+    /// Avoids a second `records()` allocation over the same entries.
+    pub fn materialize_export_rows(&self) -> Vec<(u32, u32, &'static str, String, Option<String>)> {
+        use rayon::prelude::*;
+        let abs = self.anchor_by_si();
+        self.entries
+            .par_iter()
+            .map(|e| {
+                let kind = match &e.cell {
+                    FCell::Plain(_) => "plain",
+                    FCell::Shared(_) => "shared",
+                    FCell::Array { .. } => "array",
+                    FCell::DataTable(_) => "dataTable",
+                };
+                let text = self.formula_string(e, &abs);
+                let ref_a1 = match &e.cell {
+                    FCell::Array {
+                        r0, c0, r1, c1, ..
+                    } => {
+                        let range = CellRange {
+                            r0: *r0,
+                            c0: *c0,
+                            r1: *r1,
+                            c1: *c1,
+                        };
+                        Some(super::range_a1(&range))
+                    }
+                    _ => None,
+                };
+                (e.row, e.col, kind, text, ref_a1)
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ScanFeat {
+    pub styles: bool,
+    pub formulas: bool,
+    /// Capture sparse row dimensions from `<row>` attrs (Stream A; zero extra pass).
+    pub row_meta: bool,
+}
+
+pub(crate) struct Partial {
+    pub header: Vec<Vec<u8>>,
+    cols: Vec<Column>,
+    dict: Dict,
+    pub nrows: usize,
+    pub ncols: usize,
+    /// Absolute 0-based data-row index of local row 0 (header excluded).
+    /// Enables correct merge across rayon chunks when sheet row `@r` is honored.
+    pub abs_start: usize,
+    pub style_cols: Vec<Vec<u32>>,
+    fentries: Vec<FEntry>,
+    fdict: Dict,
+    anchors: Vec<AnchorDef>,
+    /// Sparse `t="e"` error caches (always collected on the value path).
+    pub cell_errors: Vec<CellError>,
+    /// Sparse row dimensions (only when `ScanFeat.row_meta`).
+    pub row_dims: Vec<super::meta::RowDim>,
+}
+
+impl Partial {
+    pub fn take_formula_column(&mut self) -> FormulaColumn {
+        FormulaColumn {
+            entries: std::mem::take(&mut self.fentries),
+            fdict: std::mem::replace(&mut self.fdict, Dict::new()),
+            anchors: std::mem::take(&mut self.anchors),
+        }
+    }
+    /// Convert value columns to Arrow arrays; consumes column buffers.
+    pub fn into_arrow_columns(
+        mut self,
+    ) -> TurboResult<(
+        Vec<String>,
+        Vec<arrow_array::ArrayRef>,
+        Option<Vec<arrow_array::UInt32Array>>,
+        Option<FormulaColumn>,
+        Vec<CellError>,
+        usize,
+        usize,
+    )> {
+        use arrow_array::builder::Float64Builder;
+        use arrow_array::types::Int32Type;
+        use arrow_array::{ArrayRef, Float64Array, UInt32Array};
+        use std::sync::Arc;
+
+        let nrows = self.nrows;
+        let ncols = self.ncols;
+        let header: Vec<String> = (0..ncols)
+            .map(|c| {
+                self.header
+                    .get(c)
+                    .map(|h| String::from_utf8_lossy(h).into_owned())
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        let style_cols = if self.style_cols.is_empty() {
+            None
+        } else {
+            let mut out = Vec::with_capacity(ncols);
+            for c in 0..ncols {
+                let mut sc = if c < self.style_cols.len() {
+                    std::mem::take(&mut self.style_cols[c])
+                } else {
+                    Vec::new()
+                };
+                while sc.len() < nrows {
+                    sc.push(0);
+                }
+                out.push(UInt32Array::from(sc));
+            }
+            Some(out)
+        };
+
+        let formulas = if self.fentries.is_empty() && self.anchors.is_empty() {
+            None
+        } else {
+            Some(self.take_formula_column())
+        };
+
+        let cell_errors = std::mem::take(&mut self.cell_errors);
+
+        // One shared dictionary values array for all Str columns on this sheet.
+        // Column keys index into Partial.dict (sheet-local intern pool); cloning
+        // the Arc is a refcount bump — not a full copy of the string pool.
+        let dict_values: ArrayRef =
+            Arc::new(arrow_array::StringArray::from(self.dict.strings()));
+        let mut columns: Vec<ArrayRef> = Vec::with_capacity(ncols);
+
+        for c in 0..ncols {
+            let col = if c < self.cols.len() {
+                std::mem::replace(&mut self.cols[c], Column::Unset)
+            } else {
+                Column::Unset
+            };
+            match col {
+                Column::Num { v, valid } => {
+                    let mut b = Float64Builder::with_capacity(nrows);
+                    for i in 0..nrows {
+                        if i < valid.len && valid.get(i) {
+                            b.append_value(v[i]);
+                        } else {
+                            b.append_null();
+                        }
+                    }
+                    columns.push(Arc::new(b.finish()) as ArrayRef);
+                }
+                Column::Str(ids) => {
+                    let keys: Vec<Option<i32>> = (0..nrows)
+                        .map(|i| {
+                            let id = ids.get(i).copied().unwrap_or(NULL_IDX);
+                            if id == NULL_IDX {
+                                None
+                            } else {
+                                Some(id as i32)
+                            }
+                        })
+                        .collect();
+                    let key_arr = arrow_array::Int32Array::from(keys);
+                    let dict = arrow_array::DictionaryArray::<Int32Type>::try_new(
+                        key_arr,
+                        Arc::clone(&dict_values),
+                    )
+                    .map_err(|e| TurboError::Arrow(e.to_string()))?;
+                    columns.push(Arc::new(dict) as ArrayRef);
+                }
+                Column::Unset => {
+                    let arr = Float64Array::from(vec![None::<f64>; nrows]);
+                    columns.push(Arc::new(arr) as ArrayRef);
+                }
+            }
+        }
+
+        Ok((
+            header,
+            columns,
+            style_cols,
+            formulas,
+            cell_errors,
+            nrows,
+            ncols,
+        ))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CellType {
+    Num,
+    Inline,
+    Shared,
+    StrVal,
+    Bool,
+    Err,
+}
+
+// ----------------------------------------------------------------------------
+// Cell / row @r helpers (honor sparse coordinates; sequential when absent)
+// ----------------------------------------------------------------------------
+
+/// Parse column letters from a cell ref payload starting at the first letter
+/// (e.g. `A1...` or `BC12...`) → 0-based column index.
+#[inline]
+fn col_from_ref_bytes(bytes: &[u8]) -> Option<usize> {
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+        i += 1;
+    }
+    if i == 0 {
+        return None;
+    }
+    let col1 = formula::letters_to_index(&bytes[..i])?;
+    Some((col1 - 1) as usize)
+}
+
+/// Parse `r="A1"` (or ` r="A1"`) from a `<c ...>` attribute blob → 0-based col.
+/// Fast path: when refs are contiguous the caller still just uses this col, which
+/// equals the sequential counter — no extra gap logic.
+#[inline]
+fn parse_cell_col_from_r(tag: &[u8]) -> Option<usize> {
+    // Prefer ` r="` (normal OOXML); also accept leading `r="` at start of tag.
+    let vs = if let Some(o) = memchr::memmem::find(tag, b" r=\"") {
+        o + 4
+    } else if tag.starts_with(b"r=\"") {
+        3
+    } else if let Some(o) = memchr::memmem::find(tag, b"r=\"") {
+        // Guard: attribute name must be exactly `r`, not `xr` / `pr` etc.
+        if o > 0 {
+            let p = tag[o - 1];
+            if p.is_ascii_alphanumeric() || p == b'_' {
+                return None;
+            }
+        }
+        o + 3
+    } else {
+        return None;
+    };
+    col_from_ref_bytes(&tag[vs..])
+}
+
+/// Parse `r="12"` from a `<row ...>` open tag → 1-based sheet row number.
+#[inline]
+fn parse_row_r_attr(row_tag: &[u8]) -> Option<u32> {
+    let vs = if let Some(o) = memchr::memmem::find(row_tag, b" r=\"") {
+        o + 4
+    } else if row_tag.starts_with(b"r=\"") {
+        3
+    } else if let Some(o) = memchr::memmem::find(row_tag, b"r=\"") {
+        if o > 0 {
+            let p = row_tag[o - 1];
+            if p.is_ascii_alphanumeric() || p == b'_' {
+                return None;
+            }
+        }
+        o + 3
+    } else {
+        return None;
+    };
+    let ve = vs + memchr::memchr(b'"', &row_tag[vs..]).unwrap_or(row_tag.len() - vs);
+    atoi(&row_tag[vs..ve])
+}
+
+/// Sheet row (1-based) → 0-based data-row index under the turbo convention that
+/// spreadsheet row 1 is the header (when the first chunk consumes a header).
+#[inline]
+fn sheet_row_to_data_row(sheet_row: u32) -> usize {
+    (sheet_row as usize).saturating_sub(2)
+}
+
+// ----------------------------------------------------------------------------
+// Core scanner
+// ----------------------------------------------------------------------------
+fn parse_region(
+    x: &[u8],
+    lo: usize,
+    hi: usize,
+    has_header: bool,
+    shared: Option<&StringArena>,
+    feat: ScanFeat,
+) -> Partial {
+    let mut cols: Vec<Column> = Vec::new();
+    let mut style_cols: Vec<Vec<u32>> = Vec::new();
+    let mut header: Vec<Vec<u8>> = Vec::new();
+    let mut dict = Dict::new();
+    let mut fdict = Dict::new();
+    let mut fentries: Vec<FEntry> = Vec::new();
+    let mut anchors: Vec<AnchorDef> = Vec::new();
+    let mut cell_errors: Vec<CellError> = Vec::new();
+    let mut row_dims: Vec<super::meta::RowDim> = Vec::new();
+    let mut scratch: Vec<u8> = Vec::new();
+    let mut fscratch: Vec<u8> = Vec::new();
+    let mut ncols = 0usize;
+
+    // Local data-row cursor (0-based within this partial). Absolute data-row =
+    // abs_start + dr. abs_start is fixed from the first data row's sheet `@r`
+    // (or 0 when `@r` is absent — sequential fallback).
+    let mut dr = 0usize;
+    let mut abs_start = 0usize;
+    let mut abs_start_set = false;
+    let mut first_row = true;
+    let mut i = lo;
+
+    /// Advance local `dr` to the absolute data-row for this sheet row, padding
+    /// gaps. Returns the absolute data-row index used for formula/error coords.
+    #[inline]
+    fn align_data_row(
+        sheet_row: Option<u32>,
+        dr: &mut usize,
+        abs_start: &mut usize,
+        abs_start_set: &mut bool,
+        cols: &mut [Column],
+        style_cols: &mut [Vec<u32>],
+        feat: ScanFeat,
+    ) -> u32 {
+        let abs = if let Some(sr) = sheet_row {
+            let a = sheet_row_to_data_row(sr);
+            if !*abs_start_set {
+                *abs_start = a;
+                *abs_start_set = true;
+            }
+            a
+        } else {
+            // No row @r: sequential packing from abs_start (0 if unset).
+            if !*abs_start_set {
+                *abs_start = 0;
+                *abs_start_set = true;
+            }
+            *abs_start + *dr
+        };
+        let target_local = abs.saturating_sub(*abs_start);
+        if target_local > *dr {
+            for c in cols.iter_mut() {
+                c.pad_to(target_local);
+            }
+            if feat.styles {
+                for sc in style_cols.iter_mut() {
+                    while sc.len() < target_local {
+                        sc.push(0);
+                    }
+                }
+            }
+            *dr = target_local;
+        } else if target_local < *dr {
+            // Out-of-order rows (rare): snap back so we write the right local slot.
+            *dr = target_local;
+        }
+        abs as u32
+    }
+
+    while i < hi {
+        let roff = match memchr::memmem::find(&x[i..hi], b"<row") {
+            Some(o) => i + o,
+            None => break,
+        };
+        // Ensure it's <row ...> not <rows
+        let after_row = x.get(roff + 4).copied().unwrap_or(b'>');
+        if !(after_row == b' ' || after_row == b'>' || after_row == b'/') {
+            i = roff + 4;
+            continue;
+        }
+        let rtag_end = roff + memchr::memchr(b'>', &x[roff..hi]).unwrap_or(hi - roff);
+        if rtag_end <= roff + 1 || rtag_end > x.len() {
+            break; // truncated <row open tag
+        }
+        let row_self_closing = x.get(rtag_end.saturating_sub(1)) == Some(&b'/');
+        let row_tag = &x[roff + 4..rtag_end];
+        let sheet_row = parse_row_r_attr(row_tag);
+        let is_header = has_header && first_row;
+        first_row = false;
+
+        // Stream A: capture interesting row attrs once per `<row>` (no per-cell alloc).
+        if feat.row_meta {
+            if let Some(rd) = super::meta::parse_row_dim(row_tag, sheet_row) {
+                row_dims.push(rd);
+            }
+        }
+
+        if row_self_closing {
+            if !is_header {
+                let _abs = align_data_row(
+                    sheet_row,
+                    &mut dr,
+                    &mut abs_start,
+                    &mut abs_start_set,
+                    &mut cols,
+                    &mut style_cols,
+                    feat,
+                );
+                for c in cols.iter_mut() {
+                    c.pad_to(dr + 1);
+                }
+                if feat.styles {
+                    for sc in style_cols.iter_mut() {
+                        while sc.len() < dr + 1 {
+                            sc.push(0);
+                        }
+                    }
+                }
+                dr += 1;
+            }
+            i = rtag_end + 1;
+            continue;
+        }
+
+        let row_close_rel =
+            memchr::memmem::find(&x[rtag_end..hi], b"</row>").unwrap_or(hi - rtag_end);
+        let cells_end = rtag_end + row_close_rel;
+
+        // For data rows, align local dr to sheet @r before reading cells.
+        let abs_row: u32 = if !is_header {
+            align_data_row(
+                sheet_row,
+                &mut dr,
+                &mut abs_start,
+                &mut abs_start_set,
+                &mut cols,
+                &mut style_cols,
+                feat,
+            )
+        } else {
+            0
+        };
+
+        let mut ci = rtag_end + 1;
+        // Sequential column cursor; overridden by cell @r when present.
+        let mut next_col = 0usize;
+        while ci < cells_end {
+            let coff = match memchr::memmem::find(&x[ci..cells_end], b"<c") {
+                Some(o) => ci + o,
+                None => break,
+            };
+            let after = x.get(coff + 2).copied().unwrap_or(0);
+            if !(after == b' ' || after == b'>' || after == b'/') {
+                ci = coff + 2;
+                continue;
+            }
+            let ctag_end = coff + memchr::memchr(b'>', &x[coff..hi]).unwrap_or(hi - coff);
+            if ctag_end <= coff + 1 || ctag_end > x.len() {
+                break; // truncated cell open tag
+            }
+            let self_closing = x.get(ctag_end.saturating_sub(1)) == Some(&b'/');
+            let tag = &x[coff + 2..ctag_end];
+
+            // Honor @r when present (sparse rows); else sequential XML order.
+            let col = if let Some(c) = parse_cell_col_from_r(tag) {
+                c
+            } else {
+                next_col
+            };
+            next_col = col + 1;
+
+            let ctype = match memchr::memmem::find(tag, b" t=\"") {
+                Some(o) => {
+                    let vs = o + 4;
+                    let ve = vs + memchr::memchr(b'"', &tag[vs..]).unwrap_or(tag.len() - vs);
+                    match &tag[vs..ve] {
+                        b"inlineStr" => CellType::Inline,
+                        b"s" => CellType::Shared,
+                        b"str" => CellType::StrVal,
+                        b"b" => CellType::Bool,
+                        b"e" => CellType::Err,
+                        _ => CellType::Num,
+                    }
+                }
+                None => CellType::Num,
+            };
+
+            let sidx: u32 = if feat.styles {
+                match memchr::memmem::find(tag, b" s=\"") {
+                    Some(o) => {
+                        let vs = o + 4;
+                        let ve = vs + memchr::memchr(b'"', &tag[vs..]).unwrap_or(tag.len() - vs);
+                        atoi(&tag[vs..ve]).unwrap_or(0)
+                    }
+                    None => 0,
+                }
+            } else {
+                0
+            };
+
+            if col >= cols.len() {
+                cols.resize_with(col + 1, || Column::Unset);
+            }
+            if feat.styles && col >= style_cols.len() {
+                style_cols.resize_with(col + 1, Vec::new);
+            }
+
+            if !is_header && feat.styles {
+                let sc = &mut style_cols[col];
+                while sc.len() < dr {
+                    sc.push(0);
+                }
+                // Sparse mid-row: may write style for col C before A is touched.
+                if sc.len() == dr {
+                    sc.push(sidx);
+                } else if sc.len() > dr {
+                    sc[dr] = sidx;
+                } else {
+                    sc.push(sidx);
+                }
+            }
+
+            if self_closing {
+                if !is_header {
+                    cols[col].push_null(dr);
+                }
+                if col + 1 > ncols {
+                    ncols = col + 1;
+                }
+                ci = ctag_end + 1;
+                continue;
+            }
+
+            let cclose_rel = if ctag_end < hi {
+                memchr::memmem::find(&x[ctag_end..hi], b"</c>").unwrap_or(hi - ctag_end)
+            } else {
+                0
+            };
+            let cend = (ctag_end + cclose_rel).min(x.len());
+            if ctag_end + 1 > cend {
+                ci = ctag_end + 1;
+                continue;
+            }
+            let content = &x[ctag_end + 1..cend];
+
+            if feat.formulas && !is_header {
+                if let Some(fo) = memchr::memmem::find(content, b"<f") {
+                    let fafter = content.get(fo + 2).copied().unwrap_or(b'>');
+                    if fafter == b' ' || fafter == b'>' || fafter == b'/' {
+                        let ftag_end =
+                            fo + memchr::memchr(b'>', &content[fo..]).unwrap_or(content.len() - fo);
+                        if ftag_end <= fo + 1 || ftag_end > content.len() {
+                            // truncated <f ...
+                        } else {
+                        let ftag = &content[fo + 2..ftag_end];
+                        let f_self_closing =
+                            content.get(ftag_end.saturating_sub(1)) == Some(&b'/');
+                        let fattr = |name: &[u8]| -> Option<&[u8]> {
+                            let mut pat = Vec::with_capacity(name.len() + 3);
+                            pat.push(b' ');
+                            pat.extend_from_slice(name);
+                            pat.extend_from_slice(b"=\"");
+                            let p = memchr::memmem::find(ftag, &pat)?;
+                            let vs = p + pat.len();
+                            let ve = vs + memchr::memchr(b'"', &ftag[vs..])?;
+                            Some(&ftag[vs..ve])
+                        };
+                        let ftype = fattr(b"t");
+                        let ftext: &[u8] = if f_self_closing {
+                            b""
+                        } else {
+                            let te = memchr::memmem::find(&content[ftag_end..], b"</f>")
+                                .map(|o| ftag_end + o)
+                                .unwrap_or(content.len());
+                            &content[ftag_end + 1..te]
+                        };
+                        let decoded = decode(ftext, &mut fscratch).to_vec();
+                        match ftype {
+                            None => {
+                                let id = fdict.intern(&decoded);
+                                fentries.push(FEntry {
+                                    row: abs_row,
+                                    col: col as u32,
+                                    cell: FCell::Plain(id),
+                                });
+                            }
+                            Some(b"shared") => {
+                                let si = fattr(b"si").and_then(atoi).unwrap_or(0);
+                                if fattr(b"ref").is_some() {
+                                    let id = fdict.intern(&decoded);
+                                    anchors.push(AnchorDef {
+                                        si,
+                                        text: id,
+                                        orow: abs_row,
+                                        ocol: col as u32,
+                                    });
+                                }
+                                fentries.push(FEntry {
+                                    row: abs_row,
+                                    col: col as u32,
+                                    cell: FCell::Shared(si),
+                                });
+                            }
+                            Some(b"array") => {
+                                let (r0, c0, r1, c1) =
+                                    fattr(b"ref").map(parse_ref_range).unwrap_or((0, 0, 0, 0));
+                                let id = fdict.intern(&decoded);
+                                fentries.push(FEntry {
+                                    row: abs_row,
+                                    col: col as u32,
+                                    cell: FCell::Array {
+                                        r0,
+                                        c0,
+                                        r1,
+                                        c1,
+                                        text: id,
+                                    },
+                                });
+                            }
+                            Some(b"dataTable") => {
+                                let id = fdict.intern(ftag);
+                                fentries.push(FEntry {
+                                    row: abs_row,
+                                    col: col as u32,
+                                    cell: FCell::DataTable(id),
+                                });
+                            }
+                            Some(_) => {
+                                let id = fdict.intern(&decoded);
+                                fentries.push(FEntry {
+                                    row: abs_row,
+                                    col: col as u32,
+                                    cell: FCell::Plain(id),
+                                });
+                            }
+                        }
+                        } // end non-truncated f tag
+                    }
+                }
+            }
+
+            match ctype {
+                CellType::Shared => {
+                    let idx = if let Some(vo) = memchr::memmem::find(content, b"<v>") {
+                        let vs = vo + 3;
+                        let ve = memchr::memmem::find(&content[vs..], b"</v>")
+                            .map(|o| vs + o)
+                            .unwrap_or(content.len());
+                        atoi(&content[vs..ve])
+                    } else {
+                        None
+                    };
+                    // OOB shared-string index → null cell (never panic).
+                    let resolved: Option<&[u8]> = match (idx, shared) {
+                        (Some(i), Some(a)) => a.try_resolve(i),
+                        _ => None,
+                    };
+                    if is_header {
+                        if col >= header.len() {
+                            header.resize_with(col + 1, Vec::new);
+                        }
+                        header[col] = resolved.map(|s| s.to_vec()).unwrap_or_default();
+                    } else {
+                        match resolved {
+                            Some(s) => {
+                                let id = dict.intern(s);
+                                cols[col].push_str(dr, id);
+                            }
+                            None => cols[col].push_null(dr),
+                        }
+                    }
+                }
+                CellType::Inline | CellType::StrVal | CellType::Err => {
+                    let text: &[u8] = if ctype == CellType::Inline {
+                        if let Some(to) = memchr::memmem::find(content, b"<t") {
+                            let topen_end = to
+                                + memchr::memchr(b'>', &content[to..]).unwrap_or(content.len() - to);
+                            if topen_end == 0
+                                || content.get(topen_end.saturating_sub(1)) == Some(&b'/')
+                                || topen_end >= content.len()
+                            {
+                                b""
+                            } else {
+                                let te = memchr::memmem::find(&content[topen_end..], b"</t>")
+                                    .map(|o| topen_end + o)
+                                    .unwrap_or(content.len());
+                                if topen_end < te {
+                                    &content[topen_end + 1..te]
+                                } else {
+                                    b""
+                                }
+                            }
+                        } else {
+                            b""
+                        }
+                    } else if let Some(vo) = memchr::memmem::find(content, b"<v>") {
+                        let vs = vo + 3;
+                        let ve = memchr::memmem::find(&content[vs..], b"</v>")
+                            .map(|o| vs + o)
+                            .unwrap_or(content.len());
+                        &content[vs..ve]
+                    } else {
+                        b""
+                    };
+                    let decoded = decode(text, &mut scratch);
+                    if is_header {
+                        if col >= header.len() {
+                            header.resize_with(col + 1, Vec::new);
+                        }
+                        header[col] = decoded.to_vec();
+                    } else {
+                        // Typed error caches: always record sparsely. Value columns may
+                        // still show the code when the column is string-typed, or null
+                        // when mixed into a numeric column (push_str → null on Num).
+                        if ctype == CellType::Err {
+                            cell_errors.push(CellError {
+                                row: abs_row,
+                                col: col as u32,
+                                code: String::from_utf8_lossy(decoded).into_owned(),
+                            });
+                        }
+                        let id = dict.intern(decoded);
+                        cols[col].push_str(dr, id);
+                    }
+                }
+                CellType::Num | CellType::Bool => {
+                    let val = if let Some(vo) = memchr::memmem::find(content, b"<v>") {
+                        let vs = vo + 3;
+                        let ve = memchr::memmem::find(&content[vs..], b"</v>")
+                            .map(|o| vs + o)
+                            .unwrap_or(content.len());
+                        let raw = &content[vs..ve];
+                        if raw.is_empty() {
+                            None
+                        } else {
+                            fast_float2::parse::<f64, _>(raw).ok()
+                        }
+                    } else {
+                        None
+                    };
+                    if is_header {
+                        if col >= header.len() {
+                            header.resize_with(col + 1, Vec::new);
+                        }
+                        header[col] = val.map(|v| v.to_string().into_bytes()).unwrap_or_default();
+                    } else {
+                        match val {
+                            Some(v) => cols[col].push_num(dr, v),
+                            None => cols[col].push_null(dr),
+                        }
+                    }
+                }
+            }
+
+            if col + 1 > ncols {
+                ncols = col + 1;
+            }
+            ci = cend + 4;
+        }
+
+        if header.len() > ncols {
+            ncols = header.len();
+        }
+        if !is_header {
+            for c in cols.iter_mut() {
+                c.pad_to(dr + 1);
+            }
+            if feat.styles {
+                for sc in style_cols.iter_mut() {
+                    while sc.len() < dr + 1 {
+                        sc.push(0);
+                    }
+                }
+            }
+            dr += 1;
+        }
+        i = cells_end + 6;
+    }
+
+    for c in cols.iter_mut() {
+        c.pad_to(dr);
+    }
+    if feat.styles {
+        for sc in style_cols.iter_mut() {
+            while sc.len() < dr {
+                sc.push(0);
+            }
+        }
+    }
+    // Formula/error rows are already absolute; remap to local for storage only when
+    // abs_start > 0 so merge can re-base. Keep absolute in entries (merge uses them
+    // as absolute when abs_start is set on the partial).
+    Partial {
+        header,
+        cols,
+        dict,
+        nrows: dr,
+        ncols,
+        abs_start: if abs_start_set { abs_start } else { 0 },
+        style_cols,
+        fentries,
+        fdict,
+        anchors,
+        cell_errors,
+        row_dims,
+    }
+}
+
+/// Parse "C2:D5" (or "C2") -> (r0,c0,r1,c1); rows/cols 0-based sheet coordinates.
+pub(crate) fn parse_ref_range(refr: &[u8]) -> (u32, u32, u32, u32) {
+    let s = std::str::from_utf8(refr).unwrap_or("");
+    let parse_one = |a: &str| -> (u32, u32) {
+        let bytes = a.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+            i += 1;
+        }
+        let col = formula::letters_to_index(&bytes[..i]).unwrap_or(1) - 1;
+        let row: u32 = a[i..].parse().unwrap_or(1);
+        (row.saturating_sub(1), col)
+    };
+    if let Some((a, b)) = s.split_once(':') {
+        let (r0, c0) = parse_one(a);
+        let (r1, c1) = parse_one(b);
+        (r0, c0, r1, c1)
+    } else {
+        let (r0, c0) = parse_one(s);
+        (r0, c0, r0, c0)
+    }
+}
+
+pub(crate) fn sheet_data_region(x: &[u8]) -> TurboResult<(usize, usize)> {
+    let sd = memchr::memmem::find(x, b"<sheetData").ok_or_else(|| {
+        TurboError::Format("missing <sheetData> in worksheet".into())
+    })?;
+    let gt = memchr::memchr(b'>', &x[sd..]).ok_or_else(|| {
+        TurboError::Format("unclosed <sheetData".into())
+    })?;
+    let start = sd + gt + 1;
+    // Self-closing <sheetData/>
+    if x[sd + gt - 1] == b'/' {
+        return Ok((start, start));
+    }
+    let end = memchr::memmem::find(&x[start..], b"</sheetData>")
+        .map(|o| start + o)
+        .unwrap_or(x.len());
+    Ok((start, end))
+}
+
+pub(crate) fn parse_parallel(
+    xml: &[u8],
+    nchunks: usize,
+    shared: Option<&StringArena>,
+    feat: ScanFeat,
+) -> TurboResult<Partial> {
+    use rayon::prelude::*;
+    let (s, e) = sheet_data_region(xml)?;
+    let mut bounds = vec![s];
+    if nchunks > 1 {
+        for k in 1..nchunks {
+            let target = s + (e - s) * k / nchunks;
+            if let Some(o) = memchr::memmem::find(&xml[target..e], b"<row") {
+                let b = target + o;
+                if b > *bounds.last().unwrap() && b < e {
+                    bounds.push(b);
+                }
+            }
+        }
+    }
+    bounds.push(e);
+    let ranges: Vec<(usize, usize, bool)> = (0..bounds.len() - 1)
+        .map(|k| (bounds[k], bounds[k + 1], k == 0))
+        .collect();
+    let partials: Vec<Partial> = ranges
+        .par_iter()
+        .map(|&(lo, hi, has_header)| parse_region(xml, lo, hi, has_header, shared, feat))
+        .collect();
+    Ok(merge_partials(partials, feat))
+}
+
+fn merge_partials(mut partials: Vec<Partial>, feat: ScanFeat) -> Partial {
+    if partials.is_empty() {
+        return Partial {
+            header: Vec::new(),
+            cols: Vec::new(),
+            dict: Dict::new(),
+            nrows: 0,
+            ncols: 0,
+            abs_start: 0,
+            style_cols: Vec::new(),
+            fentries: Vec::new(),
+            fdict: Dict::new(),
+            anchors: Vec::new(),
+            cell_errors: Vec::new(),
+            row_dims: Vec::new(),
+        };
+    }
+    let ncols = partials.iter().map(|p| p.ncols).max().unwrap_or(0);
+    let header = std::mem::take(&mut partials[0].header);
+
+    // Sort by absolute start so we can pad gaps then extend (chunks partition the sheet).
+    // When every abs_start is 0 (no row @r), assign concatenate bases in original order.
+    let any_abs = partials.iter().any(|p| p.abs_start > 0);
+    let mut order: Vec<usize> = (0..partials.len()).collect();
+    if any_abs {
+        order.sort_by_key(|&i| partials[i].abs_start);
+    }
+    let mut starts: Vec<usize> = vec![0; partials.len()];
+    if any_abs {
+        for &i in &order {
+            starts[i] = partials[i].abs_start;
+        }
+    } else {
+        let mut run = 0usize;
+        for &i in &order {
+            starts[i] = run;
+            run += partials[i].nrows;
+        }
+    }
+    let total_rows = order
+        .iter()
+        .map(|&i| starts[i] + partials[i].nrows)
+        .max()
+        .unwrap_or(0);
+
+    let mut gdict = Dict::new();
+    let mut gcols: Vec<Column> = (0..ncols).map(|_| Column::Unset).collect();
+    let mut gstyle: Vec<Vec<u32>> = if feat.styles {
+        (0..ncols).map(|_| Vec::new()).collect()
+    } else {
+        Vec::new()
+    };
+    let mut gfdict = Dict::new();
+    let mut gfentries: Vec<FEntry> = Vec::new();
+    let mut ganchors: Vec<AnchorDef> = Vec::new();
+    let mut gerrors: Vec<CellError> = Vec::new();
+    let mut grow_dims: Vec<super::meta::RowDim> = Vec::new();
+
+    for &i in &order {
+        let p = &partials[i];
+        let base = starts[i];
+        let remap: Vec<u32> = {
+            let nd = p.dict.ndistinct();
+            let mut r = vec![0u32; nd];
+            for id in 0..nd {
+                r[id] = gdict.intern(p.dict.resolve(id as u32));
+            }
+            r
+        };
+        for c in 0..ncols {
+            match p.cols.get(c) {
+                Some(Column::Num { v, valid }) => {
+                    if let Column::Unset = gcols[c] {
+                        gcols[c] = Column::Num {
+                            v: Vec::new(),
+                            valid: BitVec::new(),
+                        };
+                    }
+                    if let Column::Num { v: gv, valid: gvalid } = &mut gcols[c] {
+                        while gv.len() < base {
+                            gv.push(f64::NAN);
+                            gvalid.push(false);
+                        }
+                        // Contiguous extend (partials don't overlap).
+                        for irow in 0..p.nrows {
+                            if irow < valid.len && valid.get(irow) {
+                                gv.push(v[irow]);
+                                gvalid.push(true);
+                            } else {
+                                gv.push(f64::NAN);
+                                gvalid.push(false);
+                            }
+                        }
+                    }
+                }
+                Some(Column::Str(sidx)) => {
+                    if let Column::Unset = gcols[c] {
+                        gcols[c] = Column::Str(Vec::new());
+                    }
+                    if let Column::Str(gs) = &mut gcols[c] {
+                        while gs.len() < base {
+                            gs.push(NULL_IDX);
+                        }
+                        for irow in 0..p.nrows {
+                            let id = sidx.get(irow).copied().unwrap_or(NULL_IDX);
+                            gs.push(if id == NULL_IDX {
+                                NULL_IDX
+                            } else {
+                                remap[id as usize]
+                            });
+                        }
+                    }
+                }
+                Some(Column::Unset) | None => match &mut gcols[c] {
+                    Column::Num { v, valid } => {
+                        while v.len() < base {
+                            v.push(f64::NAN);
+                            valid.push(false);
+                        }
+                        for _ in 0..p.nrows {
+                            v.push(f64::NAN);
+                            valid.push(false);
+                        }
+                    }
+                    Column::Str(s) => {
+                        while s.len() < base {
+                            s.push(NULL_IDX);
+                        }
+                        for _ in 0..p.nrows {
+                            s.push(NULL_IDX);
+                        }
+                    }
+                    Column::Unset => {}
+                },
+            }
+        }
+        if feat.styles {
+            for c in 0..ncols {
+                while gstyle[c].len() < base {
+                    gstyle[c].push(0);
+                }
+                match p.style_cols.get(c) {
+                    Some(sc) => {
+                        for irow in 0..p.nrows {
+                            gstyle[c].push(sc.get(irow).copied().unwrap_or(0));
+                        }
+                    }
+                    None => {
+                        for _ in 0..p.nrows {
+                            gstyle[c].push(0);
+                        }
+                    }
+                }
+            }
+        }
+        if feat.formulas {
+            let nd = p.fdict.ndistinct();
+            let mut fremap = vec![0u32; nd];
+            for id in 0..nd {
+                fremap[id] = gfdict.intern(p.fdict.resolve(id as u32));
+            }
+            // With sheet @r, formula rows are absolute data indices. Without, local + base.
+            let formula_abs = any_abs;
+            for e in &p.fentries {
+                let cell = match &e.cell {
+                    FCell::Plain(id) => FCell::Plain(fremap[*id as usize]),
+                    FCell::Shared(si) => FCell::Shared(*si),
+                    FCell::Array {
+                        r0,
+                        c0,
+                        r1,
+                        c1,
+                        text,
+                    } => FCell::Array {
+                        r0: *r0,
+                        c0: *c0,
+                        r1: *r1,
+                        c1: *c1,
+                        text: fremap[*text as usize],
+                    },
+                    FCell::DataTable(id) => FCell::DataTable(fremap[*id as usize]),
+                };
+                let row = if formula_abs {
+                    e.row
+                } else {
+                    e.row + base as u32
+                };
+                gfentries.push(FEntry {
+                    row,
+                    col: e.col,
+                    cell,
+                });
+            }
+            for a in &p.anchors {
+                let orow = if formula_abs {
+                    a.orow
+                } else {
+                    a.orow + base as u32
+                };
+                ganchors.push(AnchorDef {
+                    si: a.si,
+                    text: fremap[a.text as usize],
+                    orow,
+                    ocol: a.ocol,
+                });
+            }
+        }
+        let err_abs = any_abs;
+        for e in &p.cell_errors {
+            let row = if err_abs {
+                e.row
+            } else {
+                e.row + base as u32
+            };
+            gerrors.push(CellError {
+                row,
+                col: e.col,
+                code: e.code.clone(),
+            });
+        }
+    }
+    for c in gcols.iter_mut() {
+        c.pad_to(total_rows);
+    }
+    if feat.styles {
+        for c in gstyle.iter_mut() {
+            while c.len() < total_rows {
+                c.push(0);
+            }
+        }
+    }
+    // Merge sparse row dims from all chunks (dedupe by row index, first wins).
+    if feat.row_meta {
+        let mut seen = std::collections::HashSet::new();
+        for &i in &order {
+            for rd in std::mem::take(&mut partials[i].row_dims) {
+                if seen.insert(rd.row) {
+                    grow_dims.push(rd);
+                }
+            }
+        }
+        grow_dims.sort_by_key(|r| r.row);
+    }
+    Partial {
+        header,
+        cols: gcols,
+        dict: gdict,
+        nrows: total_rows,
+        ncols,
+        abs_start: 0,
+        style_cols: gstyle,
+        fentries: gfentries,
+        fdict: gfdict,
+        anchors: ganchors,
+        cell_errors: gerrors,
+        row_dims: grow_dims,
+    }
+}

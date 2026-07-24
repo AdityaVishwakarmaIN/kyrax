@@ -1,0 +1,139 @@
+mod data;
+mod error;
+mod types;
+mod utils;
+#[cfg(feature = "__arrow")]
+pub mod turbo;
+
+use std::fmt::Display;
+
+/// Global allocator: reduces Windows heap fragmentation on repeated large
+/// write alloc/free cycles (cell model + XML buffers + deflate).
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(feature = "python")]
+use error::py_errors;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use types::excelsheet::{CellError, CellErrors};
+
+pub use data::{KyraxColumn, KyraxSeries};
+use error::ErrorContext;
+pub use error::{KyraxError, KyraxErrorKind, KyraxResult};
+pub use types::{
+    ColumnInfo, ColumnNameFrom, DType, DTypeCoercion, DTypeFrom, DTypes, DefinedName, ExcelReader,
+    ExcelSheet, ExcelTable, IdxOrName, LoadSheetOrTableOptions, SelectedColumns, SheetVisible,
+    SkipRows,
+};
+
+/// Reads an excel file and returns an object allowing to access its sheets, tables, and a bit of metadata.
+/// This is a wrapper around `ExcelReader::try_from_path`.
+pub fn read_excel<S: AsRef<str> + Display>(path: S) -> KyraxResult<ExcelReader> {
+    ExcelReader::try_from_path(path.as_ref())
+        .with_context(|| format!("could not load excel file at {path}"))
+}
+
+#[cfg(feature = "python")]
+/// Reads an excel file and returns an object allowing to access its sheets, tables, and a bit of metadata
+#[pyfunction(name = "read_excel")]
+fn py_read_excel<'py>(source: &Bound<'_, PyAny>, py: Python<'py>) -> PyResult<ExcelReader> {
+    use py_errors::IntoPyResult;
+
+    if let Ok(path) = source.extract::<String>() {
+        py.detach(|| ExcelReader::try_from_path(&path))
+            .with_context(|| format!("could not load excel file at {path}"))
+            .into_pyresult()
+    } else if let Ok(bytes) = source.extract::<&[u8]>() {
+        py.detach(|| ExcelReader::try_from(bytes))
+            .with_context(|| "could not load excel file for those bytes")
+            .into_pyresult()
+    } else {
+        Err(py_errors::InvalidParametersError::new_err(
+            "source must be a string or bytes",
+        ))
+    }
+}
+
+// Taken from pydantic-core:
+// https://github.com/pydantic/pydantic-core/blob/main/src/lib.rs#L24
+#[cfg(feature = "python")]
+fn get_python_version() -> String {
+    let version = env!("CARGO_PKG_VERSION").to_string();
+    // cargo uses "1.0-alpha1" etc. while python uses "1.0.0a1", this is not full compatibility,
+    // but it's good enough for now
+    // see https://docs.rs/semver/1.0.9/semver/struct.Version.html#method.parse for rust spec
+    // see https://peps.python.org/pep-0440/ for python spec
+    // it seems the dot after "alpha/beta" e.g. "-alpha.1" is not necessary, hence why this works
+    version.replace("-alpha", "a").replace("-beta", "b")
+}
+
+#[cfg(feature = "python")]
+#[pymodule(gil_used = false)]
+fn _kyrax(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    use crate::types::excelsheet::column_info::{ColumnInfo, ColumnInfoNoDtype};
+
+    pyo3_log::init();
+
+    let py = m.py();
+    m.add_function(wrap_pyfunction!(py_read_excel, m)?)?;
+    m.add_class::<ColumnInfo>()?;
+    m.add_class::<ColumnInfoNoDtype>()?;
+    m.add_class::<DefinedName>()?;
+    m.add_class::<CellError>()?;
+    m.add_class::<CellErrors>()?;
+    m.add_class::<ExcelSheet>()?;
+    m.add_class::<ExcelReader>()?;
+    m.add_class::<ExcelTable>()?;
+
+    // turbo fast-path (read)
+    {
+        use crate::turbo::python::{PyTurboReader, PyTurboSheet, py_read_excel_turbo};
+        m.add_function(wrap_pyfunction!(py_read_excel_turbo, m)?)?;
+        m.add_class::<PyTurboReader>()?;
+        m.add_class::<PyTurboSheet>()?;
+    }
+
+    // turbo write path (W1 silo A core)
+    {
+        use crate::turbo::write::python::{py_write_excel_turbo, py_write_excel_turbo_bytes};
+        m.add_function(wrap_pyfunction!(py_write_excel_turbo, m)?)?;
+        m.add_function(wrap_pyfunction!(py_write_excel_turbo_bytes, m)?)?;
+    }
+
+    m.add("__version__", get_python_version())?;
+
+    // errors
+    [
+        ("KyraxError", py.get_type::<py_errors::KyraxError>()),
+        (
+            "UnsupportedColumnTypeCombinationError",
+            py.get_type::<py_errors::UnsupportedColumnTypeCombinationError>(),
+        ),
+        (
+            "CannotRetrieveCellDataError",
+            py.get_type::<py_errors::CannotRetrieveCellDataError>(),
+        ),
+        (
+            "CalamineCellError",
+            py.get_type::<py_errors::CalamineCellError>(),
+        ),
+        ("CalamineError", py.get_type::<py_errors::CalamineError>()),
+        (
+            "SheetNotFoundError",
+            py.get_type::<py_errors::SheetNotFoundError>(),
+        ),
+        (
+            "ColumnNotFoundError",
+            py.get_type::<py_errors::ColumnNotFoundError>(),
+        ),
+        ("ArrowError", py.get_type::<py_errors::ArrowError>()),
+        (
+            "InvalidParametersError",
+            py.get_type::<py_errors::InvalidParametersError>(),
+        ),
+    ]
+    .into_iter()
+    .try_for_each(|(exc_name, exc_type)| m.add(exc_name, exc_type))
+}
