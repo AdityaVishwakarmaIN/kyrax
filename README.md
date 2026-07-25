@@ -91,13 +91,74 @@ table = reader.load_table("MyTable")
 df = pl.DataFrame(table)  # Zero-copy via PyCapsule, no pyarrow needed
 ```
 
+### Turbo Read (high-performance XLSX reader)
+
+`read_excel_turbo` provides selective feature parsing for high-throughput XLSX loading:
+
+```python
+import kyrax
+
+# Open workbook for turbo reading
+reader = kyrax.read_excel_turbo("data.xlsx")
+
+# Selective loading: values, formulas, styles, merges, comments, etc.
+sheet = reader.load_sheet("Sheet1", features=["values", "styles", "formulas"])
+
+# Access Arrow columns, cell errors, style indices, formulas
+arrow_data = sheet.to_arrow()
+styles = sheet.style_indices()
+formulas = sheet.formulas()
+```
+
+### Turbo Write & Streaming Export
+
+Declarative, high-speed XLSX writing and streaming export:
+
+```python
+import kyrax
+import numpy as np
+
+# Declarative write from sheet dicts or NumPy float grid fast lane
+arr = np.array([[1.0, 2.5], [3.0, 4.25]], dtype=np.float64)
+kyrax.write_excel_turbo("output.xlsx", [{"name": "Data", "grid": arr}])
+
+# Streaming write for large datasets.
+# NOTE: "columns" takes columnar DATA — a list of column arrays, not header
+# names. Headers go in the first entry of "rows".
+kyrax.write_excel_turbo_stream(
+    "large_output.xlsx",
+    [{"name": "Sheet1", "columns": [[1.0, 2.0, 3.0], ["a", "b", "c"]]}]
+)
+```
+
+### Edit Mode (Byte-Preserving Round-Trip)
+
+Modify worksheet cells while preserving non-`<sheetData>` XML structures (`cols`, `mergeCells`, `conditionalFormatting`, `dataValidations`) byte-for-byte:
+
+```python
+import kyrax
+
+# Load workbook in edit mode
+wb = kyrax.load_workbook("existing.xlsx", edit_mode=True)
+ws = wb["Sheet1"]
+
+# Update cell value and apply cell styles
+ws["A1"] = "New Header"
+ws.set_cell_style(0, 0, font={"bold": True, "color": "FF0000"})
+
+# Save byte-preserving changes
+wb.save("existing_updated.xlsx")
+```
+
 ## Key Features
 
 - **Zero-copy data exchange** via [Arrow PyCapsule Interface](https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html)
+- **High-speed Turbo engine** - selective XLSX feature reading (`read_excel_turbo`), declarative writing (`write_excel_turbo`), and streaming (`write_excel_turbo_stream`)
+- **Byte-preserving edit mode** - edit cells while keeping original XML metadata intact (`load_workbook(..., edit_mode=True)`)
 - **Flexible dependencies** - use with Polars (no PyArrow needed) or Pandas (includes PyArrow)
 - **Seamless Polars integration** - `pl.DataFrame(sheet)` and `sheet.to_polars()` work without PyArrow via PyCapsule interface
-- **High performance** - written in Rust with [calamine](https://github.com/tafia/calamine) and [Apache Arrow](https://arrow.apache.org/)
-- **Memory efficient** - lazy loading and optional eager evaluation
+- **High performance** - written in Rust with [calamine](https://github.com/tafia/calamine), [rayon](https://github.com/rayon-rs/rayon), and [Apache Arrow](https://arrow.apache.org/)
+- **Memory efficient** - lazy loading, zero-copy NumPy/PyArrow paths, and optional eager evaluation
 - **Type safety** - automatic type inference with manual override options
 
 ## Contributing & Development

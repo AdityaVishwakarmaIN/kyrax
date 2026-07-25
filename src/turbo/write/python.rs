@@ -4,7 +4,7 @@ use pyo3::{
     Bound, PyAny, PyResult, Python,
     exceptions::PyValueError,
     prelude::*,
-    types::{PyDict, PyList, PyTuple},
+    types::{PyBytes, PyDict, PyList, PyString, PyTuple},
 };
 use std::sync::Arc;
 
@@ -721,6 +721,19 @@ fn py_to_cell_value(obj: &Bound<'_, PyAny>, date1904: bool) -> PyResult<CellValu
     py_to_cell_value_flagged(obj, date1904, None)
 }
 
+fn extract_wrapper_style(obj: &Bound<'_, PyAny>) -> PyResult<Option<Box<StyleDesc>>> {
+    if let Ok(d) = obj.cast::<PyDict>() {
+        if d.get_item("value")?.is_some() {
+            if let Some(s) = d.get_item("style")? {
+                if !s.is_none() {
+                    return Ok(Some(Box::new(parse_style_desc(&s)?)));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn py_to_cell_value_flagged(
     obj: &Bound<'_, PyAny>,
     date1904: bool,
@@ -746,6 +759,16 @@ fn py_to_cell_value_flagged(
     if let Ok(s) = obj.extract::<String>() {
         if s.starts_with('#') && is_excel_error(&s) {
             return Ok(CellValue::Error(s));
+        }
+        // Byte length is an upper bound on char count, so the common case is one
+        // integer compare; only pay for the UTF-8 scan when it could actually trip.
+        if s.len() > 32767 {
+            let n = s.chars().count();
+            if n > 32767 {
+                return Err(PyValueError::new_err(format!(
+                    "cell string is {n} characters; Excel's limit is 32767. Shorten the value or split it across cells."
+                )));
+            }
         }
         return Ok(CellValue::Str(s));
     }
@@ -1064,6 +1087,18 @@ fn columns_to_sheet(
         return Ok(false);
     }
     let col_data: Vec<Bound<'_, PyAny>> = cols.iter().collect();
+    for (i, col) in col_data.iter().enumerate() {
+        if col.is_instance_of::<PyString>() {
+            return Err(PyValueError::new_err(format!(
+                "columns[{i}] is a str; 'columns' takes columnar DATA (a list of column arrays), not header names. A str would be consumed character-by-character. Pass headers as the first entry of 'rows', or wrap this column in a list."
+            )));
+        }
+        if col.is_instance_of::<PyBytes>() {
+            return Err(PyValueError::new_err(format!(
+                "columns[{i}] is a bytes; 'columns' takes columnar DATA (a list of column arrays), not header names. A str would be consumed character-by-character. Pass headers as the first entry of 'rows', or wrap this column in a list."
+            )));
+        }
+    }
     let nrows = col_data[0].len()?;
     for c in &col_data {
         if c.len()? != nrows {
@@ -1071,6 +1106,16 @@ fn columns_to_sheet(
                 "all columns must have the same length",
             ));
         }
+    }
+    if ncols > 16384 {
+        return Err(PyValueError::new_err(format!(
+            "column count {ncols} exceeds Excel limit of 16384"
+        )));
+    }
+    if nrows > 1048576 {
+        return Err(PyValueError::new_err(format!(
+            "row count {nrows} exceeds Excel limit of 1048576"
+        )));
     }
     let mut style_work = false;
     sheet.rows.reserve(nrows);
@@ -1080,11 +1125,14 @@ fn columns_to_sheet(
         for (ci, col) in col_data.iter().enumerate() {
             let cell_obj = col.get_item(r)?;
             let val = py_to_cell_value_flagged(&cell_obj, date1904, Some(&mut style_work))?;
-            match &val {
-                CellValue::Empty => {}
-                _ => {
-                    row.cells.push(Cell::new((ci as u32) + 1, val));
+            let wrap_style = extract_wrapper_style(&cell_obj)?;
+            if !matches!(val, CellValue::Empty) || wrap_style.is_some() {
+                let mut cell = Cell::new((ci as u32) + 1, val);
+                if wrap_style.is_some() {
+                    style_work = true;
+                    cell.style_desc = wrap_style;
                 }
+                row.cells.push(cell);
             }
         }
         if !row.cells.is_empty() {
@@ -1185,11 +1233,14 @@ fn arrow_like_to_sheet(
         for (ci, col) in col_lists.iter().enumerate() {
             let cell_obj = col.get_item(r)?;
             let val = py_to_cell_value_flagged(&cell_obj, date1904, Some(&mut style_work))?;
-            match &val {
-                CellValue::Empty => {}
-                _ => {
-                    row.cells.push(Cell::new((ci as u32) + 1, val));
+            let wrap_style = extract_wrapper_style(&cell_obj)?;
+            if !matches!(val, CellValue::Empty) || wrap_style.is_some() {
+                let mut cell = Cell::new((ci as u32) + 1, val);
+                if wrap_style.is_some() {
+                    style_work = true;
+                    cell.style_desc = wrap_style;
                 }
+                row.cells.push(cell);
             }
         }
         if !row.cells.is_empty() {
@@ -1377,17 +1428,36 @@ fn parse_sheet_dict(sheet_obj: &Bound<'_, PyAny>, opts: &WriteOptions) -> PyResu
             let row_list = rows
                 .cast::<PyList>()
                 .map_err(|_| PyValueError::new_err("rows must be a list of row sequences"))?;
+            let nrows = row_list.len();
+            if nrows > 1048576 {
+                return Err(PyValueError::new_err(format!(
+                    "row count {nrows} exceeds Excel limit of 1048576"
+                )));
+            }
             for (ri, row_obj) in row_list.iter().enumerate() {
                 let cells = row_obj
                     .cast::<PyList>()
                     .map_err(|_| PyValueError::new_err("each row must be a list of cell values"))?;
+                // Width check is fused into the main pass; a separate pre-pass would
+                // walk every row twice on the hottest write path.
+                if cells.len() > 16384 {
+                    return Err(PyValueError::new_err(format!(
+                        "rows[{ri}] has {} cells, exceeding Excel's column limit of 16384",
+                        cells.len()
+                    )));
+                }
                 let mut row = Row::new((ri as u32) + 1);
                 for (ci, cell) in cells.iter().enumerate() {
                     let val =
                         py_to_cell_value_flagged(&cell, opts.date1904, Some(&mut style_work))?;
-                    match &val {
-                        CellValue::Empty => {}
-                        _ => row.cells.push(Cell::new((ci as u32) + 1, val)),
+                    let wrap_style = extract_wrapper_style(&cell)?;
+                    if !matches!(val, CellValue::Empty) || wrap_style.is_some() {
+                        let mut cell = Cell::new((ci as u32) + 1, val);
+                        if wrap_style.is_some() {
+                            style_work = true;
+                            cell.style_desc = wrap_style;
+                        }
+                        row.cells.push(cell);
                     }
                 }
                 if !row.cells.is_empty() {
@@ -2229,36 +2299,55 @@ fn build_workbook_from_py(
         vba_archive_path: None,
     };
 
-    if sheet_list.len() == 1 {
-        let first_sheet = &sheet_list.get_item(0)?;
-        if let Ok(dict) = first_sheet.cast::<PyDict>() {
-            let name = opt_str(dict, "name")?.unwrap_or_else(|| "Sheet1".to_string());
-            let has_grid = dict.contains("grid")?;
-            let has_cols = dict.contains("columns")? || dict.contains("data")?;
-            let has_rows = dict.contains("rows")?;
+    // `grid` is a write-only fast path: it is consumed here into `numeric_columns`
+    // and never read by `parse_sheet_dict`, so any rejection must raise rather than
+    // silently emit an empty sheet.
+    for s in sheet_list.iter() {
+        let Ok(dict) = s.cast::<PyDict>() else {
+            continue;
+        };
+        if !dict.contains("grid")? {
+            continue;
+        }
+        let name = opt_str(dict, "name")?.unwrap_or_else(|| "Sheet1".to_string());
 
-            if has_grid {
-                if has_cols || has_rows {
-                    return Err(PyValueError::new_err(
-                        "'grid' key is mutually exclusive with 'columns' and 'rows'",
-                    ));
-                }
+        if dict.contains("columns")? || dict.contains("data")? || dict.contains("rows")? {
+            return Err(PyValueError::new_err(
+                "'grid' key is mutually exclusive with 'columns' and 'rows'",
+            ));
+        }
+        if sheet_list.len() != 1 {
+            return Err(PyValueError::new_err(
+                "'grid' is only supported for a single-sheet workbook; \
+                 use 'columns' or 'rows' for multi-sheet workbooks",
+            ));
+        }
 
-                // Check eligibility: no styles, merges, CF, DV, freeze_panes attached
-                let is_eligible = !dict.contains("cell_styles")?
-                    && !dict.contains("style_palette")?
-                    && !dict.contains("conditional_formatting")?
-                    && !dict.contains("data_validations")?
-                    && !dict.contains("merged_cells")?
-                    && !dict.contains("freeze_panes")?;
+        // Check eligibility: no styles, merges, CF, DV, freeze_panes attached
+        for key in [
+            "cell_styles",
+            "style_palette",
+            "conditional_formatting",
+            "data_validations",
+            "merged_cells",
+            "freeze_panes",
+        ] {
+            if dict.contains(key)? {
+                return Err(PyValueError::new_err(format!(
+                    "'grid' is incompatible with '{key}'; use 'columns' or 'rows' instead"
+                )));
+            }
+        }
 
-                if is_eligible {
-                    if let Some(grid_obj) = dict.get_item("grid")? {
-                        if let Ok(Some(grid)) = try_parse_numeric_grid(name, &grid_obj) {
-                            wb.numeric_columns = Some(grid);
-                        }
-                    }
-                }
+        let grid_obj = dict
+            .get_item("grid")?
+            .ok_or_else(|| PyValueError::new_err("'grid' must not be None"))?;
+        match try_parse_numeric_grid(name, &grid_obj)? {
+            Some(grid) => wb.numeric_columns = Some(grid),
+            None => {
+                return Err(PyValueError::new_err(
+                    "'grid' must be a 2-D C-contiguous NumPy array of dtype float32 or float64",
+                ))
             }
         }
     }
