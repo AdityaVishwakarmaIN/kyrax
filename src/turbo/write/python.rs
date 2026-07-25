@@ -756,7 +756,7 @@ fn py_to_cell_value_flagged(
     if let Ok(f) = obj.extract::<f64>() {
         return Ok(CellValue::Number(f));
     }
-    if let Ok(s) = obj.extract::<String>() {
+    if let Ok(mut s) = obj.extract::<String>() {
         if s.starts_with('#') && is_excel_error(&s) {
             return Ok(CellValue::Error(s));
         }
@@ -765,9 +765,19 @@ fn py_to_cell_value_flagged(
         if s.len() > 32767 {
             let n = s.chars().count();
             if n > 32767 {
-                return Err(PyValueError::new_err(format!(
-                    "cell string is {n} characters; Excel's limit is 32767. Shorten the value or split it across cells."
-                )));
+                pyo3::PyErr::warn(
+                    obj.py(),
+                    &obj.py().get_type::<pyo3::exceptions::PyUserWarning>(),
+                    std::ffi::CString::new(format!(
+                        "cell string is {n} characters; Excel's limit is 32767, so it was truncated. Shorten the value or split it across cells to silence this."
+                    ))
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?
+                    .as_c_str(),
+                    0,
+                )?;
+                if let Some((idx, _)) = s.char_indices().nth(32767) {
+                    s.truncate(idx);
+                }
             }
         }
         return Ok(CellValue::Str(s));
