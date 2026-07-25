@@ -46,6 +46,22 @@ from ._kyrax import read_excel as _read_excel
 from ._kyrax import read_excel_turbo as _read_excel_turbo
 from ._kyrax import write_excel_turbo as _write_excel_turbo
 from ._kyrax import write_excel_turbo_bytes as _write_excel_turbo_bytes
+from ._kyrax import write_excel_turbo_stream as _write_excel_turbo_stream
+try:
+    from ._kyrax import edit_excel, EditableWorkbook, EditableSheet
+except ImportError:
+    edit_excel = None
+    EditableWorkbook = None
+    EditableSheet = None
+
+def load_workbook(filename: str | Path, edit_mode: bool = False):
+    """Load an Excel workbook. If edit_mode=True, returns an EditableWorkbook for byte-preserving edits."""
+    if edit_mode:
+        if edit_excel is None:
+            raise NotImplementedError("edit_excel is not available in this build")
+        return edit_excel(str(filename))
+    return read_excel(filename)
+
 
 DType = Literal["null", "int", "float", "string", "boolean", "datetime", "date", "duration"]
 DTypeMap: TypeAlias = "dict[str | int, DType]"
@@ -356,6 +372,15 @@ class ExcelReader:
     ) -> ExcelSheet | pa.RecordBatch:
         """Loads a sheet by index or name.
 
+        No-silent-data-loss read contract: When a column's inferred dtype (guessed from
+        `schema_sample_rows`, default 1000) disagrees with values later in the column,
+        kyrax widens the column to string and emits a `UserWarning` naming the column
+        instead of silently nulling those cells (openpyxl never loses a cell value, so
+        silent nulling was the one behaviour with no openpyxl analogue). Under
+        `dtype_coercion='strict'`, an error is raised instead. Passing
+        `schema_sample_rows=None` samples the full column. An explicit `dtypes`
+        argument is never second-guessed.
+
         :param idx_or_name: The index (starting at 0) or the name of the sheet to load.
         :param header_row: The index of the row containing the column labels, default index is 0.
                            If `None`, the sheet does not have any column labels.
@@ -507,6 +532,15 @@ class ExcelReader:
         whitespace_as_null: bool = False,
     ) -> ExcelTable | pa.RecordBatch:
         """Loads a table by name.
+
+        No-silent-data-loss read contract: When a column's inferred dtype (guessed from
+        `schema_sample_rows`, default 1000) disagrees with values later in the column,
+        kyrax widens the column to string and emits a `UserWarning` naming the column
+        instead of silently nulling those cells (openpyxl never loses a cell value, so
+        silent nulling was the one behaviour with no openpyxl analogue). Under
+        `dtype_coercion='strict'`, an error is raised instead. Passing
+        `schema_sample_rows=None` samples the full column. An explicit `dtypes`
+        argument is never second-guessed.
 
         :param name: The name of the table to load.
         :param header_row: The index of the row containing the column labels.
@@ -693,6 +727,15 @@ class ExcelReader:
 
 def read_excel(source: Path | str | bytes) -> ExcelReader:
     """Opens and loads an excel file.
+
+    No-silent-data-loss read contract: When a column's inferred dtype (guessed from
+    `schema_sample_rows`, default 1000) disagrees with values later in the column,
+    kyrax widens the column to string and emits a `UserWarning` naming the column
+    instead of silently nulling those cells (openpyxl never loses a cell value, so
+    silent nulling was the one behaviour with no openpyxl analogue). Under
+    `dtype_coercion='strict'`, an error is raised instead. Passing
+    `schema_sample_rows=None` samples the full column. An explicit `dtypes`
+    argument is never second-guessed.
 
     :param source: The path to a file or its content as bytes
     """
@@ -976,6 +1019,21 @@ def read_excel_turbo(path: Path | str) -> TurboReader:
     return TurboReader(_read_excel_turbo(path))
 
 
+def _validate_sheets(sheets: list[dict]) -> None:
+    for i, sheet in enumerate(sheets):
+        cols = sheet.get("columns")
+        if isinstance(cols, list):
+            for j, col in enumerate(cols):
+                if isinstance(col, str):
+                    name = sheet.get("name", i)
+                    raise TypeError(
+                        f"sheet '{name}': columns[{j}] is a str ('{col}'). "
+                        "The 'columns' key takes columnar DATA (a list of column arrays), "
+                        "not header names. To write a header row, pass it as the first "
+                        "entry of 'rows', e.g. rows=[['Region','Profit'], ...]."
+                    )
+
+
 def write_excel_turbo(
     path: Path | str,
     sheets: list[dict],
@@ -1013,6 +1071,57 @@ def write_excel_turbo(
     elif isinstance(path, str):
         path = expanduser(path)
     _write_excel_turbo(
+        path,
+        sheets,
+        string_mode=string_mode,
+        emit_cached_values=emit_cached_values,
+        date1904=date1904,
+        features=features,
+        active_tab=active_tab,
+        named_styles=named_styles,
+        props=props,
+        defined_names=defined_names,
+        chartsheets=chartsheets,
+        lock_structure=lock_structure,
+        external_links=external_links,
+        creator=creator,
+        macro_enabled=macro_enabled,
+    )
+
+
+def write_excel_turbo_stream(
+    path: Path | str,
+    sheets: list[dict],
+    *,
+    string_mode: Literal["inline", "sst", "auto"] = "inline",
+    emit_cached_values: bool = True,
+    date1904: bool = False,
+    features: list[str] | str | None = None,
+    active_tab: int = 0,
+    named_styles: list[dict] | None = None,
+    props: dict | None = None,
+    defined_names: list[dict] | None = None,
+    chartsheets: list[dict] | None = None,
+    lock_structure: bool = False,
+    external_links: list | None = None,
+    creator: str | None = None,
+    macro_enabled: bool = False,
+) -> None:
+    """Stream an XLSX workbook straight to disk (openpyxl ``write_only`` analogue).
+
+    Same options and sheet-dict schema as :func:`write_excel_turbo`, but sheet
+    XML is deflated and flushed incrementally instead of being buffered whole,
+    so writer-side memory stays bounded regardless of row count. Emits Zip64
+    records when the archive crosses the 4 GB / 65535-entry limits.
+
+    This path is deliberately serial; :func:`write_excel_turbo` remains the
+    default and keeps its parallel multi-sheet compression.
+    """
+    if isinstance(path, Path):
+        path = expanduser(str(path))
+    elif isinstance(path, str):
+        path = expanduser(path)
+    _write_excel_turbo_stream(
         path,
         sheets,
         string_mode=string_mode,
@@ -1075,6 +1184,7 @@ __all__ = (
     "read_excel_turbo",
     "write_excel_turbo",
     "write_excel_turbo_bytes",
+    "write_excel_turbo_stream",
     # Python types
     "DType",
     "DTypeMap",

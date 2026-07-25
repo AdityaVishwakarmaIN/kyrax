@@ -31,6 +31,7 @@ impl BitVec {
         }
         self.len += 1;
     }
+    #[allow(dead_code)]
     fn extend(&mut self, other: &BitVec) {
         for i in 0..other.len {
             let w = i / 64;
@@ -98,7 +99,8 @@ impl Dict {
 
 const NULL_IDX: u32 = u32::MAX;
 
-pub(crate) struct StringArena {
+#[derive(Debug)]
+pub struct StringArena {
     offsets: Vec<usize>,
     bytes: Vec<u8>,
 }
@@ -171,10 +173,18 @@ pub(crate) fn parse_shared_strings(xml: &[u8]) -> StringArena {
 }
 
 // ----------------------------------------------------------------------------
+#[derive(Debug, Clone)]
+pub enum MixedValue {
+    Null,
+    Num(f64),
+    Str(u32),
+}
+
 enum Column {
     Unset,
     Num { v: Vec<f64>, valid: BitVec },
     Str(Vec<u32>),
+    Mixed(Vec<MixedValue>),
 }
 impl Column {
     #[inline]
@@ -185,18 +195,39 @@ impl Column {
                 valid: BitVec::new(),
             };
         }
-        if let Column::Num { v, valid } = self {
-            while v.len() < dr {
-                v.push(f64::NAN);
-                valid.push(false);
+        match self {
+            Column::Num { v, valid } => {
+                while v.len() < dr {
+                    v.push(f64::NAN);
+                    valid.push(false);
+                }
+                v.push(x);
+                valid.push(true);
             }
-            v.push(x);
-            valid.push(true);
-        } else if let Column::Str(s) = self {
-            while s.len() < dr {
-                s.push(NULL_IDX);
+            Column::Str(s) => {
+                let mut m: Vec<MixedValue> = s
+                    .iter()
+                    .map(|&idx| {
+                        if idx == NULL_IDX {
+                            MixedValue::Null
+                        } else {
+                            MixedValue::Str(idx)
+                        }
+                    })
+                    .collect();
+                while m.len() < dr {
+                    m.push(MixedValue::Null);
+                }
+                m.push(MixedValue::Num(x));
+                *self = Column::Mixed(m);
             }
-            s.push(NULL_IDX);
+            Column::Mixed(m) => {
+                while m.len() < dr {
+                    m.push(MixedValue::Null);
+                }
+                m.push(MixedValue::Num(x));
+            }
+            Column::Unset => unreachable!(),
         }
     }
     #[inline]
@@ -204,18 +235,36 @@ impl Column {
         if let Column::Unset = self {
             *self = Column::Str(Vec::new());
         }
-        if let Column::Str(s) = self {
-            while s.len() < dr {
-                s.push(NULL_IDX);
+        match self {
+            Column::Str(s) => {
+                while s.len() < dr {
+                    s.push(NULL_IDX);
+                }
+                s.push(idx);
             }
-            s.push(idx);
-        } else if let Column::Num { v, valid } = self {
-            while v.len() < dr {
-                v.push(f64::NAN);
-                valid.push(false);
+            Column::Num { v, valid } => {
+                let mut m: Vec<MixedValue> = (0..v.len())
+                    .map(|i| {
+                        if i < valid.len && valid.get(i) {
+                            MixedValue::Num(v[i])
+                        } else {
+                            MixedValue::Null
+                        }
+                    })
+                    .collect();
+                while m.len() < dr {
+                    m.push(MixedValue::Null);
+                }
+                m.push(MixedValue::Str(idx));
+                *self = Column::Mixed(m);
             }
-            v.push(f64::NAN);
-            valid.push(false);
+            Column::Mixed(m) => {
+                while m.len() < dr {
+                    m.push(MixedValue::Null);
+                }
+                m.push(MixedValue::Str(idx));
+            }
+            Column::Unset => unreachable!(),
         }
     }
     #[inline]
@@ -236,6 +285,12 @@ impl Column {
                 }
                 s.push(NULL_IDX);
             }
+            Column::Mixed(m) => {
+                while m.len() < dr {
+                    m.push(MixedValue::Null);
+                }
+                m.push(MixedValue::Null);
+            }
         }
     }
     fn pad_to(&mut self, n: usize) {
@@ -252,6 +307,11 @@ impl Column {
                     s.push(NULL_IDX);
                 }
             }
+            Column::Mixed(m) => {
+                while m.len() < n {
+                    m.push(MixedValue::Null);
+                }
+            }
         }
     }
 }
@@ -263,12 +323,7 @@ impl Column {
 pub enum FormulaKind {
     Plain,
     Shared { si: u32 },
-    Array {
-        r0: u32,
-        c0: u32,
-        r1: u32,
-        c1: u32,
-    },
+    Array { r0: u32, c0: u32, r1: u32, c1: u32 },
     DataTable,
 }
 
@@ -356,13 +411,7 @@ impl FormulaColumn {
                 kind: match &e.cell {
                     FCell::Plain(_) => FormulaKind::Plain,
                     FCell::Shared(si) => FormulaKind::Shared { si: *si },
-                    FCell::Array {
-                        r0,
-                        c0,
-                        r1,
-                        c1,
-                        ..
-                    } => FormulaKind::Array {
+                    FCell::Array { r0, c0, r1, c1, .. } => FormulaKind::Array {
                         r0: *r0,
                         c0: *c0,
                         r1: *r1,
@@ -443,9 +492,7 @@ impl FormulaColumn {
                 };
                 let text = self.formula_string(e, &abs);
                 let ref_a1 = match &e.cell {
-                    FCell::Array {
-                        r0, c0, r1, c1, ..
-                    } => {
+                    FCell::Array { r0, c0, r1, c1, .. } => {
                         let range = CellRange {
                             r0: *r0,
                             c0: *c0,
@@ -509,7 +556,7 @@ impl Partial {
         usize,
         usize,
     )> {
-        use arrow_array::builder::Float64Builder;
+        use arrow_array::builder::{Float64Builder, StringBuilder};
         use arrow_array::types::Int32Type;
         use arrow_array::{ArrayRef, Float64Array, UInt32Array};
         use std::sync::Arc;
@@ -554,8 +601,7 @@ impl Partial {
         // One shared dictionary values array for all Str columns on this sheet.
         // Column keys index into Partial.dict (sheet-local intern pool); cloning
         // the Arc is a refcount bump — not a full copy of the string pool.
-        let dict_values: ArrayRef =
-            Arc::new(arrow_array::StringArray::from(self.dict.strings()));
+        let dict_values: ArrayRef = Arc::new(arrow_array::StringArray::from(self.dict.strings()));
         let mut columns: Vec<ArrayRef> = Vec::with_capacity(ncols);
 
         for c in 0..ncols {
@@ -594,6 +640,26 @@ impl Partial {
                     )
                     .map_err(|e| TurboError::Arrow(e.to_string()))?;
                     columns.push(Arc::new(dict) as ArrayRef);
+                }
+                Column::Mixed(m) => {
+                    let mut sb = StringBuilder::with_capacity(nrows, nrows * 16);
+                    for i in 0..nrows {
+                        match m.get(i) {
+                            Some(MixedValue::Null) | None => sb.append_null(),
+                            Some(MixedValue::Num(x)) => {
+                                let mut ryu_buf = ryu::Buffer::new();
+                                sb.append_value(ryu_buf.format(*x));
+                            }
+                            Some(MixedValue::Str(id)) => {
+                                if *id == NULL_IDX {
+                                    sb.append_null();
+                                } else if let Some(s) = self.dict.strings().get(*id as usize) {
+                                    sb.append_value(s);
+                                }
+                            }
+                        }
+                    }
+                    columns.push(Arc::new(sb.finish()) as ArrayRef);
                 }
                 Column::Unset => {
                     let arr = Float64Array::from(vec![None::<f64>; nrows]);
@@ -962,88 +1028,88 @@ fn parse_region(
                         if ftag_end <= fo + 1 || ftag_end > content.len() {
                             // truncated <f ...
                         } else {
-                        let ftag = &content[fo + 2..ftag_end];
-                        let f_self_closing =
-                            content.get(ftag_end.saturating_sub(1)) == Some(&b'/');
-                        let fattr = |name: &[u8]| -> Option<&[u8]> {
-                            let mut pat = Vec::with_capacity(name.len() + 3);
-                            pat.push(b' ');
-                            pat.extend_from_slice(name);
-                            pat.extend_from_slice(b"=\"");
-                            let p = memchr::memmem::find(ftag, &pat)?;
-                            let vs = p + pat.len();
-                            let ve = vs + memchr::memchr(b'"', &ftag[vs..])?;
-                            Some(&ftag[vs..ve])
-                        };
-                        let ftype = fattr(b"t");
-                        let ftext: &[u8] = if f_self_closing {
-                            b""
-                        } else {
-                            let te = memchr::memmem::find(&content[ftag_end..], b"</f>")
-                                .map(|o| ftag_end + o)
-                                .unwrap_or(content.len());
-                            &content[ftag_end + 1..te]
-                        };
-                        let decoded = decode(ftext, &mut fscratch).to_vec();
-                        match ftype {
-                            None => {
-                                let id = fdict.intern(&decoded);
-                                fentries.push(FEntry {
-                                    row: abs_row,
-                                    col: col as u32,
-                                    cell: FCell::Plain(id),
-                                });
-                            }
-                            Some(b"shared") => {
-                                let si = fattr(b"si").and_then(atoi).unwrap_or(0);
-                                if fattr(b"ref").is_some() {
+                            let ftag = &content[fo + 2..ftag_end];
+                            let f_self_closing =
+                                content.get(ftag_end.saturating_sub(1)) == Some(&b'/');
+                            let fattr = |name: &[u8]| -> Option<&[u8]> {
+                                let mut pat = Vec::with_capacity(name.len() + 3);
+                                pat.push(b' ');
+                                pat.extend_from_slice(name);
+                                pat.extend_from_slice(b"=\"");
+                                let p = memchr::memmem::find(ftag, &pat)?;
+                                let vs = p + pat.len();
+                                let ve = vs + memchr::memchr(b'"', &ftag[vs..])?;
+                                Some(&ftag[vs..ve])
+                            };
+                            let ftype = fattr(b"t");
+                            let ftext: &[u8] = if f_self_closing {
+                                b""
+                            } else {
+                                let te = memchr::memmem::find(&content[ftag_end..], b"</f>")
+                                    .map(|o| ftag_end + o)
+                                    .unwrap_or(content.len());
+                                &content[ftag_end + 1..te]
+                            };
+                            let decoded = decode(ftext, &mut fscratch).to_vec();
+                            match ftype {
+                                None => {
                                     let id = fdict.intern(&decoded);
-                                    anchors.push(AnchorDef {
-                                        si,
-                                        text: id,
-                                        orow: abs_row,
-                                        ocol: col as u32,
+                                    fentries.push(FEntry {
+                                        row: abs_row,
+                                        col: col as u32,
+                                        cell: FCell::Plain(id),
                                     });
                                 }
-                                fentries.push(FEntry {
-                                    row: abs_row,
-                                    col: col as u32,
-                                    cell: FCell::Shared(si),
-                                });
+                                Some(b"shared") => {
+                                    let si = fattr(b"si").and_then(atoi).unwrap_or(0);
+                                    if fattr(b"ref").is_some() {
+                                        let id = fdict.intern(&decoded);
+                                        anchors.push(AnchorDef {
+                                            si,
+                                            text: id,
+                                            orow: abs_row,
+                                            ocol: col as u32,
+                                        });
+                                    }
+                                    fentries.push(FEntry {
+                                        row: abs_row,
+                                        col: col as u32,
+                                        cell: FCell::Shared(si),
+                                    });
+                                }
+                                Some(b"array") => {
+                                    let (r0, c0, r1, c1) =
+                                        fattr(b"ref").map(parse_ref_range).unwrap_or((0, 0, 0, 0));
+                                    let id = fdict.intern(&decoded);
+                                    fentries.push(FEntry {
+                                        row: abs_row,
+                                        col: col as u32,
+                                        cell: FCell::Array {
+                                            r0,
+                                            c0,
+                                            r1,
+                                            c1,
+                                            text: id,
+                                        },
+                                    });
+                                }
+                                Some(b"dataTable") => {
+                                    let id = fdict.intern(ftag);
+                                    fentries.push(FEntry {
+                                        row: abs_row,
+                                        col: col as u32,
+                                        cell: FCell::DataTable(id),
+                                    });
+                                }
+                                Some(_) => {
+                                    let id = fdict.intern(&decoded);
+                                    fentries.push(FEntry {
+                                        row: abs_row,
+                                        col: col as u32,
+                                        cell: FCell::Plain(id),
+                                    });
+                                }
                             }
-                            Some(b"array") => {
-                                let (r0, c0, r1, c1) =
-                                    fattr(b"ref").map(parse_ref_range).unwrap_or((0, 0, 0, 0));
-                                let id = fdict.intern(&decoded);
-                                fentries.push(FEntry {
-                                    row: abs_row,
-                                    col: col as u32,
-                                    cell: FCell::Array {
-                                        r0,
-                                        c0,
-                                        r1,
-                                        c1,
-                                        text: id,
-                                    },
-                                });
-                            }
-                            Some(b"dataTable") => {
-                                let id = fdict.intern(ftag);
-                                fentries.push(FEntry {
-                                    row: abs_row,
-                                    col: col as u32,
-                                    cell: FCell::DataTable(id),
-                                });
-                            }
-                            Some(_) => {
-                                let id = fdict.intern(&decoded);
-                                fentries.push(FEntry {
-                                    row: abs_row,
-                                    col: col as u32,
-                                    cell: FCell::Plain(id),
-                                });
-                            }
-                        }
                         } // end non-truncated f tag
                     }
                 }
@@ -1084,7 +1150,8 @@ fn parse_region(
                     let text: &[u8] = if ctype == CellType::Inline {
                         if let Some(to) = memchr::memmem::find(content, b"<t") {
                             let topen_end = to
-                                + memchr::memchr(b'>', &content[to..]).unwrap_or(content.len() - to);
+                                + memchr::memchr(b'>', &content[to..])
+                                    .unwrap_or(content.len() - to);
                             if topen_end == 0
                                 || content.get(topen_end.saturating_sub(1)) == Some(&b'/')
                                 || topen_end >= content.len()
@@ -1240,12 +1307,10 @@ pub(crate) fn parse_ref_range(refr: &[u8]) -> (u32, u32, u32, u32) {
 }
 
 pub(crate) fn sheet_data_region(x: &[u8]) -> TurboResult<(usize, usize)> {
-    let sd = memchr::memmem::find(x, b"<sheetData").ok_or_else(|| {
-        TurboError::Format("missing <sheetData> in worksheet".into())
-    })?;
-    let gt = memchr::memchr(b'>', &x[sd..]).ok_or_else(|| {
-        TurboError::Format("unclosed <sheetData".into())
-    })?;
+    let sd = memchr::memmem::find(x, b"<sheetData")
+        .ok_or_else(|| TurboError::Format("missing <sheetData> in worksheet".into()))?;
+    let gt = memchr::memchr(b'>', &x[sd..])
+        .ok_or_else(|| TurboError::Format("unclosed <sheetData".into()))?;
     let start = sd + gt + 1;
     // Self-closing <sheetData/>
     if x[sd + gt - 1] == b'/' {
@@ -1358,50 +1423,80 @@ fn merge_partials(mut partials: Vec<Partial>, feat: ScanFeat) -> Partial {
             r
         };
         for c in 0..ncols {
-            match p.cols.get(c) {
-                Some(Column::Num { v, valid }) => {
-                    if let Column::Unset = gcols[c] {
+            let pcol = match p.cols.get(c) {
+                Some(col) => col,
+                None => &Column::Unset,
+            };
+
+            if let Column::Unset = gcols[c] {
+                match pcol {
+                    Column::Num { .. } => {
                         gcols[c] = Column::Num {
                             v: Vec::new(),
                             valid: BitVec::new(),
-                        };
+                        }
                     }
-                    if let Column::Num { v: gv, valid: gvalid } = &mut gcols[c] {
-                        while gv.len() < base {
+                    Column::Str(_) => gcols[c] = Column::Str(Vec::new()),
+                    Column::Mixed(_) => gcols[c] = Column::Mixed(Vec::new()),
+                    Column::Unset => {}
+                }
+            }
+
+            match (pcol, &mut gcols[c]) {
+                (
+                    Column::Num { v, valid },
+                    Column::Num {
+                        v: gv,
+                        valid: gvalid,
+                    },
+                ) => {
+                    while gv.len() < base {
+                        gv.push(f64::NAN);
+                        gvalid.push(false);
+                    }
+                    for irow in 0..p.nrows {
+                        if irow < valid.len && valid.get(irow) {
+                            gv.push(v[irow]);
+                            gvalid.push(true);
+                        } else {
                             gv.push(f64::NAN);
                             gvalid.push(false);
                         }
-                        // Contiguous extend (partials don't overlap).
-                        for irow in 0..p.nrows {
-                            if irow < valid.len && valid.get(irow) {
-                                gv.push(v[irow]);
-                                gvalid.push(true);
-                            } else {
-                                gv.push(f64::NAN);
-                                gvalid.push(false);
+                    }
+                }
+                (Column::Str(sidx), Column::Str(gs)) => {
+                    while gs.len() < base {
+                        gs.push(NULL_IDX);
+                    }
+                    for irow in 0..p.nrows {
+                        let id = sidx.get(irow).copied().unwrap_or(NULL_IDX);
+                        gs.push(if id == NULL_IDX {
+                            NULL_IDX
+                        } else {
+                            remap[id as usize]
+                        });
+                    }
+                }
+                (Column::Mixed(pm), Column::Mixed(gm)) => {
+                    while gm.len() < base {
+                        gm.push(MixedValue::Null);
+                    }
+                    for irow in 0..p.nrows {
+                        let val = pm.get(irow).cloned().unwrap_or(MixedValue::Null);
+                        let mapped_val = match val {
+                            MixedValue::Str(id) => {
+                                if id == NULL_IDX {
+                                    MixedValue::Null
+                                } else {
+                                    MixedValue::Str(remap[id as usize])
+                                }
                             }
-                        }
+                            other => other,
+                        };
+                        gm.push(mapped_val);
                     }
                 }
-                Some(Column::Str(sidx)) => {
-                    if let Column::Unset = gcols[c] {
-                        gcols[c] = Column::Str(Vec::new());
-                    }
-                    if let Column::Str(gs) = &mut gcols[c] {
-                        while gs.len() < base {
-                            gs.push(NULL_IDX);
-                        }
-                        for irow in 0..p.nrows {
-                            let id = sidx.get(irow).copied().unwrap_or(NULL_IDX);
-                            gs.push(if id == NULL_IDX {
-                                NULL_IDX
-                            } else {
-                                remap[id as usize]
-                            });
-                        }
-                    }
-                }
-                Some(Column::Unset) | None => match &mut gcols[c] {
+                (Column::Unset, gcol) => match gcol {
                     Column::Num { v, valid } => {
                         while v.len() < base {
                             v.push(f64::NAN);
@@ -1420,8 +1515,93 @@ fn merge_partials(mut partials: Vec<Partial>, feat: ScanFeat) -> Partial {
                             s.push(NULL_IDX);
                         }
                     }
+                    Column::Mixed(m) => {
+                        while m.len() < base {
+                            m.push(MixedValue::Null);
+                        }
+                        for _ in 0..p.nrows {
+                            m.push(MixedValue::Null);
+                        }
+                    }
                     Column::Unset => {}
                 },
+                (p_other, gcol) => {
+                    let mut mixed: Vec<MixedValue> = match gcol {
+                        Column::Num {
+                            v: gv,
+                            valid: gvalid,
+                        } => (0..gv.len())
+                            .map(|i| {
+                                if i < gvalid.len && gvalid.get(i) {
+                                    MixedValue::Num(gv[i])
+                                } else {
+                                    MixedValue::Null
+                                }
+                            })
+                            .collect(),
+                        Column::Str(gs) => gs
+                            .iter()
+                            .map(|&idx| {
+                                if idx == NULL_IDX {
+                                    MixedValue::Null
+                                } else {
+                                    MixedValue::Str(idx)
+                                }
+                            })
+                            .collect(),
+                        Column::Mixed(m) => std::mem::take(m),
+                        Column::Unset => Vec::new(),
+                    };
+
+                    while mixed.len() < base {
+                        mixed.push(MixedValue::Null);
+                    }
+
+                    match p_other {
+                        Column::Num { v, valid } => {
+                            for irow in 0..p.nrows {
+                                if irow < valid.len && valid.get(irow) {
+                                    mixed.push(MixedValue::Num(v[irow]));
+                                } else {
+                                    mixed.push(MixedValue::Null);
+                                }
+                            }
+                        }
+                        Column::Str(sidx) => {
+                            for irow in 0..p.nrows {
+                                let id = sidx.get(irow).copied().unwrap_or(NULL_IDX);
+                                if id == NULL_IDX {
+                                    mixed.push(MixedValue::Null);
+                                } else {
+                                    mixed.push(MixedValue::Str(remap[id as usize]));
+                                }
+                            }
+                        }
+                        Column::Mixed(pm) => {
+                            for irow in 0..p.nrows {
+                                let val = pm.get(irow).cloned().unwrap_or(MixedValue::Null);
+                                let mapped_val = match val {
+                                    MixedValue::Str(id) => {
+                                        if id == NULL_IDX {
+                                            MixedValue::Null
+                                        } else {
+                                            MixedValue::Str(remap[id as usize])
+                                        }
+                                    }
+                                    other => other,
+                                };
+                                mixed.push(mapped_val);
+                            }
+                        }
+                        Column::Unset => {
+                            for _ in 0..p.nrows {
+                                mixed.push(MixedValue::Null);
+                            }
+                        }
+                    }
+
+                    *gcol = Column::Mixed(mixed);
+                }
             }
         }
         if feat.styles {
@@ -1497,11 +1677,7 @@ fn merge_partials(mut partials: Vec<Partial>, feat: ScanFeat) -> Partial {
         }
         let err_abs = any_abs;
         for e in &p.cell_errors {
-            let row = if err_abs {
-                e.row
-            } else {
-                e.row + base as u32
-            };
+            let row = if err_abs { e.row } else { e.row + base as u32 };
             gerrors.push(CellError {
                 row,
                 col: e.col,

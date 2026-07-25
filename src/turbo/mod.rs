@@ -12,6 +12,8 @@ mod structural;
 mod styles;
 mod zipmin;
 
+pub mod overlay;
+
 /// Turbo WRITE path (silo A core). Additive; does not alter the read path.
 pub mod write;
 
@@ -22,24 +24,27 @@ pub use error::{TurboError, TurboResult};
 pub use formula::translate_body;
 pub use meta::{
     ActivePane, AppProps, AutoFilterMeta, CfRuleRec, CfVo, ColDim, ColorScaleParams, CoreProps,
-    DataBarParams, DataValidationRec, FilterColumnMeta, HeaderFooterMeta, IconSetParams, PageMarginsMeta,
-    PageSetupMeta, Pane, PaneState, PrintOptionsMeta, RowDim, SheetFormat, SheetKind,
-    SheetProtectionMeta, SheetState, SheetViewMeta, WorkbookProps,
+    DataBarParams, DataValidationRec, FilterColumnMeta, HeaderFooterMeta, IconSetParams,
+    PageMarginsMeta, PageSetupMeta, Pane, PaneState, PrintOptionsMeta, RowDim, SheetFormat,
+    SheetKind, SheetProtectionMeta, SheetState, SheetViewMeta, WorkbookProps,
 };
+pub use overlay::{SheetOverlay, WorkbookOverlay};
 pub use scan::{CellError, FormulaColumn, FormulaKind, FormulaRecord};
 pub use structural::{
-    a1, range_a1, AnchorCell, CellRange, ChartAnchor, ChartMeta, ChartType, Comment, DefinedName,
-    Hyperlink, LinkTarget, NameKind, Person, PivotCacheMeta, PivotDataField, PivotTableMeta, Scope,
-    SeriesMeta, SheetComments, Table, TableColumn, TableStyle, ThreadedComment, VbaProject,
+    AnchorCell, CellRange, ChartAnchor, ChartMeta, ChartType, Comment, DefinedName, Hyperlink,
+    LinkTarget, NameKind, Person, PivotCacheMeta, PivotDataField, PivotTableMeta, Scope,
+    SeriesMeta, SheetComments, Table, TableColumn, TableStyle, ThreadedComment, VbaProject, a1,
+    range_a1,
 };
 pub use styles::{
     Alignment, Border, CKind, Color, Dxf, DxfFont, Fill, Font, NamedStyleRec, Protection, Resolved,
     Side, StyleTable, Xf,
 };
+pub use zipmin::{ArchiveMap, ZipEntryMeta};
 
 use arrow_array::{ArrayRef, UInt32Array};
-use scan::{parse_parallel, parse_shared_strings, sheet_data_region, ScanFeat};
-use structural::{parse_rels, parse_workbook, resolve_zip_path, RelKind};
+use scan::{ScanFeat, parse_parallel, parse_shared_strings, sheet_data_region};
+use structural::{RelKind, parse_rels, parse_workbook, resolve_zip_path};
 use styles::parse_style_table;
 use zipmin::{inflate, read_entry};
 
@@ -414,12 +419,7 @@ fn read_workbook_turbo_filtered(
 
         // Chartsheet: empty grid; still load chart sidecars when requested
         if is_chartsheet {
-            let mut sheet = empty_sheet(
-                meta.name.clone(),
-                meta.state,
-                meta.kind,
-                features,
-            );
+            let mut sheet = empty_sheet(meta.name.clone(), meta.state, meta.kind, features);
             if features.contains(Features::CHARTS) {
                 let sheet_file = sheet_path.rsplit('/').next().unwrap_or("sheet1.xml");
                 let rels_path = format!("xl/chartsheets/_rels/{sheet_file}.rels");
@@ -601,8 +601,7 @@ fn read_workbook_turbo_filtered(
                             {
                                 let cpath = resolve_zip_path("xl/pivotTables/", &crel.target);
                                 if let Some(cx) = read_entry(&zip, &cpath)? {
-                                    cache_meta =
-                                        Some(structural::parse_pivot_cache(&cx, cpath));
+                                    cache_meta = Some(structural::parse_pivot_cache(&cx, cpath));
                                 }
                             }
                         }
@@ -615,9 +614,7 @@ fn read_workbook_turbo_filtered(
                         worksheet_name: None,
                         field_names: Vec::new(),
                     });
-                    if let Some(pt) =
-                        structural::parse_pivot_table(&px, sheet_idx as u32, cache)
-                    {
+                    if let Some(pt) = structural::parse_pivot_table(&px, sheet_idx as u32, cache) {
                         pivs.push(pt);
                     }
                 }
@@ -628,64 +625,64 @@ fn read_workbook_turbo_filtered(
         };
 
         // Stream A header + tail
+        let (mut col_dims, sheet_format, sheet_view, code_name, tab_color, fit_to_page) =
+            if features.contains(Features::SHEET_META) || features.contains(Features::PAGE_SETUP) {
+                meta::scan_sheet_header(pre)
+            } else {
+                (Vec::new(), None, None, None, None, None)
+            };
+
         let (
-            mut col_dims,
+            row_dimensions,
+            column_dimensions,
             sheet_format,
+            auto_filter,
             sheet_view,
+            protection,
             code_name,
             tab_color,
-            fit_to_page,
-        ) = if features.contains(Features::SHEET_META) || features.contains(Features::PAGE_SETUP) {
-            meta::scan_sheet_header(pre)
-        } else {
-            (Vec::new(), None, None, None, None, None)
-        };
-
-        let (row_dimensions, column_dimensions, sheet_format, auto_filter, sheet_view, protection, code_name, tab_color) =
-            if features.contains(Features::SHEET_META) {
-                let auto_filter = meta::scan_auto_filter(tail);
-                let protection = Some(
-                    meta::scan_protection(tail).unwrap_or_default(),
-                );
-                let sheet_view = sheet_view.or_else(|| {
-                    Some(SheetViewMeta {
-                        show_grid_lines: None,
-                        zoom_scale: None,
-                        tab_selected: None,
-                        top_left_cell: None,
-                        workbook_view_id: 0,
-                        show_formulas: None,
-                        show_row_col_headers: None,
-                        show_zeros: None,
-                        right_to_left: None,
-                        pane: None,
+        ) = if features.contains(Features::SHEET_META) {
+            let auto_filter = meta::scan_auto_filter(tail);
+            let protection = Some(meta::scan_protection(tail).unwrap_or_default());
+            let sheet_view = sheet_view.or_else(|| {
+                Some(SheetViewMeta {
+                    show_grid_lines: None,
+                    zoom_scale: None,
+                    tab_selected: None,
+                    top_left_cell: None,
+                    workbook_view_id: 0,
+                    show_formulas: None,
+                    show_row_col_headers: None,
+                    show_zeros: None,
+                    right_to_left: None,
+                    pane: None,
+                })
+            });
+            // openpyxl fills missing col width with 13 when only hidden etc. — we keep XML truth
+            let _ = &mut col_dims;
+            (
+                Some(row_dims_from_scan),
+                Some(col_dims),
+                sheet_format.or_else(|| {
+                    Some(SheetFormat {
+                        base_col_width: Some(8),
+                        default_col_width: None,
+                        default_row_height: Some(15.0),
+                        custom_height: None,
+                        zero_height: None,
+                        outline_level_row: None,
+                        outline_level_col: None,
                     })
-                });
-                // openpyxl fills missing col width with 13 when only hidden etc. — we keep XML truth
-                let _ = &mut col_dims;
-                (
-                    Some(row_dims_from_scan),
-                    Some(col_dims),
-                    sheet_format.or_else(|| {
-                        Some(SheetFormat {
-                            base_col_width: Some(8),
-                            default_col_width: None,
-                            default_row_height: Some(15.0),
-                            custom_height: None,
-                            zero_height: None,
-                            outline_level_row: None,
-                            outline_level_col: None,
-                        })
-                    }),
-                    auto_filter,
-                    sheet_view,
-                    protection,
-                    code_name,
-                    tab_color,
-                )
-            } else {
-                (None, None, None, None, None, None, None, None)
-            };
+                }),
+                auto_filter,
+                sheet_view,
+                protection,
+                code_name,
+                tab_color,
+            )
+        } else {
+            (None, None, None, None, None, None, None, None)
+        };
 
         let (page_setup, page_margins, print_options, header_footer) =
             if features.contains(Features::PAGE_SETUP) {
@@ -760,12 +757,12 @@ fn read_workbook_turbo_filtered(
     }
 
     // Only surface style_table when STYLES requested (COND_FORMAT may have parsed it for dxfs)
-    let style_table_out = if features.contains(Features::STYLES) || features.contains(Features::COND_FORMAT)
-    {
-        style_table
-    } else {
-        None
-    };
+    let style_table_out =
+        if features.contains(Features::STYLES) || features.contains(Features::COND_FORMAT) {
+            style_table
+        } else {
+            None
+        };
 
     Ok(TurboWorkbook {
         sheets,
@@ -816,23 +813,13 @@ fn load_sheet_charts(
             let Some(cx) = read_entry(zip, &chart_path)? else {
                 continue;
             };
-            charts.push(structural::parse_chart(
-                &cx,
-                sheet_idx,
-                chart_path,
-                anchor,
-            ));
+            charts.push(structural::parse_chart(&cx, sheet_idx, chart_path, anchor));
         }
     }
     Ok(charts)
 }
 
-fn empty_sheet(
-    name: String,
-    state: SheetState,
-    kind: SheetKind,
-    features: Features,
-) -> TurboSheet {
+fn empty_sheet(name: String, state: SheetState, kind: SheetKind, features: Features) -> TurboSheet {
     TurboSheet {
         name,
         column_names: Vec::new(),

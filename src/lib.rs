@@ -1,9 +1,9 @@
 mod data;
 mod error;
-mod types;
-mod utils;
 #[cfg(feature = "__arrow")]
 pub mod turbo;
+mod types;
+mod utils;
 
 use std::fmt::Display;
 
@@ -103,9 +103,16 @@ fn _kyrax(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // turbo write path (W1 silo A core)
     {
-        use crate::turbo::write::python::{py_write_excel_turbo, py_write_excel_turbo_bytes};
+        use crate::turbo::write::python::{
+            PyEditableSheet, PyEditableWorkbook, py_edit_excel, py_write_excel_turbo,
+            py_write_excel_turbo_bytes, py_write_excel_turbo_stream,
+        };
         m.add_function(wrap_pyfunction!(py_write_excel_turbo, m)?)?;
+        m.add_function(wrap_pyfunction!(py_write_excel_turbo_stream, m)?)?;
         m.add_function(wrap_pyfunction!(py_write_excel_turbo_bytes, m)?)?;
+        m.add_function(wrap_pyfunction!(py_edit_excel, m)?)?;
+        m.add_class::<PyEditableWorkbook>()?;
+        m.add_class::<PyEditableSheet>()?;
     }
 
     m.add("__version__", get_python_version())?;

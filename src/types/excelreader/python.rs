@@ -75,6 +75,7 @@ impl ExcelReader {
                 offset,
                 limit,
                 opts.whitespace_as_null,
+                &opts.dtype_coercion,
             ),
             ExcelSheetData::Ref(data) => record_batch_from_data_and_columns(
                 &available_columns,
@@ -82,6 +83,7 @@ impl ExcelReader {
                 offset,
                 limit,
                 opts.whitespace_as_null,
+                &opts.dtype_coercion,
             ),
         }
     }
@@ -108,9 +110,13 @@ impl ExcelReader {
                         .worksheet_range_ref(&sheet_meta.name)
                 })
                 .into_pyresult()?;
-            let rb = py
-                .detach(|| Self::load_sheet_eager(&range.into(), opts))
-                .into_pyresult()?;
+            let rb = py.detach(|| Self::load_sheet_eager(&range.into(), opts));
+
+            // GIL is held again here, so the promotions collected during the detached build can be
+            // surfaced as warnings.
+            crate::data::warn_dtype_promotions(py, &format!("sheet \"{}\"", sheet_meta.name))?;
+
+            let rb = rb.into_pyresult()?;
 
             #[cfg(feature = "pyarrow")]
             {

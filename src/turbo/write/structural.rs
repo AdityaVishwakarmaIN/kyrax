@@ -6,7 +6,7 @@ use super::model::{
     Comment, DefinedName, DocProps, ExternalLink, HeaderFooter, Hyperlink, PageMargins, PageSetup,
     PrintOptions, Scenario, Sheet, SheetProtection, TableDef, Workbook,
 };
-use super::xml::{escape_text, write_escaped_attr, write_f64, write_u32, push, push_str};
+use super::xml::{escape_text, push, push_str, write_escaped_attr, write_f64, write_u32};
 use std::collections::HashMap;
 
 pub const SHEET_NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
@@ -109,14 +109,14 @@ pub fn collect_defined_names(wb: &Workbook) -> Vec<DefinedName> {
 }
 
 pub fn write_core_props(props: &DocProps, creator_fallback: &str) -> String {
-    let creator = props
-        .creator
-        .as_deref()
-        .unwrap_or(creator_fallback);
+    let creator = props.creator.as_deref().unwrap_or(creator_fallback);
     let mut s = String::from(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">"#,
     );
-    s.push_str(&format!("<dc:creator>{}</dc:creator>", escape_text(creator)));
+    s.push_str(&format!(
+        "<dc:creator>{}</dc:creator>",
+        escape_text(creator)
+    ));
     if let Some(t) = &props.title {
         s.push_str(&format!("<dc:title>{}</dc:title>", escape_text(t)));
     }
@@ -135,14 +135,8 @@ pub fn write_core_props(props: &DocProps, creator_fallback: &str) -> String {
             escape_text(lm)
         ));
     }
-    let created = props
-        .created
-        .as_deref()
-        .unwrap_or("2020-01-01T00:00:00Z");
-    let modified = props
-        .modified
-        .as_deref()
-        .unwrap_or("2020-01-01T00:00:00Z");
+    let created = props.created.as_deref().unwrap_or("2020-01-01T00:00:00Z");
+    let modified = props.modified.as_deref().unwrap_or("2020-01-01T00:00:00Z");
     s.push_str(&format!(
         r#"<dcterms:created xsi:type="dcterms:W3CDTF">{created}</dcterms:created>"#
     ));
@@ -218,10 +212,7 @@ pub fn write_table(t: &TableDef, id: usize) -> String {
         escape_attr(&t.ref_)
     );
     s.push_str(&format!(r#"<autoFilter ref="{}"/>"#, escape_attr(&t.ref_)));
-    s.push_str(&format!(
-        r#"<tableColumns count="{}">"#,
-        t.columns.len()
-    ));
+    s.push_str(&format!(r#"<tableColumns count="{}">"#, t.columns.len()));
     for (i, col) in t.columns.iter().enumerate() {
         s.push_str(&format!(
             r#"<tableColumn id="{}" name="{}"/>"#,
@@ -270,9 +261,7 @@ pub fn write_comments(comments: &[Comment]) -> (String, String) {
     let mut vml = String::from(
         r#"<xml xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:x="urn:schemas-microsoft-com:office:excel">"#,
     );
-    vml.push_str(
-        r#"<o:shapelayout v:ext="edit"><o:idmap v:ext="edit" data="1"/></o:shapelayout>"#,
-    );
+    vml.push_str(r#"<o:shapelayout v:ext="edit"><o:idmap v:ext="edit" data="1"/></o:shapelayout>"#);
     vml.push_str(
         r#"<v:shapetype id="_x0000_t202" coordsize="21600,21600" o:spt="202" path="m,l,21600r21600,l21600,xe"><v:stroke joinstyle="miter"/><v:path gradientshapeok="t" o:connecttype="rect"/></v:shapetype>"#,
     );

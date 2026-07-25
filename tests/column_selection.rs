@@ -121,9 +121,7 @@ fn test_use_columns_with_table(mut reader: kyrax::ExcelReader) -> Result<()> {
 }
 
 #[rstest]
-fn test_use_columns_with_table_and_provided_columns(
-    mut reader: kyrax::ExcelReader,
-) -> Result<()> {
+fn test_use_columns_with_table_and_provided_columns(mut reader: kyrax::ExcelReader) -> Result<()> {
     let selected_columns = SelectedColumns::Selection(vec![0.into(), 2.into()]);
 
     let opts = LoadSheetOrTableOptions::new_for_table()

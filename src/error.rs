@@ -164,12 +164,7 @@ pub(crate) mod py_errors {
         "calamine returned an error regarding the content of the cell"
     );
     // Calamine error
-    create_exception!(
-        _kyrax,
-        CalamineError,
-        KyraxError,
-        "Generic calamine error"
-    );
+    create_exception!(_kyrax, CalamineError, KyraxError, "Generic calamine error");
     // Sheet not found
     create_exception!(
         _kyrax,
@@ -185,12 +180,7 @@ pub(crate) mod py_errors {
         "Column was not found"
     );
     // Arrow error
-    create_exception!(
-        _kyrax,
-        ArrowError,
-        KyraxError,
-        "Generic arrow error"
-    );
+    create_exception!(_kyrax, ArrowError, KyraxError, "Generic arrow error");
     // Invalid parameters
     create_exception!(
         _kyrax,
@@ -199,19 +189,9 @@ pub(crate) mod py_errors {
         "Provided parameters are invalid"
     );
     // Invalid column
-    create_exception!(
-        _kyrax,
-        InvalidColumnError,
-        KyraxError,
-        "Column is invalid"
-    );
+    create_exception!(_kyrax, InvalidColumnError, KyraxError, "Column is invalid");
     // Internal error
-    create_exception!(
-        _kyrax,
-        InternalError,
-        KyraxError,
-        "Internal kyrax error"
-    );
+    create_exception!(_kyrax, InternalError, KyraxError, "Internal kyrax error");
 
     impl From<error::KyraxError> for PyErr {
         fn from(err: error::KyraxError) -> Self {
@@ -228,9 +208,7 @@ pub(crate) mod py_errors {
                 KyraxErrorKind::SheetNotFound(_) => SheetNotFoundError::new_err(message),
                 KyraxErrorKind::ColumnNotFound(_) => ColumnNotFoundError::new_err(message),
                 KyraxErrorKind::ArrowError(_) => ArrowError::new_err(message),
-                KyraxErrorKind::InvalidParameters(_) => {
-                    InvalidParametersError::new_err(message)
-                }
+                KyraxErrorKind::InvalidParameters(_) => InvalidParametersError::new_err(message),
                 KyraxErrorKind::InvalidColumn(_) => InvalidColumnError::new_err(message),
                 KyraxErrorKind::Internal(_) => ArrowError::new_err(message),
             }

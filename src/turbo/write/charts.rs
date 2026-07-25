@@ -467,7 +467,8 @@ pub fn write_drawing(charts: &[Chart], chart_paths: &[String]) -> (String, Strin
     }
     drawing.push_str("</wsDr>");
 
-    let mut rels = format!(r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="{PKG_REL_NS}">"#);
+    let mut rels =
+        format!(r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="{PKG_REL_NS}">"#);
     for (i, path) in chart_paths.iter().enumerate() {
         let rid = i + 1;
         rels.push_str(&format!(

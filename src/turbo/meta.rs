@@ -4,8 +4,8 @@
 //! Stream B (sheet-level): dataValidations + conditionalFormatting (tail).
 
 use super::decode::decode_bytes;
-use super::structural::{find_attr, parse_range, CellRange};
-use super::styles::{parse_color, Color};
+use super::structural::{CellRange, find_attr, parse_range};
+use super::styles::{Color, parse_color};
 
 // ============================================================================
 // A1 — Row / column dimensions
@@ -439,9 +439,7 @@ fn attr_u8(tag: &[u8], name: &[u8]) -> Option<u8> {
 }
 
 fn attr_owned(tag: &[u8], name: &[u8], scratch: &mut Vec<u8>) -> Option<String> {
-    find_attr(tag, name).map(|raw| {
-        String::from_utf8_lossy(decode_bytes(raw, scratch)).into_owned()
-    })
+    find_attr(tag, name).map(|raw| String::from_utf8_lossy(decode_bytes(raw, scratch)).into_owned())
 }
 
 fn parse_a1_cell(s: &[u8]) -> Option<(u32, u32)> {
@@ -459,8 +457,8 @@ pub fn parse_row_dim(row_tag: &[u8], sheet_row: Option<u32>) -> Option<RowDim> {
     let has_collapsed = find_attr(row_tag, b"collapsed").is_some();
     let has_s = find_attr(row_tag, b"s").is_some();
     let has_custom_format = find_attr(row_tag, b"customFormat").is_some();
-    let has_thick = find_attr(row_tag, b"thickBot").is_some()
-        || find_attr(row_tag, b"thickTop").is_some();
+    let has_thick =
+        find_attr(row_tag, b"thickBot").is_some() || find_attr(row_tag, b"thickTop").is_some();
     let has_custom_height = find_attr(row_tag, b"customHeight").is_some();
     if !(has_ht
         || has_hidden
@@ -473,9 +471,7 @@ pub fn parse_row_dim(row_tag: &[u8], sheet_row: Option<u32>) -> Option<RowDim> {
     {
         return None;
     }
-    let row = sheet_row
-        .or_else(|| attr_u32(row_tag, b"r"))
-        .unwrap_or(1);
+    let row = sheet_row.or_else(|| attr_u32(row_tag, b"r")).unwrap_or(1);
     Some(RowDim {
         row,
         height: attr_f64(row_tag, b"ht"),
@@ -490,7 +486,9 @@ pub fn parse_row_dim(row_tag: &[u8], sheet_row: Option<u32>) -> Option<RowDim> {
 // Pre-sheetData header scan
 // ============================================================================
 
-pub fn scan_sheet_header(header: &[u8]) -> (
+pub fn scan_sheet_header(
+    header: &[u8],
+) -> (
     Vec<ColDim>,
     Option<SheetFormat>,
     Option<SheetViewMeta>,
@@ -561,7 +559,8 @@ pub fn scan_sheet_header(header: &[u8]) -> (
             let mut i = 0usize;
             while let Some(o) = memchr::memmem::find(&region[i..], b"<col ") {
                 let start = i + o;
-                let te = start + memchr::memchr(b'>', &region[start..]).unwrap_or(region.len() - start);
+                let te =
+                    start + memchr::memchr(b'>', &region[start..]).unwrap_or(region.len() - start);
                 let tag = &region[start..te];
                 let min = attr_u32(tag, b"min").unwrap_or(1);
                 let max = attr_u32(tag, b"max").unwrap_or(min);
@@ -647,7 +646,14 @@ pub fn scan_sheet_header(header: &[u8]) -> (
         });
     }
 
-    (cols, sheet_format, sheet_view, code_name, tab_color, fit_to_page)
+    (
+        cols,
+        sheet_format,
+        sheet_view,
+        code_name,
+        tab_color,
+        fit_to_page,
+    )
 }
 
 // ============================================================================
@@ -1217,7 +1223,7 @@ fn local_elem_text(xml: &[u8], local: &str, scratch: &mut Vec<u8>) -> Option<Str
             let abs = k + co;
             // look back for </
             if abs >= 2 && xml[abs - 2] == b'<' && xml[abs - 1] == b'/'
-                || (abs >= 3 && xml[abs - 1] != b'/' /* ns prefix */)
+                || (abs >= 3 && xml[abs - 1] != b'/'/* ns prefix */)
             {
                 // find '<'
                 let mut s = abs;

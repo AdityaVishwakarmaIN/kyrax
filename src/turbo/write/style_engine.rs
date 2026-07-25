@@ -25,8 +25,8 @@ fn esc_text(s: &str, out: &mut Vec<u8>) {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ColorSpec {
-    Rgb(u32),     // aRGB 0xAARRGGBB (openpyxl often stores AA=00 for 6-digit input)
-    Theme(u32),   // theme index
+    Rgb(u32),   // aRGB 0xAARRGGBB (openpyxl often stores AA=00 for 6-digit input)
+    Theme(u32), // theme index
     Indexed(u32),
     Auto,
 }
@@ -516,7 +516,7 @@ impl ProtDesc {
 // Style descriptor (user-facing) + StyleArray
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct StyleDesc {
     pub font: Option<FontDesc>,
     pub fill: Option<FillDesc>,
@@ -593,9 +593,15 @@ fn builtin_formats() -> &'static [(&'static str, i32)] {
         ("#,##0.00_);(#,##0.00)", 39),
         ("#,##0.00_);[Red](#,##0.00)", 40),
         ("_(* #,##0_);_(* \\(#,##0\\);_(* \"-\"_);_(@_)", 41),
-        ("_(\"$\"* #,##0_);_(\"$\"* \\(#,##0\\);_(\"$\"* \"-\"_);_(@_)", 42),
+        (
+            "_(\"$\"* #,##0_);_(\"$\"* \\(#,##0\\);_(\"$\"* \"-\"_);_(@_)",
+            42,
+        ),
         ("_(* #,##0.00_);_(* \\(#,##0.00\\);_(* \"-\"??_);_(@_)", 43),
-        ("_(\"$\"* #,##0.00_)_(\"$\"* \\(#,##0.00\\)_(\"$\"* \"-\"??_)_(@_)", 44),
+        (
+            "_(\"$\"* #,##0.00_)_(\"$\"* \\(#,##0.00\\)_(\"$\"* \"-\"??_)_(@_)",
+            44,
+        ),
         ("mm:ss", 45),
         ("[h]:mm:ss", 46),
         ("mmss.0", 47),
@@ -622,16 +628,14 @@ pub fn is_builtin_format(code: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 pub const COLOR_INDEX: &[&str] = &[
-    "00000000", "00FFFFFF", "00FF0000", "0000FF00", "000000FF", "00FFFF00", "00FF00FF",
-    "0000FFFF", "00000000", "00FFFFFF", "00FF0000", "0000FF00", "000000FF", "00FFFF00",
-    "00FF00FF", "0000FFFF", "00800000", "00008000", "00000080", "00808000", "00800080",
-    "00008080", "00C0C0C0", "00808080", "009999FF", "00993366", "00FFFFCC", "00CCFFFF",
-    "00660066", "00FF8080", "000066CC", "00CCCCFF", "00000080", "00FF00FF", "00FFFF00",
-    "0000FFFF", "00800080", "00800000", "00008080", "000000FF", "0000CCFF", "00CCFFFF",
-    "00CCFFCC", "00FFFF99", "0099CCFF", "00FF99CC", "00CC99FF", "00FFCC99", "003366FF",
-    "0033CCCC", "0099CC00", "00FFCC00", "00FF9900", "00FF6600", "00666699", "00969696",
-    "00003366", "00339966", "00003300", "00333300", "00993300", "00993366", "00333399",
-    "00333333",
+    "00000000", "00FFFFFF", "00FF0000", "0000FF00", "000000FF", "00FFFF00", "00FF00FF", "0000FFFF",
+    "00000000", "00FFFFFF", "00FF0000", "0000FF00", "000000FF", "00FFFF00", "00FF00FF", "0000FFFF",
+    "00800000", "00008000", "00000080", "00808000", "00800080", "00008080", "00C0C0C0", "00808080",
+    "009999FF", "00993366", "00FFFFCC", "00CCFFFF", "00660066", "00FF8080", "000066CC", "00CCCCFF",
+    "00000080", "00FF00FF", "00FFFF00", "0000FFFF", "00800080", "00800000", "00008080", "000000FF",
+    "0000CCFF", "00CCFFFF", "00CCFFCC", "00FFFF99", "0099CCFF", "00FF99CC", "00CC99FF", "00FFCC99",
+    "003366FF", "0033CCCC", "0099CC00", "00FFCC00", "00FF9900", "00FF6600", "00666699", "00969696",
+    "00003366", "00339966", "00003300", "00333300", "00993300", "00993366", "00333399", "00333333",
 ];
 
 // ---------------------------------------------------------------------------
@@ -757,8 +761,9 @@ pub struct StyleEngine {
     named_styles: Vec<NamedStyleRec>,
     named_by_name: AHashMap<String, u32>,
     dxfs: Pool<DxfDesc>,
-    /// Cache StyleDesc fingerprint → cellXf for bench path (optional).
-    desc_cache: AHashMap<u64, u32>,
+    /// Cache StyleDesc → cellXf, keyed by the descriptor itself (same
+    /// convention as `Pool`, so a hash collision cannot alias two styles).
+    desc_cache: AHashMap<StyleDesc, u32>,
 }
 
 impl Default for StyleEngine {
@@ -809,7 +814,12 @@ impl StyleEngine {
         self.named_styles.push(normal);
     }
 
-    pub fn register_named_style(&mut self, name: &str, desc: &StyleDesc, builtin_id: Option<i32>) -> u32 {
+    pub fn register_named_style(
+        &mut self,
+        name: &str,
+        desc: &StyleDesc,
+        builtin_id: Option<i32>,
+    ) -> u32 {
         if let Some(&id) = self.named_by_name.get(name) {
             return id;
         }
@@ -874,6 +884,10 @@ impl StyleEngine {
 
     /// Full StyleDesc → cellXf index (deduped).
     pub fn resolve(&mut self, desc: &StyleDesc) -> u32 {
+        if let Some(&xf_idx) = self.desc_cache.get(desc) {
+            return xf_idx;
+        }
+
         let mut arr = StyleArray::default();
 
         if let Some(name) = desc.named_style.as_ref() {
@@ -917,7 +931,23 @@ impl StyleEngine {
             arr.pivot_button = 1;
         }
 
-        self.cell_styles.add(arr)
+        let xf_idx = self.cell_styles.add(arr);
+        self.desc_cache.insert(desc.clone(), xf_idx);
+        xf_idx
+    }
+
+    /// Access to internal pools for append-only splice.
+    pub fn fonts(&self) -> &[FontDesc] {
+        &self.fonts.items
+    }
+    pub fn fills(&self) -> &[FillDesc] {
+        &self.fills.items
+    }
+    pub fn borders(&self) -> &[BorderDesc] {
+        &self.borders.items
+    }
+    pub fn cell_xfs(&self) -> &[StyleArray] {
+        &self.cell_styles.items
     }
 
     /// Register CF differential style → dxfId (rule 19).
@@ -1226,7 +1256,12 @@ mod tests {
     fn unique_styles_linear() {
         let mut eng = StyleEngine::new();
         for i in 0..1000u32 {
-            let fg = format!("{:02X}{:02X}{:02X}", (i & 0xFF) as u8, ((i >> 8) & 0xFF) as u8, 0);
+            let fg = format!(
+                "{:02X}{:02X}{:02X}",
+                (i & 0xFF) as u8,
+                ((i >> 8) & 0xFF) as u8,
+                0
+            );
             eng.resolve(&StyleDesc {
                 fill: Some(FillDesc::solid(&fg)),
                 num_fmt: Some(format!("0.0\"x{i}\"")),

@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use kyrax::turbo::{read_workbook_turbo, Features};
+use kyrax::turbo::{Features, read_workbook_turbo};
 
 /// Minimal store-only (method 0) ZIP with the given entries.
 fn write_store_zip(path: &std::path::Path, entries: &[(&str, &[u8])]) {
@@ -27,12 +27,7 @@ fn write_store_zip(path: &std::path::Path, entries: &[(&str, &[u8])]) {
         body.extend_from_slice(&0u16.to_le_bytes()); // extra
         body.extend_from_slice(name_b);
         body.extend_from_slice(data);
-        local_records.push((
-            name.to_string(),
-            offset,
-            data.len(),
-            data.len(),
-        ));
+        local_records.push((name.to_string(), offset, data.len(), data.len()));
     }
     let cd_off = body.len();
     for (name, local_off, csize, usize_) in &local_records {
@@ -366,11 +361,10 @@ fn vba_rel_missing_part_no_panic() {
         ],
     );
 
-    let wb = std::panic::catch_unwind(|| {
-        read_workbook_turbo(path.to_str().unwrap(), Features::ALL)
-    })
-    .expect("vba missing part must not panic")
-    .expect("vba missing part should Ok");
+    let wb =
+        std::panic::catch_unwind(|| read_workbook_turbo(path.to_str().unwrap(), Features::ALL))
+            .expect("vba missing part must not panic")
+            .expect("vba missing part should Ok");
     let vba = wb.vba.as_ref().expect("vba flag on");
     assert!(vba.present);
     assert!(vba.bytes.is_none());
@@ -578,11 +572,10 @@ fn pivot_missing_cache_rel_no_panic() {
         ],
     );
 
-    let wb = std::panic::catch_unwind(|| {
-        read_workbook_turbo(path.to_str().unwrap(), Features::ALL)
-    })
-    .expect("pivot missing cache must not panic")
-    .expect("pivot missing cache should Ok");
+    let wb =
+        std::panic::catch_unwind(|| read_workbook_turbo(path.to_str().unwrap(), Features::ALL))
+            .expect("pivot missing cache must not panic")
+            .expect("pivot missing cache should Ok");
     let pivs = wb.sheets[0].pivots.as_ref().expect("pivots flag");
     // May be empty or a pivot with empty cache fields — either is fine.
     assert!(pivs.len() <= 1);

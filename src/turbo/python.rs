@@ -8,19 +8,20 @@ use arrow_array::{
     types::Int32Type,
 };
 use pyo3::{
-    Bound, PyAny, PyResult, Python, exceptions::PyValueError, prelude::*,
+    Bound, PyAny, PyResult, Python,
+    exceptions::PyValueError,
+    prelude::*,
     types::{PyDict, PyList},
 };
 
 use super::{
-    a1, list_sheet_names, range_a1, read_workbook_turbo_sheet, ActivePane, Alignment,
-    AutoFilterMeta,
-    Border, CKind, CellError, CellRange, CfRuleRec, ChartAnchor, ChartMeta, Color, ColDim,
-    DataValidationRec, DefinedName, Features, Fill, Font, FormulaColumn,
-    HeaderFooterMeta, Hyperlink, LinkTarget, NameKind, NamedStyleRec, PageMarginsMeta,
-    PageSetupMeta, Pane, PaneState, Person, PivotTableMeta, PrintOptionsMeta, Protection, RowDim,
-    Scope, SheetComments, SheetFormat, SheetKind, SheetProtectionMeta, SheetState, SheetViewMeta,
-    Side, StyleTable, Table, ThreadedComment, TurboError, VbaProject, WorkbookProps,
+    ActivePane, Alignment, AutoFilterMeta, Border, CKind, CellError, CellRange, CfRuleRec,
+    ChartAnchor, ChartMeta, ColDim, Color, DataValidationRec, DefinedName, Features, Fill, Font,
+    FormulaColumn, HeaderFooterMeta, Hyperlink, LinkTarget, NameKind, NamedStyleRec,
+    PageMarginsMeta, PageSetupMeta, Pane, PaneState, Person, PivotTableMeta, PrintOptionsMeta,
+    Protection, RowDim, Scope, SheetComments, SheetFormat, SheetKind, SheetProtectionMeta,
+    SheetState, SheetViewMeta, Side, StyleTable, Table, ThreadedComment, TurboError, VbaProject,
+    WorkbookProps, a1, list_sheet_names, range_a1, read_workbook_turbo_sheet,
 };
 use crate::error::{KyraxError, KyraxErrorKind, py_errors::IntoPyResult};
 
@@ -211,7 +212,10 @@ fn style_table_to_list<'py>(py: Python<'py>, st: &StyleTable) -> PyResult<Bound<
     PyList::new(py, items)
 }
 
-fn named_styles_to_list<'py>(py: Python<'py>, styles: &[NamedStyleRec]) -> PyResult<Bound<'py, PyList>> {
+fn named_styles_to_list<'py>(
+    py: Python<'py>,
+    styles: &[NamedStyleRec],
+) -> PyResult<Bound<'py, PyList>> {
     let mut items = Vec::with_capacity(styles.len());
     for ns in styles {
         let d = PyDict::new(py);
@@ -461,10 +465,7 @@ pub struct PyTurboSheet {
 }
 
 impl PyTurboSheet {
-    fn from_parts(
-        sheet: super::TurboSheet,
-        style_table: Option<StyleTable>,
-    ) -> Self {
+    fn from_parts(sheet: super::TurboSheet, style_table: Option<StyleTable>) -> Self {
         Self {
             name: sheet.name,
             column_names: sheet.column_names,
@@ -576,13 +577,7 @@ impl PyTurboSheet {
             cols.iter()
                 .map(|arr| {
                     (0..arr.len())
-                        .map(|i| {
-                            if arr.is_null(i) {
-                                0
-                            } else {
-                                arr.value(i)
-                            }
-                        })
+                        .map(|i| if arr.is_null(i) { 0 } else { arr.value(i) })
                         .collect()
                 })
                 .collect()
@@ -611,9 +606,7 @@ impl PyTurboSheet {
                 if let Some(rb) = self.formulas_batch.get() {
                     return Ok(Some(record_batch_to_py(py, rb.clone())?));
                 }
-                let rb = py
-                    .detach(|| formulas_to_batch(f))
-                    .into_pyresult()?;
+                let rb = py.detach(|| formulas_to_batch(f)).into_pyresult()?;
                 let _ = self.formulas_batch.set(rb.clone());
                 Ok(Some(record_batch_to_py(py, rb)?))
             }
@@ -661,9 +654,7 @@ impl PyTurboSheet {
     fn comments<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
         match &self.comments {
             Some(sc) => {
-                let rb = py
-                    .detach(|| comments_to_batch(sc))
-                    .into_pyresult()?;
+                let rb = py.detach(|| comments_to_batch(sc)).into_pyresult()?;
                 Ok(Some(record_batch_to_py(py, rb)?))
             }
             None => Ok(None),
@@ -1023,10 +1014,7 @@ fn pane_to_dict<'py>(py: Python<'py>, p: &Pane) -> PyResult<Bound<'py, PyDict>> 
     let d = PyDict::new(py);
     d.set_item("x_split", p.x_split)?;
     d.set_item("y_split", p.y_split)?;
-    d.set_item(
-        "top_left_cell",
-        p.top_left_cell.map(|(r, c)| a1_cell(r, c)),
-    )?;
+    d.set_item("top_left_cell", p.top_left_cell.map(|(r, c)| a1_cell(r, c)))?;
     let active = match p.active_pane {
         ActivePane::BottomRight => "bottomRight",
         ActivePane::TopRight => "topRight",
@@ -1533,8 +1521,7 @@ fn resolve_sheet_index(idx_or_name: &Bound<'_, PyAny>, names: &[String]) -> PyRe
         let resolved = if idx < 0 { n + idx } else { idx };
         if resolved < 0 || resolved as usize >= names.len() {
             return Err(
-                KyraxErrorKind::SheetNotFound(crate::types::IdxOrName::Idx(idx as usize))
-                    .into(),
+                KyraxErrorKind::SheetNotFound(crate::types::IdxOrName::Idx(idx as usize)).into(),
             )
             .into_pyresult();
         }
@@ -1573,4 +1560,3 @@ pub fn py_read_excel_turbo(path: &str) -> PyResult<PyTurboReader> {
         vba: None,
     })
 }
-

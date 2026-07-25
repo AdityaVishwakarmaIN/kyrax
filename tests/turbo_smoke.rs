@@ -1,7 +1,7 @@
 //! Smoke tests for the turbo fast-path reader against testdata fixtures.
 #![cfg(feature = "__arrow")]
 
-use kyrax::turbo::{read_workbook_turbo, Features, LinkTarget};
+use kyrax::turbo::{Features, LinkTarget, read_workbook_turbo};
 
 fn testdata(name: &str) -> String {
     format!("{}/testdata/{}", env!("CARGO_MANIFEST_DIR"), name)
@@ -54,7 +54,11 @@ fn turbo_structured() {
     // Value region is A–J (10 cols); sparse hyperlink/merge anchors place cells out
     // to column X (openpyxl max_column=24). Honoring cell `@r` yields ncols=24
     // (sequential packing previously under-counted at 12).
-    assert!(s.ncols >= 10, "expected at least 10 value columns, got {}", s.ncols);
+    assert!(
+        s.ncols >= 10,
+        "expected at least 10 value columns, got {}",
+        s.ncols
+    );
     assert_eq!(s.ncols, 24);
     assert_eq!(s.merges.as_ref().map(|m| m.len()), Some(20_000));
     let hlinks = s.hyperlinks.as_ref().expect("hyperlinks");
@@ -66,10 +70,7 @@ fn turbo_structured() {
     let n_int = hlinks.len() - n_ext;
     assert_eq!(n_ext, 21_000);
     assert_eq!(n_int, 9_000);
-    assert_eq!(
-        wb.defined_names.as_ref().map(|d| d.len()),
-        Some(198)
-    );
+    assert_eq!(wb.defined_names.as_ref().map(|d| d.len()), Some(198));
     assert_eq!(s.tables.as_ref().map(|t| t.len()), Some(20));
 }
 

@@ -10,7 +10,7 @@
 
 use libdeflater::{CompressionLvl, Compressor};
 use std::cell::RefCell;
-use std::io::{self, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 
 const SIG_LOCAL: u32 = 0x0403_4b50;
 const SIG_CENTRAL: u32 = 0x0201_4b50;
@@ -305,7 +305,262 @@ impl Default for ZipWriter {
     }
 }
 
-fn write_local_header(out: &mut Vec<u8>, e: &Entry) -> io::Result<()> {
+struct ActiveEntry {
+    name: String,
+    method: u16,
+    local_offset: u64,
+    crc32: u32,
+    uncomp_size: u64,
+    comp_size: u64,
+    buf: Vec<u8>,
+}
+
+/// Seekable streaming ZIP writer.
+pub struct StreamingZipWriter<W: Write + Seek> {
+    w: W,
+    entries: Vec<Entry>,
+    current: Option<ActiveEntry>,
+    level: CompressionLvl,
+}
+
+impl<W: Write + Seek> StreamingZipWriter<W> {
+    pub fn new(w: W) -> Self {
+        Self {
+            w,
+            entries: Vec::new(),
+            current: None,
+            level: CompressionLvl::new(6).unwrap_or_else(|_| CompressionLvl::default()),
+        }
+    }
+
+    pub fn with_level(w: W, level: i32) -> Self {
+        let level = CompressionLvl::new(level).unwrap_or_else(|_| CompressionLvl::default());
+        Self {
+            w,
+            entries: Vec::new(),
+            current: None,
+            level,
+        }
+    }
+
+    pub fn start_entry(&mut self, name: &str, method: u16) -> io::Result<()> {
+        if self.current.is_some() {
+            self.finish_entry()?;
+        }
+
+        let local_offset = self.w.stream_position()?;
+
+        // Write local header with Zip64 extra field pre-allocated (20 bytes).
+        self.w.write_all(&SIG_LOCAL.to_le_bytes())?;
+        self.w.write_all(&45u16.to_le_bytes())?; // version needed for Zip64
+        self.w.write_all(&0u16.to_le_bytes())?; // flags
+        self.w.write_all(&method.to_le_bytes())?;
+        self.w.write_all(&0u16.to_le_bytes())?; // mod time
+        self.w.write_all(&0u16.to_le_bytes())?; // mod date
+        self.w.write_all(&0u32.to_le_bytes())?; // crc32 placeholder
+        self.w.write_all(&0xFFFF_FFFFu32.to_le_bytes())?; // comp size sentinel
+        self.w.write_all(&0xFFFF_FFFFu32.to_le_bytes())?; // uncomp size sentinel
+
+        let nlen = name.len() as u16;
+        self.w.write_all(&nlen.to_le_bytes())?;
+        self.w.write_all(&20u16.to_le_bytes())?; // Zip64 extra field length
+        self.w.write_all(name.as_bytes())?;
+
+        // 20-byte Zip64 extra field payload: ID (2B) + size (2B) + uncomp_size (8B) + comp_size (8B)
+        self.w.write_all(&1u16.to_le_bytes())?;
+        self.w.write_all(&16u16.to_le_bytes())?;
+        self.w.write_all(&0u64.to_le_bytes())?; // uncomp_size placeholder
+        self.w.write_all(&0u64.to_le_bytes())?; // comp_size placeholder
+
+        self.current = Some(ActiveEntry {
+            name: name.to_string(),
+            method,
+            local_offset,
+            crc32: 0xFFFF_FFFF,
+            uncomp_size: 0,
+            comp_size: 0,
+            buf: Vec::new(),
+        });
+
+        Ok(())
+    }
+
+    pub fn write_chunk(&mut self, chunk: &[u8]) -> io::Result<()> {
+        let entry = self
+            .current
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no active entry"))?;
+
+        entry.crc32 = update_crc32(entry.crc32, chunk);
+        entry.uncomp_size += chunk.len() as u64;
+
+        if entry.method == METHOD_STORE {
+            entry.comp_size += chunk.len() as u64;
+            self.w.write_all(chunk)?;
+        } else {
+            entry.buf.extend_from_slice(chunk);
+        }
+
+        Ok(())
+    }
+
+    pub fn finish_entry(&mut self) -> io::Result<()> {
+        let mut entry = match self.current.take() {
+            Some(e) => e,
+            None => return Ok(()),
+        };
+
+        let start_method = entry.method;
+        if entry.method == METHOD_DEFLATE {
+            let (final_method, payload) = deflate_or_store_level(&entry.buf, self.level);
+            entry.method = final_method;
+            entry.comp_size = payload.len() as u64;
+            self.w.write_all(&payload)?;
+        }
+
+        let final_crc = entry.crc32 ^ 0xFFFF_FFFF;
+        let end_pos = self.w.stream_position()?;
+
+        if entry.method != start_method {
+            self.w.seek(SeekFrom::Start(entry.local_offset + 8))?;
+            self.w.write_all(&entry.method.to_le_bytes())?;
+        }
+
+        self.w.seek(SeekFrom::Start(entry.local_offset + 14))?;
+        self.w.write_all(&final_crc.to_le_bytes())?;
+
+        let cs32 = if entry.comp_size >= 0xFFFF_FFFF {
+            0xFFFF_FFFFu32
+        } else {
+            entry.comp_size as u32
+        };
+        let us32 = if entry.uncomp_size >= 0xFFFF_FFFF {
+            0xFFFF_FFFFu32
+        } else {
+            entry.uncomp_size as u32
+        };
+        self.w.write_all(&cs32.to_le_bytes())?;
+        self.w.write_all(&us32.to_le_bytes())?;
+
+        let zip64_extra_pos = entry.local_offset + 30 + entry.name.len() as u64 + 4;
+        self.w.seek(SeekFrom::Start(zip64_extra_pos))?;
+        self.w.write_all(&entry.uncomp_size.to_le_bytes())?;
+        self.w.write_all(&entry.comp_size.to_le_bytes())?;
+
+        self.w.seek(SeekFrom::Start(end_pos))?;
+
+        self.entries.push(Entry {
+            name: entry.name,
+            method: entry.method,
+            crc32: final_crc,
+            comp_size: entry.comp_size,
+            uncomp_size: entry.uncomp_size,
+            local_offset: entry.local_offset,
+            data: Vec::new(),
+        });
+
+        Ok(())
+    }
+
+    pub fn add_precompressed(&mut self, part: PrecompressedPart) -> io::Result<()> {
+        if self.current.is_some() {
+            self.finish_entry()?;
+        }
+
+        let local_offset = self.w.stream_position()?;
+        let entry = Entry {
+            name: part.name,
+            method: part.method,
+            crc32: part.crc32,
+            comp_size: part.data.len() as u64,
+            uncomp_size: part.uncomp_size,
+            local_offset,
+            data: Vec::new(),
+        };
+
+        write_local_header(&mut self.w, &entry)?;
+        self.w.write_all(&part.data)?;
+        self.entries.push(entry);
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> io::Result<W> {
+        if self.current.is_some() {
+            self.finish_entry()?;
+        }
+
+        let cd_offset = self.w.stream_position()?;
+        for e in &self.entries {
+            write_central_header(&mut self.w, e)?;
+        }
+        let cd_end = self.w.stream_position()?;
+        let cd_size = cd_end - cd_offset;
+        let count = self.entries.len() as u64;
+
+        let need_zip64 = count >= 0xFFFF
+            || cd_size >= 0xFFFF_FFFF
+            || cd_offset >= 0xFFFF_FFFF
+            || self.entries.iter().any(|e| {
+                e.comp_size >= 0xFFFF_FFFF
+                    || e.uncomp_size >= 0xFFFF_FFFF
+                    || e.local_offset >= 0xFFFF_FFFF
+            });
+
+        if need_zip64 {
+            let zip64_eocd_offset = self.w.stream_position()?;
+            self.w.write_all(&SIG_ZIP64_EOCD.to_le_bytes())?;
+            self.w.write_all(&44u64.to_le_bytes())?;
+            self.w.write_all(&45u16.to_le_bytes())?;
+            self.w.write_all(&45u16.to_le_bytes())?;
+            self.w.write_all(&0u32.to_le_bytes())?;
+            self.w.write_all(&0u32.to_le_bytes())?;
+            self.w.write_all(&count.to_le_bytes())?;
+            self.w.write_all(&count.to_le_bytes())?;
+            self.w.write_all(&cd_size.to_le_bytes())?;
+            self.w.write_all(&cd_offset.to_le_bytes())?;
+            self.w.write_all(&SIG_ZIP64_LOCATOR.to_le_bytes())?;
+            self.w.write_all(&0u32.to_le_bytes())?;
+            self.w.write_all(&zip64_eocd_offset.to_le_bytes())?;
+            self.w.write_all(&1u32.to_le_bytes())?;
+        }
+
+        self.w.write_all(&SIG_EOCD.to_le_bytes())?;
+        self.w.write_all(&0u16.to_le_bytes())?;
+        self.w.write_all(&0u16.to_le_bytes())?;
+        let c16 = if count >= 0xFFFF {
+            0xFFFF
+        } else {
+            count as u16
+        };
+        self.w.write_all(&c16.to_le_bytes())?;
+        self.w.write_all(&c16.to_le_bytes())?;
+        let cd_size32 = if cd_size >= 0xFFFF_FFFF {
+            0xFFFF_FFFF
+        } else {
+            cd_size as u32
+        };
+        let cd_off32 = if cd_offset >= 0xFFFF_FFFF {
+            0xFFFF_FFFF
+        } else {
+            cd_offset as u32
+        };
+        self.w.write_all(&cd_size32.to_le_bytes())?;
+        self.w.write_all(&cd_off32.to_le_bytes())?;
+        self.w.write_all(&0u16.to_le_bytes())?;
+
+        Ok(self.w)
+    }
+}
+
+fn update_crc32(mut crc: u32, chunk: &[u8]) -> u32 {
+    for &b in chunk {
+        let idx = ((crc ^ b as u32) & 0xFF) as usize;
+        crc = CRC_TABLE[idx] ^ (crc >> 8);
+    }
+    crc
+}
+
+fn write_local_header(out: &mut impl Write, e: &Entry) -> io::Result<()> {
     out.write_all(&SIG_LOCAL.to_le_bytes())?;
     let (ver, flags, extra) = zip64_local_fields(e);
     out.write_all(&ver.to_le_bytes())?;
@@ -329,7 +584,7 @@ fn write_local_header(out: &mut Vec<u8>, e: &Entry) -> io::Result<()> {
     Ok(())
 }
 
-fn write_central_header(out: &mut Vec<u8>, e: &Entry) -> io::Result<()> {
+fn write_central_header(out: &mut impl Write, e: &Entry) -> io::Result<()> {
     out.write_all(&SIG_CENTRAL.to_le_bytes())?;
     let (ver, flags, extra) = zip64_central_fields(e);
     out.write_all(&ver.to_le_bytes())?;
@@ -384,9 +639,8 @@ fn zip64_local_fields(e: &Entry) -> (u16, u16, Vec<u8>) {
 }
 
 fn zip64_central_fields(e: &Entry) -> (u16, u16, Vec<u8>) {
-    let need = e.comp_size >= 0xFFFF_FFFF
-        || e.uncomp_size >= 0xFFFF_FFFF
-        || e.local_offset >= 0xFFFF_FFFF;
+    let need =
+        e.comp_size >= 0xFFFF_FFFF || e.uncomp_size >= 0xFFFF_FFFF || e.local_offset >= 0xFFFF_FFFF;
     if need {
         let mut extra = Vec::with_capacity(32);
         extra.extend_from_slice(&1u16.to_le_bytes());
@@ -464,5 +718,62 @@ mod tests {
         let bytes = z.finish().unwrap();
         let hay = b"xl/workbook.xml";
         assert!(bytes.windows(hay.len()).any(|w| w == hay));
+    }
+
+    #[test]
+    fn streaming_zip_roundtrip() {
+        use std::io::Cursor;
+        let mut writer = StreamingZipWriter::new(Cursor::new(Vec::new()));
+        writer.start_entry("streamed.txt", METHOD_DEFLATE).unwrap();
+        writer.write_chunk(b"hello ").unwrap();
+        writer.write_chunk(b"world").unwrap();
+        writer.finish_entry().unwrap();
+
+        let pre = compress_part("pre.txt".to_string(), b"precompressed content");
+        writer.add_precompressed(pre).unwrap();
+
+        let cursor = writer.finish().unwrap();
+        let zip_bytes = cursor.into_inner();
+
+        assert_eq!(&zip_bytes[0..4], &SIG_LOCAL.to_le_bytes());
+        let read_streamed = crate::turbo::zipmin::read_entry(&zip_bytes, "streamed.txt").unwrap();
+        assert_eq!(read_streamed, Some(b"hello world".to_vec()));
+
+        let read_pre = crate::turbo::zipmin::read_entry(&zip_bytes, "pre.txt").unwrap();
+        assert_eq!(read_pre, Some(b"precompressed content".to_vec()));
+    }
+
+    #[test]
+    fn streaming_zip64_boundary() {
+        use std::io::Cursor;
+        let mut writer = StreamingZipWriter::new(Cursor::new(Vec::new()));
+
+        let part = PrecompressedPart {
+            name: "big.bin".to_string(),
+            method: METHOD_STORE,
+            crc32: 0x12345678,
+            uncomp_size: 0xFFFF_FFFF,
+            data: b"dummy data".to_vec(),
+        };
+        writer.add_precompressed(part).unwrap();
+
+        let cursor = writer.finish().unwrap();
+        let zip_bytes = cursor.into_inner();
+
+        assert!(
+            zip_bytes
+                .windows(4)
+                .any(|w| w == SIG_ZIP64_EOCD.to_le_bytes())
+        );
+        assert!(
+            zip_bytes
+                .windows(4)
+                .any(|w| w == SIG_ZIP64_LOCATOR.to_le_bytes())
+        );
+
+        let map_res = crate::turbo::zipmin::ArchiveMap::parse(std::sync::Arc::new(zip_bytes));
+        assert!(map_res.is_err());
+        let err_msg = format!("{:?}", map_res.err().unwrap());
+        assert!(err_msg.contains("Zip64"));
     }
 }

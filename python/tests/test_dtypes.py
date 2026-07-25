@@ -79,45 +79,25 @@ def test_sheet_with_mixed_dtypes_and_sample_rows(expected_data: dict[str, list[A
         pl.DataFrame(expected_data_subset, schema_overrides={"Date": pl.Datetime(time_unit="ms")}),
     )
 
-    # Guess the sheet's dtypes on 5 rows only
-    sheet = excel_reader.load_sheet(0, schema_sample_rows=5)
-    # String fields should not have been loaded
-    expected_data["Employee ID"] = [
-        123456.0,
-        44333.0,
-        44333.0,
-        87878.0,
-        87878.0,
-        None,
-        135967.0,
-        None,
-        None,
-    ]
-    expected_data["Asset ID"] = [84444.0] * 7 + [None] * 2
-    expected_data["Mixed dates"] = [datetime(2023, 7, 21)] * 6 + [None] * 3
-    expected_data["Mixed bools"] = [True] * 5 + [False] * 3 + [None]
+    # Guess the sheet's dtypes on 5 rows only.
+    #
+    # The first 5 rows of these columns are homogeneous, so the sampled dtype is narrower than the
+    # column really needs. Values further down that do not fit used to be silently converted to
+    # null; they are now detected while the arrow array is built, and the column is re-typed from
+    # all of its rows instead. A limited sample therefore converges to the same result as a full
+    # one -- it only costs a `UserWarning` announcing the widened dtype.
+    with pytest.warns(UserWarning, match="does not fit|do not fit"):
+        sheet = excel_reader.load_sheet(0, schema_sample_rows=5)
+        pd_df = sheet.to_pandas()
 
-    pd_df = sheet.to_pandas()
-    pd_assert_frame_equal(
-        pd_df,
-        pd.DataFrame(expected_data).astype(
-            {
-                "Date": "datetime64[ms]",
-                "Mixed dates": "datetime64[ms]",
-            }
-        ),
-    )
+    pd_assert_frame_equal(pd_df, pd.DataFrame(expected_data).astype({"Date": "datetime64[ms]"}))
 
-    pl_df = sheet.to_polars()
+    with pytest.warns(UserWarning):
+        pl_df = sheet.to_polars()
+
     pl_assert_frame_equal(
         pl_df,
-        pl.DataFrame(
-            expected_data,
-            schema_overrides={
-                "Date": pl.Datetime(time_unit="ms"),
-                "Mixed dates": pl.Datetime(time_unit="ms"),
-            },
-        ),
+        pl.DataFrame(expected_data, schema_overrides={"Date": pl.Datetime(time_unit="ms")}),
     )
 
 
@@ -235,28 +215,24 @@ def test_dtype_coercion_behavior__strict_sampling_eveything(eager: bool) -> None
 
 @pytest.mark.parametrize("eager", [True, False])
 def test_dtype_coercion_behavior__strict_sampling_limit(eager: bool) -> None:
+    """A limited sample no longer lets strict coercion through silently.
+
+    Sampling 5 rows makes the inferred dtypes look homogeneous, so inference itself raises
+    nothing. The mismatch is caught later, when a value that does not fit the inferred dtype is
+    about to be nulled while building the arrow array: under `strict` that is an error rather
+    than a silent coercion (it used to null those values without a word).
+    """
     excel_reader = kyrax.read_excel(path_for_fixture("fixture-multi-dtypes-columns.xlsx"))
 
-    sheet = (
-        excel_reader.load_sheet_eager(0, dtype_coercion="strict", schema_sample_rows=5)
-        if eager
-        else excel_reader.load_sheet(0, dtype_coercion="strict", schema_sample_rows=5).to_arrow()
-    )
-
-    pd_df = sheet.to_pandas()
-    assert pd_df["Mixed dates"].dtype == "datetime64[ms]"
-    assert (
-        pd_df["Mixed dates"].to_list() == [pd.Timestamp("2023-07-21 00:00:00")] * 6 + [pd.NaT] * 3
-    )
-    assert pd_df["Asset ID"].dtype == "float64"
-    assert pd_df["Asset ID"].replace(np.nan, None).to_list() == [84444.0] * 7 + [None] * 2
-
-    pl_df = pl.from_arrow(data=sheet)
-    assert isinstance(pl_df, pl.DataFrame)
-    assert pl_df["Mixed dates"].dtype == pl.Datetime
-    assert pl_df["Mixed dates"].to_list() == [datetime(2023, 7, 21)] * 6 + [None] * 3
-    assert pl_df["Asset ID"].dtype == pl.Float64
-    assert pl_df["Asset ID"].to_list() == [84444.0] * 7 + [None] * 2
+    with pytest.raises(
+        kyrax.UnsupportedColumnTypeCombinationError, match="type coercion is strict"
+    ):
+        if eager:
+            excel_reader.load_sheet_eager(0, dtype_coercion="strict", schema_sample_rows=5)
+        else:
+            excel_reader.load_sheet(
+                0, dtype_coercion="strict", schema_sample_rows=5
+            ).to_arrow()
 
 
 def test_one_dtype_for_all() -> None:
@@ -559,3 +535,17 @@ def test_guess_dtypes_with_div0_error() -> None:
     pl_df = sheet.to_polars()
     pl_expected_data = pl.DataFrame(expected_data)
     pl_assert_frame_equal(pl_df, pl_expected_data)
+
+
+def test_no_silent_data_loss_contract() -> None:
+    col_name = "numeric_then_string"
+    rows = [[col_name]] + [[i] for i in range(1200)] + [["late_string_value"]]
+    buf = kyrax.write_excel_turbo_bytes([{"name": "Sheet1", "rows": rows}])
+
+    excel_reader = kyrax.read_excel(buf)
+    with pytest.warns(UserWarning, match=col_name):
+        sheet = excel_reader.load_sheet(0)
+        df = sheet.to_pandas()
+
+    assert df[col_name].iloc[1200] == "late_string_value"
+

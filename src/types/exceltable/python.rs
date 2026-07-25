@@ -28,6 +28,7 @@ impl TryFrom<&ExcelTable> for RecordBatch {
             table.offset(),
             table.limit(),
             table.opts.whitespace_as_null,
+            &table.opts.dtype_coercion,
         )
         .with_context(|| {
             format!(
@@ -96,7 +97,13 @@ impl ExcelTable {
 
     #[cfg(feature = "pyarrow")]
     pub fn to_arrow<'py>(&self, py: Python<'py>) -> KyraxResult<Bound<'py, PyAny>> {
-        RecordBatch::try_from(self)
+        let batch = RecordBatch::try_from(self);
+
+        crate::data::warn_dtype_promotions(py, &format!("table \"{}\"", self.name)).map_err(
+            |err| -> KyraxError { crate::error::KyraxErrorKind::Internal(format!("{err}")).into() },
+        )?;
+
+        batch
             .with_context(|| {
                 format!(
                     "could not create RecordBatch from sheet \"{}\"",
@@ -144,7 +151,12 @@ impl ExcelTable {
         py: Python<'py>,
         requested_schema: Option<Bound<'py, PyCapsule>>,
     ) -> PyResult<Bound<'py, PyTuple>> {
-        let record_batch = RecordBatch::try_from(self)
+        let record_batch = RecordBatch::try_from(self);
+
+        // Runs with the GIL held; see the equivalent call in `ExcelSheet::__arrow_c_array__`.
+        crate::data::warn_dtype_promotions(py, &format!("table \"{}\"", self.name))?;
+
+        let record_batch = record_batch
             .with_context(|| format!("could not create RecordBatch from table \"{}\"", self.name))
             .into_pyresult()?;
 

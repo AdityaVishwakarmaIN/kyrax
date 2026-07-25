@@ -270,11 +270,7 @@ pub struct KyraxColumn {
 }
 
 impl KyraxColumn {
-    pub fn try_new(
-        name: String,
-        data: KyraxSeries,
-        len: Option<usize>,
-    ) -> KyraxResult<Self> {
+    pub fn try_new(name: String, data: KyraxSeries, len: Option<usize>) -> KyraxResult<Self> {
         let data_len = match &data {
             KyraxSeries::Null => None,
             KyraxSeries::Bool(v) => Some(v.len()),
@@ -295,9 +291,7 @@ impl KyraxColumn {
             .into());
         }
         let len = len.or(data_len).ok_or_else(|| {
-            KyraxErrorKind::InvalidColumn(
-                "`len` is mandatory for `KyraxSeries::Null`".to_string(),
-            )
+            KyraxErrorKind::InvalidColumn("`len` is mandatory for `KyraxSeries::Null`".to_string())
         })?;
         Ok(Self { name, data, len })
     }
@@ -325,9 +319,7 @@ impl KyraxColumn {
         })?;
         let data = match column_info.dtype {
             DType::Null => KyraxSeries::Null,
-            DType::Int => {
-                KyraxSeries::Int(create_int_vec(data, column_info.index, offset, limit))
-            }
+            DType::Int => KyraxSeries::Int(create_int_vec(data, column_info.index, offset, limit)),
             DType::Float => {
                 KyraxSeries::Float(create_float_vec(data, column_info.index, offset, limit))
             }
@@ -341,21 +333,15 @@ impl KyraxColumn {
             DType::Bool => {
                 KyraxSeries::Bool(create_boolean_vec(data, column_info.index, offset, limit))
             }
-            DType::DateTime => KyraxSeries::Datetime(create_datetime_vec(
-                data,
-                column_info.index,
-                offset,
-                limit,
-            )),
+            DType::DateTime => {
+                KyraxSeries::Datetime(create_datetime_vec(data, column_info.index, offset, limit))
+            }
             DType::Date => {
                 KyraxSeries::Date(create_date_vec(data, column_info.index, offset, limit))
             }
-            DType::Duration => KyraxSeries::Duration(create_duration_vec(
-                data,
-                column_info.index,
-                offset,
-                limit,
-            )),
+            DType::Duration => {
+                KyraxSeries::Duration(create_duration_vec(data, column_info.index, offset, limit))
+            }
         };
         Ok(Self {
             name: column_info.name.clone(),

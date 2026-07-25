@@ -127,6 +127,19 @@ fn get_cell_dtype<DT: CellType + Debug + DataType>(
         .get((row, col))
         .ok_or(KyraxErrorKind::CannotRetrieveCellData(row, col))?;
 
+    cell_dtype(cell, whitespace_as_null)
+}
+
+/// Determines the `DType` of a single cell.
+///
+/// Split out of [`get_cell_dtype`] so that the arrow materialization code can classify an
+/// individual cell without going through a `Range` lookup. This is what lets us tell a cell that
+/// is *legitimately* null (empty, `"NULL"`, whitespace when `whitespace_as_null`) apart from a
+/// cell that holds a real value which simply does not fit the column's inferred dtype.
+pub(crate) fn cell_dtype<DT: CellType + Debug + DataType>(
+    cell: &DT,
+    whitespace_as_null: bool,
+) -> KyraxResult<DType> {
     if cell.is_int() {
         Ok(DType::Int)
     } else if cell.is_float() {
@@ -222,6 +235,30 @@ fn string_types() -> &'static HashSet<DType> {
     })
 }
 
+/// Resolves a set of observed (non-null) cell dtypes into the single column dtype that can hold
+/// all of them without losing data, following the coercion lattice int ⊂ float ⊂ string.
+///
+/// Returns `None` if the combination has no lossless common representation (e.g. duration +
+/// string), in which case the caller decides what to do.
+///
+/// `column_types` must not contain `DType::Null` and must not be empty.
+pub(crate) fn resolve_coerced_dtype(column_types: &HashSet<DType>) -> Option<DType> {
+    if column_types.len() == 1 {
+        column_types.iter().next().copied()
+    } else if column_types.is_subset(int_types()) {
+        // If every cell in the column can be converted to an int, return int64
+        Some(DType::Int)
+    } else if column_types.is_subset(float_types()) {
+        // If every cell in the column can be converted to a float, return Float64
+        Some(DType::Float)
+    } else if column_types.is_subset(string_types()) {
+        // If every cell in the column can be converted to a string, return Utf8
+        Some(DType::String)
+    } else {
+        None
+    }
+}
+
 pub(crate) fn get_dtype_for_column<DT: CellType + Debug + DataType>(
     data: &Range<DT>,
     start_row: usize,
@@ -247,30 +284,15 @@ pub(crate) fn get_dtype_for_column<DT: CellType + Debug + DataType>(
         }
     } else if matches!(dtype_coercion, &DTypeCoercion::Strict) && column_types.len() != 1 {
         // If dtype coercion is strict and we do not have a single dtype, it's an error
-        Err(
-            KyraxErrorKind::UnsupportedColumnTypeCombination(format!(
-                "type coercion is strict and column contains {column_types:?}"
-            ))
-            .into(),
-        )
-    } else if column_types.len() == 1 {
-        // If a single non-null type was found, return it
-        Ok(column_types.into_iter().next().unwrap())
-    } else if column_types.is_subset(int_types()) {
-        // If every cell in the column can be converted to an int, return int64
-        Ok(DType::Int)
-    } else if column_types.is_subset(float_types()) {
-        // If every cell in the column can be converted to a float, return Float64
-        Ok(DType::Float)
-    } else if column_types.is_subset(string_types()) {
-        // If every cell in the column can be converted to a string, return Utf8
-        Ok(DType::String)
+        Err(KyraxErrorKind::UnsupportedColumnTypeCombination(format!(
+            "type coercion is strict and column contains {column_types:?}"
+        ))
+        .into())
     } else {
-        // NOTE: Not being too smart about multi-types columns for now
-        Err(
-            KyraxErrorKind::UnsupportedColumnTypeCombination(format!("{column_types:?}"))
-                .into(),
-        )
+        resolve_coerced_dtype(&column_types).ok_or_else(|| {
+            // NOTE: Not being too smart about multi-types columns for now
+            KyraxErrorKind::UnsupportedColumnTypeCombination(format!("{column_types:?}")).into()
+        })
     }
 }
 

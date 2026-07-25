@@ -341,7 +341,8 @@ pub fn translate_body(body: &str, rd: i32, cd: i32) -> String {
                     flush(&mut tok, &mut out, rd, cd);
                     // two-char ops >= <= <>
                     if (c == b'>' && f.get(i + 1) == Some(&b'='))
-                        || (c == b'<' && (f.get(i + 1) == Some(&b'=') || f.get(i + 1) == Some(&b'>')))
+                        || (c == b'<'
+                            && (f.get(i + 1) == Some(&b'=') || f.get(i + 1) == Some(&b'>')))
                     {
                         out.push(c);
                         out.push(f[i + 1]);
@@ -389,6 +390,9 @@ mod tests {
         assert_eq!(translate_body("A2*2", 5, 0), "A7*2");
         assert_eq!(translate_body("$A$1+B1", 1, 1), "$A$1+C2");
         assert_eq!(translate_body("SUM(A1:A5)", 2, 0), "SUM(A3:A7)");
-        assert_eq!(translate_body("CONCATENATE(\"A1\",B1)", 1, 0), "CONCATENATE(\"A1\",B2)");
+        assert_eq!(
+            translate_body("CONCATENATE(\"A1\",B1)", 1, 0),
+            "CONCATENATE(\"A1\",B2)"
+        );
     }
 }

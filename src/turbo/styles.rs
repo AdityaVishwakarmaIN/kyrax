@@ -29,10 +29,18 @@ pub struct Color {
 impl Color {
     pub fn default_rgb() -> Color {
         // matches openpyxl Color() default: type 'rgb', rgb '00000000'
-        Color { kind: CKind::Rgb, val: 0x0000_0000, tint: 0.0 }
+        Color {
+            kind: CKind::Rgb,
+            val: 0x0000_0000,
+            tint: 0.0,
+        }
     }
     pub fn none() -> Color {
-        Color { kind: CKind::None, val: 0, tint: 0.0 }
+        Color {
+            kind: CKind::None,
+            val: 0,
+            tint: 0.0,
+        }
     }
 }
 
@@ -70,7 +78,11 @@ pub struct Fill {
 }
 impl Fill {
     fn default() -> Fill {
-        Fill { pattern: "none".into(), fg: Color::default_rgb(), bg: Color::default_rgb() }
+        Fill {
+            pattern: "none".into(),
+            fg: Color::default_rgb(),
+            bg: Color::default_rgb(),
+        }
     }
 }
 
@@ -341,7 +353,10 @@ pub fn is_date_format(fmt: &str) -> bool {
     let b = stripped.as_bytes();
     for i in 0..b.len() {
         let c = b[i];
-        if matches!(c, b'd' | b'm' | b'h' | b'y' | b's' | b'D' | b'M' | b'H' | b'Y' | b'S') {
+        if matches!(
+            c,
+            b'd' | b'm' | b'h' | b'y' | b's' | b'D' | b'M' | b'H' | b'Y' | b'S'
+        ) {
             // negative lookbehind (?<![_\\])
             if i == 0 || (b[i - 1] != b'_' && b[i - 1] != b'\\') {
                 return true;
@@ -413,11 +428,19 @@ pub(crate) fn parse_color(tag: &[u8]) -> Color {
             s.to_string()
         };
         let v = u32::from_str_radix(&s, 16).unwrap_or(0);
-        return Color { kind: CKind::Rgb, val: v, tint: 0.0 };
+        return Color {
+            kind: CKind::Rgb,
+            val: v,
+            tint: 0.0,
+        };
     }
     if let Some(idx) = attr(tag, "indexed") {
         let v: u32 = std::str::from_utf8(idx).unwrap_or("0").parse().unwrap_or(0);
-        return Color { kind: CKind::Indexed, val: v, tint: 0.0 };
+        return Color {
+            kind: CKind::Indexed,
+            val: v,
+            tint: 0.0,
+        };
     }
     if let Some(th) = attr(tag, "theme") {
         let v: u32 = std::str::from_utf8(th).unwrap_or("0").parse().unwrap_or(0);
@@ -425,11 +448,19 @@ pub(crate) fn parse_color(tag: &[u8]) -> Color {
             .and_then(|t| std::str::from_utf8(t).ok())
             .and_then(|t| t.parse().ok())
             .unwrap_or(0.0);
-        return Color { kind: CKind::Theme, val: v, tint };
+        return Color {
+            kind: CKind::Theme,
+            val: v,
+            tint,
+        };
     }
     if let Some(a) = attr(tag, "auto") {
         if a == b"1" || a.eq_ignore_ascii_case(b"true") {
-            return Color { kind: CKind::Auto, val: 1, tint: 0.0 };
+            return Color {
+                kind: CKind::Auto,
+                val: 1,
+                tint: 0.0,
+            };
         }
     }
     Color::default_rgb()
@@ -498,7 +529,9 @@ pub fn parse_style_table(xml: &[u8]) -> StyleTable {
     if let Some((region, _, _)) = container(xml, "<numFmts", "</numFmts>") {
         for (_, tag) in each_element(region, "numFmt") {
             if let (Some(id), Some(code)) = (
-                attr(tag, "numFmtId").and_then(|v| std::str::from_utf8(v).ok()).and_then(|v| v.parse::<u16>().ok()),
+                attr(tag, "numFmtId")
+                    .and_then(|v| std::str::from_utf8(v).ok())
+                    .and_then(|v| v.parse::<u16>().ok()),
                 attr_str(tag, "formatCode", &mut scratch),
             ) {
                 custom_numfmt.insert(id, code);
@@ -518,21 +551,34 @@ pub fn parse_style_table(xml: &[u8]) -> StyleTable {
                 }
             }
             if let Some(v) = each_element(elem, "sz").first() {
-                if let Some(s) = attr(v.1, "val").and_then(|v| std::str::from_utf8(v).ok()).and_then(|v| v.parse::<f32>().ok()) {
+                if let Some(s) = attr(v.1, "val")
+                    .and_then(|v| std::str::from_utf8(v).ok())
+                    .and_then(|v| v.parse::<f32>().ok())
+                {
                     f.sz = s;
                 }
             }
             // bold: <b/> or <b val="1"/>
-            f.bold = each_element(elem, "b").first().map(|v| parse_bool_flag(v.1, "b").unwrap_or(true)).unwrap_or(false);
-            f.italic = each_element(elem, "i").first().map(|v| parse_bool_flag(v.1, "i").unwrap_or(true)).unwrap_or(false);
+            f.bold = each_element(elem, "b")
+                .first()
+                .map(|v| parse_bool_flag(v.1, "b").unwrap_or(true))
+                .unwrap_or(false);
+            f.italic = each_element(elem, "i")
+                .first()
+                .map(|v| parse_bool_flag(v.1, "i").unwrap_or(true))
+                .unwrap_or(false);
             if let Some(v) = each_element(elem, "u").first() {
-                f.underline = Some(attr_str(v.1, "val", &mut scratch).unwrap_or_else(|| "single".into()));
+                f.underline =
+                    Some(attr_str(v.1, "val", &mut scratch).unwrap_or_else(|| "single".into()));
             }
             if let Some(v) = each_element(elem, "color").first() {
                 f.color = parse_color(v.1);
             }
             if let Some(v) = each_element(elem, "family").first() {
-                f.family = attr(v.1, "val").and_then(|v| std::str::from_utf8(v).ok()).and_then(|v| v.parse().ok()).unwrap_or(0);
+                f.family = attr(v.1, "val")
+                    .and_then(|v| std::str::from_utf8(v).ok())
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
             }
             if let Some(v) = each_element(elem, "scheme").first() {
                 f.scheme = attr_str(v.1, "val", &mut scratch);
@@ -550,9 +596,16 @@ pub fn parse_style_table(xml: &[u8]) -> StyleTable {
         for (elem, _) in each_element(region, "fill") {
             let mut fill = Fill::default();
             if let Some((pf, ptag)) = each_element(elem, "patternFill").first().copied() {
-                fill.pattern = attr_str(ptag, "patternType", &mut scratch).unwrap_or_else(|| "none".into());
-                fill.fg = each_element(pf, "fgColor").first().map(|v| parse_color(v.1)).unwrap_or_else(Color::default_rgb);
-                fill.bg = each_element(pf, "bgColor").first().map(|v| parse_color(v.1)).unwrap_or_else(Color::default_rgb);
+                fill.pattern =
+                    attr_str(ptag, "patternType", &mut scratch).unwrap_or_else(|| "none".into());
+                fill.fg = each_element(pf, "fgColor")
+                    .first()
+                    .map(|v| parse_color(v.1))
+                    .unwrap_or_else(Color::default_rgb);
+                fill.bg = each_element(pf, "bgColor")
+                    .first()
+                    .map(|v| parse_color(v.1))
+                    .unwrap_or_else(Color::default_rgb);
             } else if each_element(elem, "gradientFill").first().is_some() {
                 fill.pattern = "gradient".into();
             }
@@ -721,11 +774,7 @@ pub fn parse_style_table(xml: &[u8]) -> StyleTable {
 fn parse_side(elem: &[u8], open_tag: &[u8]) -> Side {
     let style = attr(open_tag, "style").and_then(|v| {
         let s = std::str::from_utf8(v).ok()?.to_string();
-        if s.is_empty() {
-            None
-        } else {
-            Some(s)
-        }
+        if s.is_empty() { None } else { Some(s) }
     });
     let color = each_element(elem, "color")
         .first()

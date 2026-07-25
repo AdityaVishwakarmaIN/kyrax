@@ -8,7 +8,7 @@ use polars_core::frame::DataFrame;
 use pyo3::pyclass;
 
 use crate::{
-    KyraxColumn, KyraxErrorKind, IdxOrName, LoadSheetOrTableOptions, SelectedColumns,
+    IdxOrName, KyraxColumn, KyraxErrorKind, LoadSheetOrTableOptions, SelectedColumns,
     data::height_without_tail_whitespace,
     error::{ErrorContext, KyraxResult},
     types::{
@@ -125,10 +125,7 @@ impl ExcelTable {
         })
     }
 
-    pub(crate) fn try_new(
-        table: Table<Data>,
-        opts: LoadSheetOrTableOptions,
-    ) -> KyraxResult<Self> {
+    pub(crate) fn try_new(table: Table<Data>, opts: LoadSheetOrTableOptions) -> KyraxResult<Self> {
         let pagination = Pagination::try_new(opts.skip_rows.clone(), opts.n_rows, table.data())?;
 
         let (header, opts) = Self::build_header_and_update_selection(&table, opts)?;

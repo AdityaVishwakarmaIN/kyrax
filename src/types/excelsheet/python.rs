@@ -15,9 +15,7 @@ use crate::{
         ExcelSheetData, record_batch_from_data_and_columns_with_skip_rows,
         selected_columns_to_schema,
     },
-    error::{
-        ErrorContext, KyraxError, KyraxErrorKind, KyraxResult, py_errors::IntoPyResult,
-    },
+    error::{ErrorContext, KyraxError, KyraxErrorKind, KyraxResult, py_errors::IntoPyResult},
     types::{
         dtype::DTypes,
         excelsheet::{SelectedColumns, SheetVisible, SkipRows, column_info::ColumnInfo},
@@ -218,6 +216,7 @@ impl TryFrom<&ExcelSheet> for RecordBatch {
                 offset,
                 limit,
                 sheet.opts.whitespace_as_null,
+                &sheet.opts.dtype_coercion,
             ),
             ExcelSheetData::Ref(range) => record_batch_from_data_and_columns_with_skip_rows(
                 &sheet.selected_columns,
@@ -226,6 +225,7 @@ impl TryFrom<&ExcelSheet> for RecordBatch {
                 offset,
                 limit,
                 sheet.opts.whitespace_as_null,
+                &sheet.opts.dtype_coercion,
             ),
         }
         .with_context(|| format!("could not convert sheet {} to RecordBatch", sheet.name()))
@@ -287,9 +287,16 @@ impl ExcelSheet {
     pub fn to_arrow<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         use pyo3::IntoPyObjectExt;
 
+        use crate::data::warn_dtype_promotions;
         use crate::error::py_errors::IntoPyResult;
 
-        py.detach(|| RecordBatch::try_from(self))
+        let batch = py.detach(|| RecordBatch::try_from(self));
+
+        // The GIL is held again here, so it is safe to raise the warnings collected while the
+        // batch was being built.
+        warn_dtype_promotions(py, &format!("sheet \"{}\"", self.name()))?;
+
+        batch
             .with_context(|| {
                 format!(
                     "could not create RecordBatch from sheet \"{}\"",
@@ -330,6 +337,7 @@ impl ExcelSheet {
                     offset,
                     limit,
                     self.opts.whitespace_as_null,
+                    &self.opts.dtype_coercion,
                 )
             })
             .with_context(|| {
@@ -376,7 +384,14 @@ impl ExcelSheet {
         py: Python<'py>,
         requested_schema: Option<Bound<'py, PyCapsule>>,
     ) -> PyResult<Bound<'py, PyTuple>> {
-        let record_batch = RecordBatch::try_from(self)
+        let record_batch = RecordBatch::try_from(self);
+
+        // This method runs with the GIL held, so promotions can be surfaced immediately. Doing it
+        // here (and not only in `to_arrow`) is what makes `to_polars`, which goes through the
+        // PyCapsule interface rather than through pyarrow, warn as well.
+        crate::data::warn_dtype_promotions(py, &format!("sheet \"{}\"", self.name()))?;
+
+        let record_batch = record_batch
             .with_context(|| {
                 format!(
                     "could not create RecordBatch from sheet \"{}\"",

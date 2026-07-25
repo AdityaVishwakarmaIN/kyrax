@@ -8,28 +8,28 @@
 
 mod cf_dv;
 mod charts;
-mod model;
+pub(crate) mod model;
 mod rich_text;
 mod structural;
-mod style_engine;
-mod writer;
-mod xml;
-mod zip;
+pub(crate) mod style_engine;
+pub(crate) mod writer;
+pub(crate) mod xml;
+pub(crate) mod zip;
 
 #[cfg(feature = "python")]
 pub mod python;
 
 pub use cf_dv::{
-    emit_data_validations, CfRule, CfRuleKind, CfVo, ConditionalFormatting, DataValidation,
+    CfRule, CfRuleKind, CfVo, ConditionalFormatting, DataValidation, emit_data_validations,
 };
 pub use charts::{
     Anchor, Chart, ChartType, ChartsheetSpec, Series, write_chart_space, write_drawing,
 };
 pub use model::{
-    CachedValue, Cell, CellValue, ColDim, Comment, DefinedName, DocProps, ExternalLink,
-    FormulaKind, HeaderFooter, Hyperlink, NamedStyleInput, NumericGrid, PageMargins, PageSetup,
-    PrintOptions, Row, Scenario, Sheet, SheetProtection, SheetState, SheetViewOpts, SstBuilder,
-    StringMode, TableDef, Workbook, WriteFeatures, WriteOptions, AUTO_SST_THRESHOLD,
+    AUTO_SST_THRESHOLD, CachedValue, Cell, CellValue, ColDim, Comment, DefinedName, DocProps,
+    ExternalLink, FormulaKind, HeaderFooter, Hyperlink, NamedStyleInput, NumericGrid, PageMargins,
+    PageSetup, PrintOptions, Row, Scenario, Sheet, SheetProtection, SheetState, SheetViewOpts,
+    SstBuilder, StringMode, TableDef, Workbook, WriteFeatures, WriteOptions,
 };
 pub use rich_text::{RichRun, RichText, RunFont};
 pub use structural::{hash_password, write_comments, write_table};

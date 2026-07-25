@@ -3,21 +3,21 @@
 
 use super::cf_dv::emit_data_validations;
 use super::charts::{
-    write_chart_space, write_chartsheet_xml, write_drawing, Anchor, ChartsheetSpec,
+    Anchor, ChartsheetSpec, write_chart_space, write_chartsheet_xml, write_drawing,
 };
 use super::model::*;
 use super::structural::{
-    collect_defined_names, emit_auto_filter, emit_breaks, emit_default_page_margins,
+    PKG_REL_NS, collect_defined_names, emit_auto_filter, emit_breaks, emit_default_page_margins,
     emit_defined_names_xml, emit_header_footer, emit_hyperlinks, emit_merges, emit_page_margins,
     emit_page_setup, emit_print_options, emit_scenarios, emit_sheet_protection, root_rels_xml,
     sheet_needs_r_ns, write_app_props, write_comments, write_core_props, write_custom_props,
-    write_external_link_part, write_table, PKG_REL_NS,
+    write_external_link_part, write_table,
 };
 use super::style_engine::{StyleDesc, StyleEngine};
 use super::xml::*;
-use super::zip::{compress_part, PrecompressedPart, ZipWriter};
+use super::zip::{PrecompressedPart, StreamingZipWriter, ZipWriter, compress_part};
 use std::cell::RefCell;
-use std::io;
+use std::io::{self, Seek};
 
 // Reused sheet-XML scratch across parts and successive writes (capacity retained).
 // Oversized outliers above SCRATCH_RETAIN_MAX are released so long-lived workers
@@ -500,6 +500,704 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+const METHOD_DEFLATE: u16 = 8;
+
+fn stream_add_entry<W: io::Write + Seek>(
+    zip: &mut StreamingZipWriter<W>,
+    name: &str,
+    data: &[u8],
+) -> io::Result<()> {
+    zip.start_entry(name, METHOD_DEFLATE)?;
+    zip.write_chunk(data)?;
+    zip.finish_entry()
+}
+
+pub fn save_workbook_stream<W: io::Write + Seek>(wb: &Workbook, w: W) -> io::Result<W> {
+    let mut wb_local;
+    let wb = if needs_auto_features(wb) {
+        wb_local = wb.clone();
+        wb_local.auto_enable_structural_features();
+        &wb_local
+    } else {
+        wb
+    };
+
+    let mut zip = StreamingZipWriter::new(w);
+
+    let resolved_mode = wb.resolve_string_mode();
+    let use_sst = resolved_mode == StringMode::SharedStrings;
+    let emit_cache = wb.options.emit_cached_values;
+    let features = wb.options.features;
+
+    let need_resolve = workbook_needs_style_resolve(wb);
+    let mut eng = StyleEngine::new();
+    let styles_xml: Vec<u8>;
+    let mut owned_sheets: Option<Vec<Sheet>> = None;
+
+    if need_resolve {
+        let mut sheets = wb.sheets.clone();
+        for ns in &wb.named_styles {
+            eng.register_named_style(&ns.name, &ns.desc, ns.builtin_id);
+        }
+        resolve_workbook_styles(&mut eng, &mut sheets);
+        for sh in &mut sheets {
+            for cf in &mut sh.conditional_formatting {
+                cf.register_dxfs(&mut eng);
+            }
+        }
+        styles_xml = eng.emit_styles_xml();
+        owned_sheets = Some(sheets);
+    } else if !wb.named_styles.is_empty() {
+        for ns in &wb.named_styles {
+            eng.register_named_style(&ns.name, &ns.desc, ns.builtin_id);
+        }
+        styles_xml = eng.emit_styles_xml();
+    } else {
+        styles_xml = eng.emit_styles_xml();
+    }
+
+    let sheets_ref: &[Sheet] = owned_sheets.as_deref().unwrap_or(&wb.sheets);
+
+    let mut sst = SstBuilder::new();
+    let mut counters = PartCounters::default();
+    let mut all_ct_overrides: Vec<(String, &'static str)> = Vec::new();
+    let mut need_vml_default = false;
+
+    let ws_count = if wb.numeric_columns.is_some() {
+        1usize
+    } else {
+        sheets_ref.len().max(1)
+    };
+    let cs_count = if features.contains(WriteFeatures::CHARTS) {
+        wb.chartsheets.len()
+    } else {
+        0
+    };
+    let has_custom = !wb.props.custom.is_empty() && features.contains(WriteFeatures::PROPS);
+
+    let titles: Vec<&str> = if let Some(ref g) = wb.numeric_columns {
+        vec![g.sheet_name.as_str()]
+    } else {
+        let mut t: Vec<&str> = sheets_ref.iter().map(|s| s.name.as_str()).collect();
+        for cs in &wb.chartsheets {
+            t.push(cs.title.as_str());
+        }
+        t
+    };
+    let core = if features.contains(WriteFeatures::PROPS) || wb.props.creator.is_some() {
+        write_core_props(&wb.props, &wb.creator)
+    } else {
+        write_core_props(
+            &DocProps {
+                creator: Some(wb.creator.clone()),
+                ..Default::default()
+            },
+            &wb.creator,
+        )
+    };
+    let app = write_app_props(&wb.props, &titles);
+    stream_add_entry(&mut zip, "docProps/core.xml", core.as_bytes())?;
+    stream_add_entry(&mut zip, "docProps/app.xml", app.as_bytes())?;
+    if has_custom {
+        stream_add_entry(
+            &mut zip,
+            "docProps/custom.xml",
+            write_custom_props(&wb.props.custom).as_bytes(),
+        )?;
+        all_ct_overrides.push((
+            "/docProps/custom.xml".into(),
+            "application/vnd.openxmlformats-officedocument.custom-properties+xml",
+        ));
+    }
+
+    stream_add_entry(&mut zip, "xl/theme/theme1.xml", THEME_XML.as_bytes())?;
+    stream_add_entry(&mut zip, "xl/styles.xml", &styles_xml)?;
+
+    let mut xml_scratch = take_xml_scratch(0);
+    if let Some(ref grid) = wb.numeric_columns {
+        zip.start_entry("xl/worksheets/sheet1.xml", METHOD_DEFLATE)?;
+        write_numeric_grid_sheet_stream(&mut zip, grid, &mut xml_scratch)?;
+        zip.finish_entry()?;
+    } else {
+        for (i, sheet) in sheets_ref.iter().enumerate() {
+            let path = format!("xl/worksheets/sheet{}.xml", i + 1);
+            let emit = write_sheet_package_stream(
+                &mut zip,
+                &path,
+                sheet,
+                use_sst,
+                emit_cache,
+                &mut SstAccess::Build(&mut sst),
+                &mut counters,
+                features,
+                &mut xml_scratch,
+            )?;
+            for ex in &emit.extras {
+                if ex.path.ends_with(".vml") {
+                    need_vml_default = true;
+                }
+                if let Some(ct) = ex.content_type {
+                    all_ct_overrides.push((format!("/{}", ex.path), ct));
+                }
+            }
+            if let Some(rels) = emit.rels {
+                stream_add_entry(
+                    &mut zip,
+                    &format!("xl/worksheets/_rels/sheet{}.xml.rels", i + 1),
+                    &rels,
+                )?;
+            }
+            for ex in emit.extras {
+                stream_add_entry(&mut zip, &ex.path, &ex.data)?;
+            }
+        }
+    }
+
+    if features.contains(WriteFeatures::CHARTS) {
+        for (ci, cs) in wb.chartsheets.iter().enumerate() {
+            let emit = emit_chartsheet(cs, &mut counters, &mut xml_scratch);
+            for ex in &emit.extras {
+                if let Some(ct) = ex.content_type {
+                    all_ct_overrides.push((format!("/{}", ex.path), ct));
+                }
+            }
+            let path = format!("xl/chartsheets/sheet{}.xml", ci + 1);
+            stream_add_entry(&mut zip, &path, &xml_scratch)?;
+            if let Some(rels) = emit.rels {
+                stream_add_entry(
+                    &mut zip,
+                    &format!("xl/chartsheets/_rels/sheet{}.xml.rels", ci + 1),
+                    &rels,
+                )?;
+            }
+            for ex in emit.extras {
+                stream_add_entry(&mut zip, &ex.path, &ex.data)?;
+            }
+            all_ct_overrides.push((
+                format!("/{path}"),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.chartsheet+xml",
+            ));
+        }
+    }
+    put_xml_scratch(xml_scratch);
+
+    for (i, link) in wb.external_links.iter().enumerate() {
+        let n = i + 1;
+        let path = format!("xl/externalLinks/externalLink{n}.xml");
+        let el_xml = write_external_link_part();
+        let el_rels = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="{PKG_REL_NS}"><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLinkPath" Target="{}" TargetMode="External" Id="rId1"/></Relationships>"#,
+            escape_attr_simple(&link.target)
+        );
+        all_ct_overrides.push((
+            format!("/{path}"),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.externalLink+xml",
+        ));
+        stream_add_entry(&mut zip, &path, el_xml.as_bytes())?;
+        stream_add_entry(
+            &mut zip,
+            &format!("xl/externalLinks/_rels/externalLink{n}.xml.rels"),
+            el_rels.as_bytes(),
+        )?;
+    }
+
+    let has_sst = use_sst && !sst.is_empty();
+    if has_sst {
+        stream_add_entry(&mut zip, "xl/sharedStrings.xml", &write_sst(&sst))?;
+    }
+
+    let sheet_names_states: Vec<(String, SheetState)> = if wb.numeric_columns.is_some() {
+        let g = wb.numeric_columns.as_ref().unwrap();
+        vec![(g.sheet_name.clone(), SheetState::Visible)]
+    } else {
+        sheets_ref
+            .iter()
+            .map(|s| (s.name.clone(), s.state))
+            .collect()
+    };
+    let chartsheet_names: Vec<String> = wb.chartsheets.iter().map(|c| c.title.clone()).collect();
+
+    stream_add_entry(
+        &mut zip,
+        "xl/workbook.xml",
+        &write_workbook_xml(wb, &sheet_names_states, &chartsheet_names, features),
+    )?;
+    stream_add_entry(
+        &mut zip,
+        "xl/_rels/workbook.xml.rels",
+        &write_workbook_rels(ws_count, cs_count, wb.external_links.len(), has_sst),
+    )?;
+    stream_add_entry(
+        &mut zip,
+        "_rels/.rels",
+        root_rels_xml(has_custom).as_bytes(),
+    )?;
+    stream_add_entry(
+        &mut zip,
+        "[Content_Types].xml",
+        &write_content_types(
+            ws_count,
+            cs_count,
+            has_sst,
+            wb.macro_enabled,
+            need_vml_default,
+            &all_ct_overrides,
+        ),
+    )?;
+
+    let finished = zip.finish()?;
+    super::zip::shrink_comp_scratch();
+    Ok(finished)
+}
+
+fn write_sheet_package_stream<W: io::Write + Seek>(
+    zip: &mut StreamingZipWriter<W>,
+    sheet_path: &str,
+    sheet: &Sheet,
+    use_sst: bool,
+    emit_cache: bool,
+    sst: &mut SstAccess<'_>,
+    counters: &mut PartCounters,
+    features: WriteFeatures,
+    chunk_buf: &mut Vec<u8>,
+) -> io::Result<SheetEmit> {
+    zip.start_entry(sheet_path, METHOD_DEFLATE)?;
+
+    let need_r = sheet_needs_r_ns(sheet);
+    chunk_buf.clear();
+    write_sheet_open(chunk_buf, need_r);
+
+    push(chunk_buf, b"<sheetPr");
+    if let Some(ref cn) = sheet.code_name {
+        push(chunk_buf, br#" codeName=""#);
+        write_escaped_text(chunk_buf, cn);
+        push(chunk_buf, b"\"");
+    }
+    push(chunk_buf, b">");
+    if let Some(rgb) = &sheet.tab_color_rgb {
+        let rgb = if rgb.len() == 6 {
+            format!("00{rgb}")
+        } else {
+            rgb.clone()
+        };
+        push(chunk_buf, br#"<tabColor rgb=""#);
+        write_escaped_attr(chunk_buf, &rgb);
+        push(chunk_buf, br#""/>"#);
+    }
+    push(
+        chunk_buf,
+        br#"<outlinePr summaryBelow="1" summaryRight="1"/>"#,
+    );
+    if sheet
+        .page_setup
+        .as_ref()
+        .map(|p| p.fit_to_page)
+        .unwrap_or(false)
+    {
+        push(chunk_buf, br#"<pageSetUpPr fitToPage="1"/>"#);
+    } else {
+        push(chunk_buf, br#"<pageSetUpPr/>"#);
+    }
+    push(chunk_buf, b"</sheetPr>");
+
+    let dim = if let Some(ref d) = sheet.dimension {
+        d.clone()
+    } else if let Some((r0, c0, r1, c1)) = sheet.bounds() {
+        dimension_ref(r0, c0, r1, c1)
+    } else {
+        "A1".into()
+    };
+    push(chunk_buf, br#"<dimension ref=""#);
+    push(chunk_buf, dim.as_bytes());
+    push(chunk_buf, br#""/>"#);
+
+    push(chunk_buf, br#"<sheetViews><sheetView workbookViewId="0""#);
+    if let Some(ref freeze) = sheet.view.freeze_cell {
+        if let Some((fr, fc)) = parse_a1(freeze) {
+            let y_split = fr.saturating_sub(1);
+            let x_split = fc.saturating_sub(1);
+            if y_split > 0 || x_split > 0 {
+                push(chunk_buf, br#"><pane"#);
+                if x_split > 0 {
+                    push(chunk_buf, br#" xSplit=""#);
+                    write_u32(chunk_buf, x_split);
+                    push(chunk_buf, b"\"");
+                }
+                if y_split > 0 {
+                    push(chunk_buf, br#" ySplit=""#);
+                    write_u32(chunk_buf, y_split);
+                    push(chunk_buf, b"\"");
+                }
+                let active = if x_split > 0 && y_split > 0 {
+                    "bottomRight"
+                } else if y_split > 0 {
+                    "bottomLeft"
+                } else {
+                    "topRight"
+                };
+                push(chunk_buf, br#" topLeftCell=""#);
+                write_escaped_text(chunk_buf, freeze);
+                push(chunk_buf, br#"" activePane=""#);
+                push_str(chunk_buf, active);
+                push(chunk_buf, br#"" state="frozen"/>"#);
+                if x_split > 0 && y_split > 0 {
+                    push(
+                        chunk_buf,
+                        br#"<selection pane="topRight"/><selection pane="bottomLeft"/><selection pane="bottomRight" activeCell="A1" sqref="A1"/>"#,
+                    );
+                } else if y_split > 0 {
+                    push(
+                        chunk_buf,
+                        br#"<selection pane="bottomLeft" activeCell="A1" sqref="A1"/>"#,
+                    );
+                } else {
+                    push(
+                        chunk_buf,
+                        br#"<selection pane="topRight" activeCell="A1" sqref="A1"/>"#,
+                    );
+                }
+                push(chunk_buf, br#"</sheetView>"#);
+            } else {
+                push(
+                    chunk_buf,
+                    br#"><selection activeCell="A1" sqref="A1"/></sheetView>"#,
+                );
+            }
+        } else {
+            push(
+                chunk_buf,
+                br#"><selection activeCell="A1" sqref="A1"/></sheetView>"#,
+            );
+        }
+    } else {
+        push(
+            chunk_buf,
+            br#"><selection activeCell="A1" sqref="A1"/></sheetView>"#,
+        );
+    }
+    push(chunk_buf, br#"</sheetViews>"#);
+
+    push(chunk_buf, br#"<sheetFormatPr baseColWidth=""#);
+    write_u32(chunk_buf, sheet.base_col_width);
+    push(chunk_buf, br#"" defaultRowHeight=""#);
+    write_f64(chunk_buf, sheet.default_row_height);
+    if let Some(w) = sheet.default_col_width {
+        push(chunk_buf, br#"" defaultColWidth=""#);
+        write_f64(chunk_buf, w);
+    }
+    push(chunk_buf, br#""/>"#);
+
+    if !sheet.cols.is_empty() {
+        push(chunk_buf, b"<cols>");
+        for col in &sheet.cols {
+            push(chunk_buf, br#"<col min=""#);
+            write_u32(chunk_buf, col.min);
+            push(chunk_buf, br#"" max=""#);
+            write_u32(chunk_buf, col.max);
+            if let Some(w) = col.width {
+                push(chunk_buf, br#"" width=""#);
+                write_f64(chunk_buf, w);
+                if col.custom_width {
+                    push(chunk_buf, br#"" customWidth="1"#);
+                }
+            }
+            if col.hidden {
+                push(chunk_buf, br#"" hidden="1"#);
+            }
+            if let Some(s) = col.style {
+                if s != 0 {
+                    push(chunk_buf, br#"" style=""#);
+                    write_u32(chunk_buf, s);
+                }
+            }
+            if col.best_fit {
+                push(chunk_buf, br#"" bestFit="1"#);
+            }
+            if col.outline_level > 0 {
+                push(chunk_buf, br#"" outlineLevel=""#);
+                write_u32(chunk_buf, col.outline_level as u32);
+            }
+            push(chunk_buf, br#""/>"#);
+        }
+        push(chunk_buf, b"</cols>");
+    }
+
+    push(chunk_buf, b"<sheetData>");
+    zip.write_chunk(chunk_buf)?;
+    chunk_buf.clear();
+
+    for row in &sheet.rows {
+        write_row(chunk_buf, row, use_sst, emit_cache, sst);
+        if !chunk_buf.is_empty() {
+            zip.write_chunk(chunk_buf)?;
+            chunk_buf.clear();
+        }
+    }
+
+    push(chunk_buf, b"</sheetData>");
+
+    let mut rels: Vec<(String, String, Option<String>)> = Vec::new();
+    let mut next_rid: usize = 0;
+    let mut extras: Vec<ExtraPart> = Vec::new();
+
+    let do_merges =
+        features.contains(WriteFeatures::MERGES) || features.contains(WriteFeatures::ALL);
+    if let Some(prot) = &sheet.protection {
+        emit_sheet_protection(chunk_buf, prot);
+    }
+    if !sheet.scenarios.is_empty() {
+        emit_scenarios(chunk_buf, &sheet.scenarios);
+    }
+    if let Some(af) = &sheet.auto_filter {
+        emit_auto_filter(chunk_buf, af);
+    }
+    if !sheet.merges.is_empty() {
+        let _ = do_merges;
+        emit_merges(chunk_buf, &sheet.merges);
+    }
+
+    for cf in &sheet.conditional_formatting {
+        cf.emit(chunk_buf);
+    }
+    emit_data_validations(&sheet.data_validations, chunk_buf);
+
+    if !sheet.hyperlinks.is_empty() {
+        let hl_rels = emit_hyperlinks(chunk_buf, &sheet.hyperlinks, &mut next_rid);
+        rels.extend(hl_rels);
+    }
+
+    if let Some(po) = &sheet.print_options {
+        emit_print_options(chunk_buf, po);
+    }
+    if let Some(m) = &sheet.page_margins {
+        emit_page_margins(chunk_buf, m);
+    } else {
+        emit_default_page_margins(chunk_buf);
+    }
+    if let Some(ps) = &sheet.page_setup {
+        emit_page_setup(chunk_buf, ps);
+    }
+    if let Some(hf) = &sheet.header_footer {
+        emit_header_footer(chunk_buf, hf);
+    }
+    emit_breaks(chunk_buf, &sheet.row_breaks, &sheet.col_breaks);
+
+    if !sheet.charts.is_empty() && features.contains(WriteFeatures::CHARTS) {
+        counters.drawing_id += 1;
+        let did = counters.drawing_id;
+        let mut chart_rel_paths = Vec::new();
+        for ch in &sheet.charts {
+            counters.chart_id += 1;
+            let cid = counters.chart_id;
+            extras.push(ExtraPart {
+                path: format!("xl/charts/chart{cid}.xml"),
+                data: write_chart_space(ch).into_bytes(),
+                content_type: Some(
+                    "application/vnd.openxmlformats-officedocument.drawingml.chart+xml",
+                ),
+            });
+            chart_rel_paths.push(format!("../charts/chart{cid}.xml"));
+        }
+        let (drawing_xml, drawing_rels) = write_drawing(&sheet.charts, &chart_rel_paths);
+        extras.push(ExtraPart {
+            path: format!("xl/drawings/drawing{did}.xml"),
+            data: drawing_xml.into_bytes(),
+            content_type: Some("application/vnd.openxmlformats-officedocument.drawing+xml"),
+        });
+        extras.push(ExtraPart {
+            path: format!("xl/drawings/_rels/drawing{did}.xml.rels"),
+            data: drawing_rels.into_bytes(),
+            content_type: None,
+        });
+        next_rid += 1;
+        let id = format!("rId{next_rid}");
+        rels.push((
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing".into(),
+            format!("/xl/drawings/drawing{did}.xml"),
+            None,
+        ));
+        push(chunk_buf, br#"<drawing r:id=""#);
+        push_str(chunk_buf, &id);
+        push(chunk_buf, br#""/>"#);
+    }
+
+    if !sheet.comments.is_empty() && features.contains(WriteFeatures::COMMENTS) {
+        counters.comment_id += 1;
+        let cid = counters.comment_id;
+        let (comments_xml, vml) = write_comments(&sheet.comments);
+        extras.push(ExtraPart {
+            path: format!("xl/comments/comment{cid}.xml"),
+            data: comments_xml.into_bytes(),
+            content_type: Some(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml",
+            ),
+        });
+        extras.push(ExtraPart {
+            path: format!("xl/drawings/commentsDrawing{cid}.vml"),
+            data: vml.into_bytes(),
+            content_type: None,
+        });
+        push(chunk_buf, br#"<legacyDrawing r:id="anysvml"/>"#);
+    }
+
+    if !sheet.tables.is_empty() && features.contains(WriteFeatures::TABLES) {
+        push(chunk_buf, br#"<tableParts count=""#);
+        write_u32(chunk_buf, sheet.tables.len() as u32);
+        push(chunk_buf, b"\">");
+        for t in &sheet.tables {
+            counters.table_id += 1;
+            let tid = counters.table_id;
+            extras.push(ExtraPart {
+                path: format!("xl/tables/table{tid}.xml"),
+                data: write_table(t, tid).into_bytes(),
+                content_type: Some(
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml",
+                ),
+            });
+            next_rid += 1;
+            let id = format!("rId{next_rid}");
+            rels.push((
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/table".into(),
+                format!("/xl/tables/table{tid}.xml"),
+                None,
+            ));
+            push(chunk_buf, br#"<tablePart r:id=""#);
+            push_str(chunk_buf, &id);
+            push(chunk_buf, br#""/>"#);
+        }
+        push(chunk_buf, b"</tableParts>");
+    }
+
+    push(chunk_buf, b"</worksheet>");
+
+    let mut rels_xml: Option<Vec<u8>> = None;
+    if !rels.is_empty()
+        || (!sheet.comments.is_empty() && features.contains(WriteFeatures::COMMENTS))
+    {
+        let mut r = Vec::new();
+        push(
+            &mut r,
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        );
+        for (i, (ty, target, mode)) in rels.iter().enumerate() {
+            let id = i + 1;
+            push(&mut r, br#"<Relationship Id="rId"#);
+            write_u32(&mut r, id as u32);
+            push(&mut r, br#"" Type=""#);
+            push_str(&mut r, ty);
+            push(&mut r, br#"" Target=""#);
+            write_escaped_attr(&mut r, target);
+            push(&mut r, b"\"");
+            if let Some(m) = mode {
+                push(&mut r, br#" TargetMode=""#);
+                push_str(&mut r, m);
+                push(&mut r, b"\"");
+            }
+            push(&mut r, br#"/>"#);
+        }
+        if !sheet.comments.is_empty() && features.contains(WriteFeatures::COMMENTS) {
+            let cid = counters.comment_id;
+            push(
+                &mut r,
+                br#"<Relationship Id="comments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="/xl/comments/comment"#,
+            );
+            write_u32(&mut r, cid as u32);
+            push(&mut r, br#".xml"/>"#);
+            push(
+                &mut r,
+                br#"<Relationship Id="anysvml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing" Target="/xl/drawings/commentsDrawing"#,
+            );
+            write_u32(&mut r, cid as u32);
+            push(&mut r, br#".vml"/>"#);
+        }
+        push(&mut r, b"</Relationships>");
+        rels_xml = Some(r);
+    }
+
+    if !chunk_buf.is_empty() {
+        zip.write_chunk(chunk_buf)?;
+        chunk_buf.clear();
+    }
+
+    zip.finish_entry()?;
+
+    Ok(SheetEmit {
+        rels: rels_xml,
+        extras,
+    })
+}
+
+fn write_numeric_grid_sheet_stream<W: io::Write + Seek>(
+    zip: &mut StreamingZipWriter<W>,
+    grid: &NumericGrid,
+    chunk_buf: &mut Vec<u8>,
+) -> io::Result<()> {
+    chunk_buf.clear();
+    write_sheet_open(chunk_buf, false);
+    push(
+        chunk_buf,
+        br#"<sheetPr><outlinePr summaryBelow="1" summaryRight="1"/><pageSetUpPr/></sheetPr>"#,
+    );
+    push(chunk_buf, br#"<dimension ref=""#);
+    let nrows = grid.nrows;
+    let ncols = grid.ncols;
+    if nrows > 0 && ncols > 0 {
+        let dim = dimension_ref(1, 1, nrows, ncols);
+        push(chunk_buf, dim.as_bytes());
+    } else {
+        push(chunk_buf, b"A1");
+    }
+    push(chunk_buf, br#""/>"#);
+    push(
+        chunk_buf,
+        br#"<sheetViews><sheetView workbookViewId="0"><selection activeCell="A1" sqref="A1"/></sheetView></sheetViews>"#,
+    );
+    push(
+        chunk_buf,
+        br#"<sheetFormatPr baseColWidth="8" defaultRowHeight="15"/>"#,
+    );
+    push(chunk_buf, b"<sheetData>");
+    zip.write_chunk(chunk_buf)?;
+    chunk_buf.clear();
+
+    let vals = &grid.values;
+    let mut coord_buf = [0u8; 4];
+    for r in 0..nrows {
+        push(chunk_buf, br#"<row r=""#);
+        write_u32(chunk_buf, r + 1);
+        push(chunk_buf, br#"">"#);
+        let base = (r as usize) * (ncols as usize);
+        for c in 0..ncols {
+            let v = vals[base + c as usize];
+            if v.is_nan() {
+                continue;
+            }
+            push(chunk_buf, br#"<c r=""#);
+            let letters = col_letters(c + 1, &mut coord_buf);
+            chunk_buf.extend_from_slice(letters);
+            write_u32(chunk_buf, r + 1);
+            push(chunk_buf, br#""><v>"#);
+            write_f64(chunk_buf, v);
+            push(chunk_buf, br#"</v></c>"#);
+        }
+        push(chunk_buf, b"</row>");
+        if !chunk_buf.is_empty() {
+            zip.write_chunk(chunk_buf)?;
+            chunk_buf.clear();
+        }
+    }
+
+    push(
+        chunk_buf,
+        br#"</sheetData><pageMargins left="0.75" right="0.75" top="1" bottom="1" header="0.5" footer="0.5"/></worksheet>"#,
+    );
+    if !chunk_buf.is_empty() {
+        zip.write_chunk(chunk_buf)?;
+        chunk_buf.clear();
+    }
+    Ok(())
+}
+
 fn needs_auto_features(wb: &Workbook) -> bool {
     wb.sheets.iter().any(|s| {
         !s.merges.is_empty()
@@ -553,9 +1251,7 @@ fn emit_chartsheet(
         extras.push(ExtraPart {
             path,
             data: write_chart_space(ch).into_bytes(),
-            content_type: Some(
-                "application/vnd.openxmlformats-officedocument.drawingml.chart+xml",
-            ),
+            content_type: Some("application/vnd.openxmlformats-officedocument.drawingml.chart+xml"),
         });
         let mut c = ch.clone();
         c.anchor = Anchor::Absolute {
@@ -695,10 +1391,7 @@ fn write_content_types(
         br#""/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>"#,
     );
     for i in 1..=sheet_count {
-        push(
-            &mut out,
-            br#"<Override PartName="/xl/worksheets/sheet"#,
-        );
+        push(&mut out, br#"<Override PartName="/xl/worksheets/sheet"#);
         write_u32(&mut out, i as u32);
         push(
             &mut out,
@@ -706,10 +1399,7 @@ fn write_content_types(
         );
     }
     for i in 1..=chartsheet_count {
-        push(
-            &mut out,
-            br#"<Override PartName="/xl/chartsheets/sheet"#,
-        );
+        push(&mut out, br#"<Override PartName="/xl/chartsheets/sheet"#);
         write_u32(&mut out, i as u32);
         push(
             &mut out,
@@ -886,10 +1576,7 @@ fn write_workbook_xml(
         push_str(&mut out, &emit_defined_names_xml(&names));
     }
 
-    push(
-        &mut out,
-        br#"<calcPr calcId="124519" fullCalcOnLoad="1"/>"#,
-    );
+    push(&mut out, br#"<calcPr calcId="124519" fullCalcOnLoad="1"/>"#);
     push(&mut out, b"</workbook>");
     out
 }
@@ -978,6 +1665,9 @@ pub fn write_numeric_grid_sheet_into(grid: &NumericGrid, out: &mut Vec<u8>) {
         let base = (r as usize) * (ncols as usize);
         for c in 0..ncols {
             let v = vals[base + c as usize];
+            if v.is_nan() {
+                continue;
+            }
             push(out, br#"<c r=""#);
             let letters = col_letters(c + 1, &mut coord_buf);
             out.extend_from_slice(letters);
@@ -1105,11 +1795,13 @@ fn write_sheet_package(
         write_escaped_attr(out, &rgb);
         push(out, br#""/>"#);
     }
-    push(
-        out,
-        br#"<outlinePr summaryBelow="1" summaryRight="1"/>"#,
-    );
-    if sheet.page_setup.as_ref().map(|p| p.fit_to_page).unwrap_or(false) {
+    push(out, br#"<outlinePr summaryBelow="1" summaryRight="1"/>"#);
+    if sheet
+        .page_setup
+        .as_ref()
+        .map(|p| p.fit_to_page)
+        .unwrap_or(false)
+    {
         push(out, br#"<pageSetUpPr fitToPage="1"/>"#);
     } else {
         push(out, br#"<pageSetUpPr/>"#);
@@ -1250,7 +1942,8 @@ fn write_sheet_package(
     let mut next_rid: usize = 0;
     let mut extras: Vec<ExtraPart> = Vec::new();
 
-    let do_merges = features.contains(WriteFeatures::MERGES) || features.contains(WriteFeatures::ALL);
+    let do_merges =
+        features.contains(WriteFeatures::MERGES) || features.contains(WriteFeatures::ALL);
     // Content-driven: emit if present (auto features already enabled flags)
     if let Some(prot) = &sheet.protection {
         emit_sheet_protection(out, prot);
@@ -1386,7 +2079,8 @@ fn write_sheet_package(
 
     // sheet rels
     let mut rels_xml: Option<Vec<u8>> = None;
-    if !rels.is_empty() || (!sheet.comments.is_empty() && features.contains(WriteFeatures::COMMENTS))
+    if !rels.is_empty()
+        || (!sheet.comments.is_empty() && features.contains(WriteFeatures::COMMENTS))
     {
         let mut r = Vec::new();
         push(

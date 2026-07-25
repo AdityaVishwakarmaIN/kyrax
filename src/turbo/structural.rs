@@ -306,7 +306,8 @@ pub fn find_attr<'a>(tag: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
 
 #[inline]
 fn attr_str(tag: &[u8], name: &[u8], scratch: &mut Vec<u8>) -> Option<String> {
-    find_attr(tag, name).map(|raw| String::from_utf8_lossy(super::decode::decode_bytes(raw, scratch)).into_owned())
+    find_attr(tag, name)
+        .map(|raw| String::from_utf8_lossy(super::decode::decode_bytes(raw, scratch)).into_owned())
 }
 
 // Parse "L1725:M1725" or "O2" into a 0-based inclusive CellRange.
@@ -408,9 +409,18 @@ pub fn parse_rels(xml: &[u8]) -> RelMap {
         let id = attr_str(tag, b"Id", &mut scratch);
         let target = attr_str(tag, b"Target", &mut scratch);
         let kind = rel_kind(tag);
-        let mode = find_attr(tag, b"TargetMode").map(|m| m == b"External").unwrap_or(false);
+        let mode = find_attr(tag, b"TargetMode")
+            .map(|m| m == b"External")
+            .unwrap_or(false);
         if let (Some(id), Some(target)) = (id, target) {
-            map.insert(id, RelInfo { target, kind, external: mode });
+            map.insert(
+                id,
+                RelInfo {
+                    target,
+                    kind,
+                    external: mode,
+                },
+            );
         }
         i = te + 1;
     }
@@ -465,7 +475,13 @@ pub fn scan_hyperlinks(tail: &[u8], rels: &RelMap) -> Vec<Hyperlink> {
             Some(rel) => LinkTarget::External(rel.target.clone()),
             None => LinkTarget::Internal, // no rid, or dangling rid -> location-only
         };
-        out.push(Hyperlink { ref_: refr, target, location, display, tooltip });
+        out.push(Hyperlink {
+            ref_: refr,
+            target,
+            location,
+            display,
+            tooltip,
+        });
         i = te + 1;
     }
     out
@@ -508,7 +524,10 @@ fn classify_kind(v: &str) -> NameKind {
     // range-ish: reference chars only (letters/digits/$ ! : , ' space . _)
     let range_like = t.bytes().all(|c| {
         c.is_ascii_alphanumeric()
-            || matches!(c, b'$' | b'!' | b':' | b',' | b'\'' | b' ' | b'.' | b'_' | b'-')
+            || matches!(
+                c,
+                b'$' | b'!' | b':' | b',' | b'\'' | b' ' | b'.' | b'_' | b'-'
+            )
     }) && t.bytes().any(|c| c.is_ascii_digit());
     if range_like {
         NameKind::Range
@@ -546,8 +565,7 @@ pub fn parse_workbook(xml: &[u8]) -> (Vec<SheetMeta>, Vec<DefinedName>) {
             let te = start + memchr::memchr(b'>', &xml[start..se]).unwrap_or(se - start);
             let tag = &xml[start..te];
             if let Some(name) = attr_str(tag, b"name", &mut scratch) {
-                let rid = find_attr(tag, b"r:id")
-                    .map(|r| String::from_utf8_lossy(r).into_owned());
+                let rid = find_attr(tag, b"r:id").map(|r| String::from_utf8_lossy(r).into_owned());
                 let state = match find_attr(tag, b"state") {
                     Some(b"hidden") => super::meta::SheetState::Hidden,
                     Some(b"veryHidden") => super::meta::SheetState::VeryHidden,
@@ -577,17 +595,21 @@ pub fn parse_workbook(xml: &[u8]) -> (Vec<SheetMeta>, Vec<DefinedName>) {
             let tag = &xml[start..te];
             let self_closing = xml[te - 1] == b'/';
             let name = attr_str(tag, b"name", &mut scratch).unwrap_or_default();
-            let local = find_attr(tag, b"localSheetId").and_then(|v| std::str::from_utf8(v).ok()?.parse::<u32>().ok());
-            let hidden = find_attr(tag, b"hidden").map(|v| v == b"1" || v == b"true").unwrap_or(false);
+            let local = find_attr(tag, b"localSheetId")
+                .and_then(|v| std::str::from_utf8(v).ok()?.parse::<u32>().ok());
+            let hidden = find_attr(tag, b"hidden")
+                .map(|v| v == b"1" || v == b"true")
+                .unwrap_or(false);
             let value = if self_closing {
                 String::new()
             } else {
                 let ve = find_close_local(xml, te, b"definedName").unwrap_or(de);
-                String::from_utf8_lossy(super::decode::decode_bytes(&xml[te + 1..ve], &mut scratch)).into_owned()
+                String::from_utf8_lossy(super::decode::decode_bytes(&xml[te + 1..ve], &mut scratch))
+                    .into_owned()
             };
-            let reserved = name.strip_prefix("_xlnm.").and_then(|base| {
-                RESERVED.iter().find(|r| **r == base).map(|r| r.to_string())
-            });
+            let reserved = name
+                .strip_prefix("_xlnm.")
+                .and_then(|base| RESERVED.iter().find(|r| **r == base).map(|r| r.to_string()));
             let external = {
                 let b = value.as_bytes();
                 b.first() == Some(&b'[') && b.get(1).map(|c| c.is_ascii_digit()).unwrap_or(false)
@@ -597,7 +619,15 @@ pub fn parse_workbook(xml: &[u8]) -> (Vec<SheetMeta>, Vec<DefinedName>) {
                 Some(idx) => Scope::Sheet(idx),
                 None => Scope::Global,
             };
-            names.push(DefinedName { name, scope, value, hidden, reserved, external, kind });
+            names.push(DefinedName {
+                name,
+                scope,
+                value,
+                hidden,
+                reserved,
+                external,
+                kind,
+            });
             i = te + 1;
         }
     }
@@ -625,7 +655,9 @@ fn is_open_local(xml: &[u8], pos: usize, local: &[u8]) -> bool {
     let rest = &xml[after..];
     let name_end = rest
         .iter()
-        .position(|&c| c == b' ' || c == b'>' || c == b'/' || c == b'\n' || c == b'\r' || c == b'\t')
+        .position(|&c| {
+            c == b' ' || c == b'>' || c == b'/' || c == b'\n' || c == b'\r' || c == b'\t'
+        })
         .unwrap_or(rest.len());
     let name = &rest[..name_end];
     let local_name = match memchr::memchr(b':', name) {
@@ -705,7 +737,9 @@ fn open_tag_local<'a>(xml: &'a [u8], pos: usize) -> Option<&'a [u8]> {
     let rest = &xml[after..];
     let name_end = rest
         .iter()
-        .position(|&c| c == b' ' || c == b'>' || c == b'/' || c == b'\n' || c == b'\r' || c == b'\t')
+        .position(|&c| {
+            c == b' ' || c == b'>' || c == b'/' || c == b'\n' || c == b'\r' || c == b'\t'
+        })
         .unwrap_or(rest.len());
     let name = &rest[..name_end];
     Some(match memchr::memchr(b':', name) {
@@ -725,7 +759,10 @@ fn first_elem_text(xml: &[u8], local: &[u8], scratch: &mut Vec<u8>) -> Option<St
     if te + 1 > close || close > xml.len() {
         return Some(String::new());
     }
-    Some(String::from_utf8_lossy(super::decode::decode_bytes(&xml[te + 1..close], scratch)).into_owned())
+    Some(
+        String::from_utf8_lossy(super::decode::decode_bytes(&xml[te + 1..close], scratch))
+            .into_owned(),
+    )
 }
 
 /// Concatenate all `<t>` / `<a:t>` run texts inside `region`.
@@ -751,7 +788,9 @@ fn concat_t_texts(region: &[u8], scratch: &mut Vec<u8>) -> String {
         let tclose = find_close_local(region, topen_end.saturating_add(1), b"t").unwrap_or(bn);
         if topen_end + 1 <= tclose && tclose <= bn {
             let raw = &region[topen_end + 1..tclose];
-            text.push_str(&String::from_utf8_lossy(super::decode::decode_bytes(raw, scratch)));
+            text.push_str(&String::from_utf8_lossy(super::decode::decode_bytes(
+                raw, scratch,
+            )));
         }
         // Advance at least one byte to avoid infinite loops on truncated markup.
         p = tclose.saturating_add(1).max(topen.saturating_add(1));
@@ -821,13 +860,19 @@ fn parse_num_cache(region: &[u8], scratch: &mut Vec<u8>) -> Option<Vec<f64>> {
     Some(pts.into_iter().map(|(_, v)| v).collect())
 }
 
-fn parse_ref_and_str_cache(region: &[u8], scratch: &mut Vec<u8>) -> (Option<String>, Option<Vec<String>>) {
+fn parse_ref_and_str_cache(
+    region: &[u8],
+    scratch: &mut Vec<u8>,
+) -> (Option<String>, Option<Vec<String>>) {
     let r = first_f_text(region, scratch);
     let c = parse_str_cache(region, scratch);
     (r, c)
 }
 
-fn parse_ref_and_num_cache(region: &[u8], scratch: &mut Vec<u8>) -> (Option<String>, Option<Vec<f64>>) {
+fn parse_ref_and_num_cache(
+    region: &[u8],
+    scratch: &mut Vec<u8>,
+) -> (Option<String>, Option<Vec<f64>>) {
     let r = first_f_text(region, scratch);
     let c = parse_num_cache(region, scratch);
     (r, c)
@@ -1023,19 +1068,20 @@ pub fn parse_chart(xml: &[u8], sheet: u32, part: String, anchor: ChartAnchor) ->
     let plot_start = find_open_local(xml, 0, b"plotArea").unwrap_or(n);
     let title = {
         let head = &xml[..plot_start];
-        find_open_local(head, 0, b"title").map(|ts| {
-            let te = ts + memchr::memchr(b'>', &head[ts..]).unwrap_or(0);
-            let end = find_close_local(head, te + 1, b"title").unwrap_or(head.len());
-            let region = &head[ts..end];
-            let t = concat_t_texts(region, &mut scratch);
-            if !t.is_empty() {
-                t
-            } else {
-                // strRef title
-                first_f_text(region, &mut scratch).unwrap_or_default()
-            }
-        })
-        .filter(|s| !s.is_empty())
+        find_open_local(head, 0, b"title")
+            .map(|ts| {
+                let te = ts + memchr::memchr(b'>', &head[ts..]).unwrap_or(0);
+                let end = find_close_local(head, te + 1, b"title").unwrap_or(head.len());
+                let region = &head[ts..end];
+                let t = concat_t_texts(region, &mut scratch);
+                if !t.is_empty() {
+                    t
+                } else {
+                    // strRef title
+                    first_f_text(region, &mut scratch).unwrap_or_default()
+                }
+            })
+            .filter(|s| !s.is_empty())
     };
 
     let plot_end = find_close_local(xml, plot_start + 1, b"plotArea").unwrap_or(n);
@@ -1118,12 +1164,13 @@ pub fn parse_chart(xml: &[u8], sheet: u32, part: String, anchor: ChartAnchor) ->
                 .unwrap_or(plot.len())
         };
         let block = &plot[pos..end];
-        let ax_title = find_open_local(block, 0, b"title").map(|ts| {
-            let tte = ts + memchr::memchr(b'>', &block[ts..]).unwrap_or(0);
-            let tend = find_close_local(block, tte + 1, b"title").unwrap_or(block.len());
-            concat_t_texts(&block[ts..tend], &mut scratch)
-        })
-        .filter(|s| !s.is_empty());
+        let ax_title = find_open_local(block, 0, b"title")
+            .map(|ts| {
+                let tte = ts + memchr::memchr(b'>', &block[ts..]).unwrap_or(0);
+                let tend = find_close_local(block, tte + 1, b"title").unwrap_or(block.len());
+                concat_t_texts(&block[ts..tend], &mut scratch)
+            })
+            .filter(|s| !s.is_empty());
         if let Some(t) = ax_title {
             if is_cat {
                 cat_titles.push(t);
@@ -1135,10 +1182,7 @@ pub fn parse_chart(xml: &[u8], sheet: u32, part: String, anchor: ChartAnchor) ->
     }
 
     let (x_axis_title, y_axis_title) = if !cat_titles.is_empty() {
-        (
-            cat_titles.into_iter().next(),
-            val_titles.into_iter().next(),
-        )
+        (cat_titles.into_iter().next(), val_titles.into_iter().next())
     } else {
         // scatter / pure val axes
         let mut it = val_titles.into_iter();
@@ -1165,8 +1209,8 @@ pub fn parse_workbook_pivot_caches(wb_xml: &[u8], wb_rels: &RelMap) -> HashMap<u
         let te = start + memchr::memchr(b'>', &wb_xml[start..]).unwrap_or(wb_xml.len() - start);
         let tag = &wb_xml[start..te];
         // skip pivotCaches container: local name pivotCaches != pivotCache
-        let cache_id = find_attr(tag, b"cacheId")
-            .and_then(|v| std::str::from_utf8(v).ok()?.parse().ok());
+        let cache_id =
+            find_attr(tag, b"cacheId").and_then(|v| std::str::from_utf8(v).ok()?.parse().ok());
         let rid = find_attr(tag, b"r:id").map(|r| String::from_utf8_lossy(r).into_owned());
         if let (Some(cid), Some(rid)) = (cache_id, rid) {
             if let Some(rel) = wb_rels.get(&rid) {
@@ -1350,7 +1394,9 @@ pub fn parse_threaded_comments(xml: &[u8]) -> Vec<ThreadedComment> {
         let id = attr_str(tag, b"id", &mut scratch).unwrap_or_default();
         let person_id = attr_str(tag, b"personId", &mut scratch).unwrap_or_default();
         let parent_id = attr_str(tag, b"parentId", &mut scratch);
-        let done = find_attr(tag, b"done").map(|v| v == b"1" || v == b"true").unwrap_or(false);
+        let done = find_attr(tag, b"done")
+            .map(|v| v == b"1" || v == b"true")
+            .unwrap_or(false);
         let datetime = attr_str(tag, b"dT", &mut scratch);
         let text = if self_closing {
             String::new()
@@ -1416,7 +1462,14 @@ pub fn parse_table(xml: &[u8], sheet: u32) -> Option<Table> {
     let tag = &xml[to..te];
     let display_name = attr_str(tag, b"displayName", &mut scratch).unwrap_or_default();
     let name = attr_str(tag, b"name", &mut scratch).unwrap_or_else(|| display_name.clone());
-    let ref_ = find_attr(tag, b"ref").map(parse_range).unwrap_or(CellRange { r0: 0, c0: 0, r1: 0, c1: 0 });
+    let ref_ = find_attr(tag, b"ref")
+        .map(parse_range)
+        .unwrap_or(CellRange {
+            r0: 0,
+            c0: 0,
+            r1: 0,
+            c1: 0,
+        });
     let header_row_count = find_attr(tag, b"headerRowCount")
         .and_then(|v| std::str::from_utf8(v).ok()?.parse().ok())
         .unwrap_or(1); // default 1
@@ -1427,7 +1480,9 @@ pub fn parse_table(xml: &[u8], sheet: u32) -> Option<Table> {
     // columns
     let mut columns = Vec::new();
     if let Some(co) = memchr::memmem::find(xml, b"<tableColumns") {
-        let ce = memchr::memmem::find(&xml[co..n], b"</tableColumns>").map(|o| co + o).unwrap_or(n);
+        let ce = memchr::memmem::find(&xml[co..n], b"</tableColumns>")
+            .map(|o| co + o)
+            .unwrap_or(n);
         let mut i = co;
         while let Some(o) = memchr::memmem::find(&xml[i..ce], b"<tableColumn ") {
             let start = i + o;
@@ -1441,17 +1496,28 @@ pub fn parse_table(xml: &[u8], sheet: u32) -> Option<Table> {
             let calc_formula = if cself {
                 None
             } else {
-                let colend = memchr::memmem::find(&xml[cte..ce], b"</tableColumn>").map(|o| cte + o).unwrap_or(ce);
+                let colend = memchr::memmem::find(&xml[cte..ce], b"</tableColumn>")
+                    .map(|o| cte + o)
+                    .unwrap_or(ce);
                 let inner = &xml[cte..colend];
                 memchr::memmem::find(inner, b"<calculatedColumnFormula").map(|fo| {
                     let fte = fo + memchr::memchr(b'>', &inner[fo..]).unwrap_or(0);
                     let fclose = memchr::memmem::find(&inner[fte..], b"</calculatedColumnFormula>")
                         .map(|o| fte + o)
                         .unwrap_or(inner.len());
-                    String::from_utf8_lossy(super::decode::decode_bytes(&inner[fte + 1..fclose], &mut scratch)).into_owned()
+                    String::from_utf8_lossy(super::decode::decode_bytes(
+                        &inner[fte + 1..fclose],
+                        &mut scratch,
+                    ))
+                    .into_owned()
                 })
             };
-            columns.push(TableColumn { name: cname, totals_fn, totals_label, calc_formula });
+            columns.push(TableColumn {
+                name: cname,
+                totals_fn,
+                totals_label,
+                calc_formula,
+            });
             i = cte + 1;
         }
     }
@@ -1460,7 +1526,11 @@ pub fn parse_table(xml: &[u8], sheet: u32) -> Option<Table> {
     let style = memchr::memmem::find(xml, b"<tableStyleInfo").map(|so| {
         let se = so + memchr::memchr(b'>', &xml[so..n]).unwrap_or(0);
         let stag = &xml[so..se];
-        let flag = |a: &[u8]| find_attr(stag, a).map(|v| v == b"1" || v == b"true").unwrap_or(false);
+        let flag = |a: &[u8]| {
+            find_attr(stag, a)
+                .map(|v| v == b"1" || v == b"true")
+                .unwrap_or(false)
+        };
         TableStyle {
             name: attr_str(stag, b"name", &mut scratch).unwrap_or_default(),
             show_first_col: flag(b"showFirstColumn"),
@@ -1492,19 +1562,28 @@ pub fn parse_comments(xml: &[u8]) -> SheetComments {
     // authors
     let mut authors = Vec::new();
     if let Some(ao) = memchr::memmem::find(xml, b"<authors>") {
-        let ae = memchr::memmem::find(&xml[ao..n], b"</authors>").map(|o| ao + o).unwrap_or(n);
+        let ae = memchr::memmem::find(&xml[ao..n], b"</authors>")
+            .map(|o| ao + o)
+            .unwrap_or(n);
         let mut i = ao;
         while let Some(o) = memchr::memmem::find(&xml[i..ae], b"<author>") {
             let s = i + o + 8;
-            let e = memchr::memmem::find(&xml[s..ae], b"</author>").map(|o| s + o).unwrap_or(ae);
-            authors.push(String::from_utf8_lossy(super::decode::decode_bytes(&xml[s..e], &mut scratch)).into_owned());
+            let e = memchr::memmem::find(&xml[s..ae], b"</author>")
+                .map(|o| s + o)
+                .unwrap_or(ae);
+            authors.push(
+                String::from_utf8_lossy(super::decode::decode_bytes(&xml[s..e], &mut scratch))
+                    .into_owned(),
+            );
             i = e + 9;
         }
     }
 
     // comments
     let mut comments = Vec::new();
-    let clist_o = memchr::memmem::find(xml, b"<commentList>").map(|o| o + 13).unwrap_or(0);
+    let clist_o = memchr::memmem::find(xml, b"<commentList>")
+        .map(|o| o + 13)
+        .unwrap_or(0);
     let mut i = clist_o;
     while let Some(o) = memchr::memmem::find(&xml[i..n], b"<comment ") {
         let start = i + o;
@@ -1515,7 +1594,9 @@ pub fn parse_comments(xml: &[u8]) -> SheetComments {
             .and_then(|v| std::str::from_utf8(v).ok()?.parse::<u32>().ok())
             .unwrap_or(0);
         // comment body up to </comment>
-        let cend = memchr::memmem::find(&xml[te..n], b"</comment>").map(|o| te + o).unwrap_or(n);
+        let cend = memchr::memmem::find(&xml[te..n], b"</comment>")
+            .map(|o| te + o)
+            .unwrap_or(n);
         let body = &xml[te..cend];
         // text = concat every <t>...</t> (plain + <r><t> runs), entity-decoded
         let mut text = String::new();
@@ -1533,12 +1614,22 @@ pub fn parse_comments(xml: &[u8]) -> SheetComments {
                 p = topen_end + 1;
                 continue; // <t/>
             }
-            let tclose = memchr::memmem::find(&body[topen_end..bn], b"</t>").map(|o| topen_end + o).unwrap_or(bn);
+            let tclose = memchr::memmem::find(&body[topen_end..bn], b"</t>")
+                .map(|o| topen_end + o)
+                .unwrap_or(bn);
             let raw = &body[topen_end + 1..tclose];
-            text.push_str(&String::from_utf8_lossy(super::decode::decode_bytes(raw, &mut scratch)));
+            text.push_str(&String::from_utf8_lossy(super::decode::decode_bytes(
+                raw,
+                &mut scratch,
+            )));
             p = tclose + 4;
         }
-        comments.push(Comment { row: cr.r0, col: cr.c0, author_id, text });
+        comments.push(Comment {
+            row: cr.r0,
+            col: cr.c0,
+            author_id,
+            text,
+        });
         i = cend + 10;
     }
 

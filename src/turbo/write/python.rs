@@ -6,6 +6,7 @@ use pyo3::{
     prelude::*,
     types::{PyDict, PyList, PyTuple},
 };
+use std::sync::Arc;
 
 use super::cf_dv::{CfRule, CfRuleKind, CfVo, ConditionalFormatting, DataValidation};
 use super::charts::{Anchor, Chart, ChartType, ChartsheetSpec, Series};
@@ -14,9 +15,13 @@ use super::rich_text::{RichRun, RichText, RunFont};
 use super::style_engine::{
     AlignDesc, BorderDesc, ColorSpec, DxfDesc, FillDesc, FontDesc, ProtDesc, SideDesc, StyleDesc,
 };
-use super::writer::{date_to_serial, datetime_to_serial, save_workbook, write_workbook_bytes};
+use super::writer::{
+    date_to_serial, datetime_to_serial, save_workbook, save_workbook_stream, write_workbook_bytes,
+};
 use crate::error::{KyraxError, KyraxErrorKind};
 use crate::turbo::error::TurboError;
+use crate::turbo::overlay::WorkbookOverlay;
+use crate::turbo::zipmin::ArchiveMap;
 
 fn write_err_to_py(err: std::io::Error) -> PyErr {
     let fe: KyraxError = KyraxErrorKind::Internal(format!("write error: {err}")).into();
@@ -91,27 +96,19 @@ fn parse_write_features(features: Option<&Bound<'_, PyAny>>) -> PyResult<WriteFe
 // ---------------------------------------------------------------------------
 
 fn opt_str(d: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<String>> {
-    d.get_item(key)?
-        .map(|v| v.extract::<String>())
-        .transpose()
+    d.get_item(key)?.map(|v| v.extract::<String>()).transpose()
 }
 
 fn opt_bool(d: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<bool>> {
-    d.get_item(key)?
-        .map(|v| v.extract::<bool>())
-        .transpose()
+    d.get_item(key)?.map(|v| v.extract::<bool>()).transpose()
 }
 
 fn opt_f64(d: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<f64>> {
-    d.get_item(key)?
-        .map(|v| v.extract::<f64>())
-        .transpose()
+    d.get_item(key)?.map(|v| v.extract::<f64>()).transpose()
 }
 
 fn opt_i32(d: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<i32>> {
-    d.get_item(key)?
-        .map(|v| v.extract::<i32>())
-        .transpose()
+    d.get_item(key)?.map(|v| v.extract::<i32>()).transpose()
 }
 
 fn parse_color(obj: &Bound<'_, PyAny>) -> PyResult<ColorSpec> {
@@ -139,9 +136,9 @@ fn parse_color(obj: &Bound<'_, PyAny>) -> PyResult<ColorSpec> {
 }
 
 fn parse_font(obj: &Bound<'_, PyAny>) -> PyResult<FontDesc> {
-    let d = obj.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("font must be a dict")
-    })?;
+    let d = obj
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("font must be a dict"))?;
     let mut f = FontDesc {
         name: opt_str(d, "name")?,
         sz_bits: None,
@@ -165,9 +162,9 @@ fn parse_font(obj: &Bound<'_, PyAny>) -> PyResult<FontDesc> {
 }
 
 fn parse_fill(obj: &Bound<'_, PyAny>) -> PyResult<FillDesc> {
-    let d = obj.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("fill must be a dict")
-    })?;
+    let d = obj
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("fill must be a dict"))?;
     let pattern = opt_str(d, "patternType")?
         .or(opt_str(d, "pattern_type")?)
         .or(opt_str(d, "fill_type")?)
@@ -210,9 +207,9 @@ fn parse_side(obj: &Bound<'_, PyAny>) -> PyResult<SideDesc> {
             color: None,
         });
     }
-    let d = obj.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("border side must be str or dict")
-    })?;
+    let d = obj
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("border side must be str or dict"))?;
     let mut side = SideDesc {
         style: opt_str(d, "style")?.or(opt_str(d, "border_style")?),
         color: None,
@@ -224,9 +221,9 @@ fn parse_side(obj: &Bound<'_, PyAny>) -> PyResult<SideDesc> {
 }
 
 fn parse_border(obj: &Bound<'_, PyAny>) -> PyResult<BorderDesc> {
-    let d = obj.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("border must be a dict")
-    })?;
+    let d = obj
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("border must be a dict"))?;
     // shorthand: {"style":"thin","color":"FF0000"} applies to all sides
     if d.get_item("left")?.is_none()
         && d.get_item("right")?.is_none()
@@ -234,10 +231,7 @@ fn parse_border(obj: &Bound<'_, PyAny>) -> PyResult<BorderDesc> {
         && d.get_item("bottom")?.is_none()
     {
         if let Some(st) = opt_str(d, "style")? {
-            let color = d
-                .get_item("color")?
-                .map(|c| parse_color(&c))
-                .transpose()?;
+            let color = d.get_item("color")?.map(|c| parse_color(&c)).transpose()?;
             let side = SideDesc {
                 style: Some(st),
                 color,
@@ -275,9 +269,9 @@ fn parse_border(obj: &Bound<'_, PyAny>) -> PyResult<BorderDesc> {
 }
 
 fn parse_align(obj: &Bound<'_, PyAny>) -> PyResult<AlignDesc> {
-    let d = obj.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("alignment must be a dict")
-    })?;
+    let d = obj
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("alignment must be a dict"))?;
     Ok(AlignDesc {
         horizontal: opt_str(d, "horizontal")?,
         vertical: opt_str(d, "vertical")?,
@@ -290,8 +284,7 @@ fn parse_align(obj: &Bound<'_, PyAny>) -> PyResult<AlignDesc> {
         relative_indent: opt_i32(d, "relativeIndent")?
             .or(opt_i32(d, "relative_indent")?)
             .unwrap_or(0),
-        justify_last_line: opt_bool(d, "justifyLastLine")?
-            .or(opt_bool(d, "justify_last_line")?),
+        justify_last_line: opt_bool(d, "justifyLastLine")?.or(opt_bool(d, "justify_last_line")?),
         reading_order: opt_i32(d, "readingOrder")?
             .or(opt_i32(d, "reading_order")?)
             .unwrap_or(0),
@@ -299,9 +292,9 @@ fn parse_align(obj: &Bound<'_, PyAny>) -> PyResult<AlignDesc> {
 }
 
 fn parse_prot(obj: &Bound<'_, PyAny>) -> PyResult<ProtDesc> {
-    let d = obj.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("protection must be a dict")
-    })?;
+    let d = obj
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("protection must be a dict"))?;
     Ok(ProtDesc {
         locked: opt_bool(d, "locked")?.unwrap_or(true),
         hidden: opt_bool(d, "hidden")?.unwrap_or(false),
@@ -309,9 +302,9 @@ fn parse_prot(obj: &Bound<'_, PyAny>) -> PyResult<ProtDesc> {
 }
 
 fn parse_style_desc(obj: &Bound<'_, PyAny>) -> PyResult<StyleDesc> {
-    let d = obj.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("style must be a dict with font/fill/border/...")
-    })?;
+    let d = obj
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("style must be a dict with font/fill/border/..."))?;
     let mut desc = StyleDesc::default();
     if let Some(f) = d.get_item("font")? {
         desc.font = Some(parse_font(&f)?);
@@ -345,9 +338,9 @@ fn parse_style_desc(obj: &Bound<'_, PyAny>) -> PyResult<StyleDesc> {
 }
 
 fn parse_dxf(obj: &Bound<'_, PyAny>) -> PyResult<DxfDesc> {
-    let d = obj.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("dxf must be a dict")
-    })?;
+    let d = obj
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("dxf must be a dict"))?;
     let mut dxf = DxfDesc::default();
     if let Some(f) = d.get_item("font")? {
         dxf.font = Some(parse_font(&f)?);
@@ -368,9 +361,9 @@ fn parse_dxf(obj: &Bound<'_, PyAny>) -> PyResult<DxfDesc> {
 }
 
 fn parse_run_font(obj: &Bound<'_, PyAny>) -> PyResult<RunFont> {
-    let d = obj.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("run font must be a dict")
-    })?;
+    let d = obj
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("run font must be a dict"))?;
     let mut rf = RunFont::default();
     rf.r_font = opt_str(d, "rFont")?
         .or(opt_str(d, "r_font")?)
@@ -397,18 +390,18 @@ fn parse_rich_text(obj: &Bound<'_, PyAny>) -> PyResult<RichText> {
     } else {
         obj.clone()
     };
-    let list = runs_obj.cast::<PyList>().map_err(|_| {
-        PyValueError::new_err("rich text runs must be a list")
-    })?;
+    let list = runs_obj
+        .cast::<PyList>()
+        .map_err(|_| PyValueError::new_err("rich text runs must be a list"))?;
     let mut runs = Vec::new();
     for item in list.iter() {
         if let Ok(s) = item.extract::<String>() {
             runs.push(RichRun::Text(s));
             continue;
         }
-        let d = item.cast::<PyDict>().map_err(|_| {
-            PyValueError::new_err("rich run must be str or dict{text, font?}")
-        })?;
+        let d = item
+            .cast::<PyDict>()
+            .map_err(|_| PyValueError::new_err("rich run must be str or dict{text, font?}"))?;
         let text: String = d
             .get_item("text")?
             .ok_or_else(|| PyValueError::new_err("rich run missing text"))?
@@ -426,9 +419,9 @@ fn parse_rich_text(obj: &Bound<'_, PyAny>) -> PyResult<RichText> {
 }
 
 fn parse_cfvo(obj: &Bound<'_, PyAny>) -> PyResult<CfVo> {
-    let d = obj.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("cfvo must be dict{type, val?}")
-    })?;
+    let d = obj
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("cfvo must be dict{type, val?}"))?;
     Ok(CfVo {
         type_: opt_str(d, "type")?
             .or(opt_str(d, "type_")?)
@@ -438,9 +431,9 @@ fn parse_cfvo(obj: &Bound<'_, PyAny>) -> PyResult<CfVo> {
 }
 
 fn parse_cf_rule(obj: &Bound<'_, PyAny>, priority: u32) -> PyResult<CfRule> {
-    let d = obj.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("cf rule must be a dict")
-    })?;
+    let d = obj
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("cf rule must be a dict"))?;
     let type_ = opt_str(d, "type")?
         .or(opt_str(d, "type_")?)
         .unwrap_or_else(|| "cellIs".into());
@@ -554,14 +547,14 @@ fn parse_cf_rule(obj: &Bound<'_, PyAny>, priority: u32) -> PyResult<CfRule> {
 }
 
 fn parse_conditional_formatting(obj: &Bound<'_, PyAny>) -> PyResult<Vec<ConditionalFormatting>> {
-    let list = obj.cast::<PyList>().map_err(|_| {
-        PyValueError::new_err("conditional_formatting must be a list")
-    })?;
+    let list = obj
+        .cast::<PyList>()
+        .map_err(|_| PyValueError::new_err("conditional_formatting must be a list"))?;
     let mut out = Vec::new();
     for item in list.iter() {
-        let d = item.cast::<PyDict>().map_err(|_| {
-            PyValueError::new_err("CF item must be dict{sqref, rules}")
-        })?;
+        let d = item
+            .cast::<PyDict>()
+            .map_err(|_| PyValueError::new_err("CF item must be dict{sqref, rules}"))?;
         let sqref = opt_str(d, "sqref")?
             .or(opt_str(d, "range")?)
             .unwrap_or_else(|| "A1".into());
@@ -580,14 +573,14 @@ fn parse_conditional_formatting(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Conditio
 }
 
 fn parse_data_validations(obj: &Bound<'_, PyAny>) -> PyResult<Vec<DataValidation>> {
-    let list = obj.cast::<PyList>().map_err(|_| {
-        PyValueError::new_err("data_validations must be a list")
-    })?;
+    let list = obj
+        .cast::<PyList>()
+        .map_err(|_| PyValueError::new_err("data_validations must be a list"))?;
     let mut out = Vec::new();
     for item in list.iter() {
-        let d = item.cast::<PyDict>().map_err(|_| {
-            PyValueError::new_err("DV item must be a dict")
-        })?;
+        let d = item
+            .cast::<PyDict>()
+            .map_err(|_| PyValueError::new_err("DV item must be a dict"))?;
         out.push(DataValidation {
             type_: opt_str(d, "type")?.or(opt_str(d, "type_")?),
             operator: opt_str(d, "operator")?,
@@ -618,16 +611,16 @@ fn parse_data_validations(obj: &Bound<'_, PyAny>) -> PyResult<Vec<DataValidation
 }
 
 fn parse_named_styles(obj: &Bound<'_, PyAny>) -> PyResult<Vec<NamedStyleInput>> {
-    let list = obj.cast::<PyList>().map_err(|_| {
-        PyValueError::new_err("named_styles must be a list of dicts")
-    })?;
+    let list = obj
+        .cast::<PyList>()
+        .map_err(|_| PyValueError::new_err("named_styles must be a list of dicts"))?;
     let mut out = Vec::new();
     for item in list.iter() {
-        let d = item.cast::<PyDict>().map_err(|_| {
-            PyValueError::new_err("named style must be a dict")
-        })?;
-        let name = opt_str(d, "name")?
-            .ok_or_else(|| PyValueError::new_err("named style needs name"))?;
+        let d = item
+            .cast::<PyDict>()
+            .map_err(|_| PyValueError::new_err("named style must be a dict"))?;
+        let name =
+            opt_str(d, "name")?.ok_or_else(|| PyValueError::new_err("named style needs name"))?;
         let desc = parse_style_desc(&item)?;
         let builtin_id = opt_i32(d, "builtinId")?.or(opt_i32(d, "builtin_id")?);
         out.push(NamedStyleInput {
@@ -651,9 +644,9 @@ fn apply_cell_styles(sheet: &mut Sheet, styles: &Bound<'_, PyAny>) -> PyResult<(
     }
     if let Ok(list) = styles.cast::<PyList>() {
         for item in list.iter() {
-            let d = item.cast::<PyDict>().map_err(|_| {
-                PyValueError::new_err("cell_styles list items must be dicts")
-            })?;
+            let d = item
+                .cast::<PyDict>()
+                .map_err(|_| PyValueError::new_err("cell_styles list items must be dicts"))?;
             let row0: u32 = d
                 .get_item("row")?
                 .ok_or_else(|| PyValueError::new_err("style needs row"))?
@@ -666,7 +659,9 @@ fn apply_cell_styles(sheet: &mut Sheet, styles: &Bound<'_, PyAny>) -> PyResult<(
                 .get_item("style")?
                 .ok_or_else(|| PyValueError::new_err("style needs style dict"))?;
             let desc = parse_style_desc(&style_obj)?;
-            set_cell_style(sheet, row0 + 1, col0 + 1, desc);
+            let r = if row0 == 0 { 1 } else { row0 };
+            let c = if col0 == 0 { 1 } else { col0 };
+            set_cell_style(sheet, r, c, desc);
         }
         return Ok(());
     }
@@ -676,20 +671,33 @@ fn apply_cell_styles(sheet: &mut Sheet, styles: &Bound<'_, PyAny>) -> PyResult<(
 }
 
 fn set_cell_style(sheet: &mut Sheet, row: u32, col: u32, desc: StyleDesc) {
-    if let Some(r) = sheet.rows.iter_mut().find(|r| r.row == row) {
-        if let Some(c) = r.cells.iter_mut().find(|c| c.col == col) {
-            c.style_desc = Some(Box::new(desc));
-        } else {
+    debug_assert!(
+        sheet.rows.windows(2).all(|w| w[0].row < w[1].row),
+        "sheet.rows invariant broken: rows must be strictly sorted"
+    );
+    match sheet.rows.binary_search_by(|r| r.row.cmp(&row)) {
+        Ok(r_idx) => {
+            let r = &mut sheet.rows[r_idx];
+            debug_assert!(
+                r.cells.windows(2).all(|w| w[0].col < w[1].col),
+                "row.cells invariant broken: cells must be strictly sorted"
+            );
+            match r.cells.binary_search_by(|c| c.col.cmp(&col)) {
+                Ok(c_idx) => r.cells[c_idx].style_desc = Some(Box::new(desc)),
+                Err(c_idx) => {
+                    let mut cell = Cell::new(col, CellValue::Empty);
+                    cell.style_desc = Some(Box::new(desc));
+                    r.cells.insert(c_idx, cell);
+                }
+            }
+        }
+        Err(r_idx) => {
+            let mut r = Row::new(row);
             let mut cell = Cell::new(col, CellValue::Empty);
             cell.style_desc = Some(Box::new(desc));
             r.cells.push(cell);
+            sheet.rows.insert(r_idx, r);
         }
-    } else {
-        let mut r = Row::new(row);
-        let mut cell = Cell::new(col, CellValue::Empty);
-        cell.style_desc = Some(Box::new(desc));
-        r.cells.push(cell);
-        sheet.rows.push(r);
     }
 }
 
@@ -833,11 +841,7 @@ fn apply_formulas(
                 sheet,
                 row0 + 1,
                 col0 + 1,
-                CellValue::Formula {
-                    text,
-                    kind,
-                    cached,
-                },
+                CellValue::Formula { text, kind, cached },
             );
         }
         return Ok(());
@@ -874,11 +878,7 @@ fn apply_formulas(
                 sheet,
                 row0 + 1,
                 col0 + 1,
-                CellValue::Formula {
-                    text,
-                    kind,
-                    cached,
-                },
+                CellValue::Formula { text, kind, cached },
             );
         }
         return Ok(());
@@ -1018,17 +1018,27 @@ fn py_to_cached(obj: &Bound<'_, PyAny>) -> PyResult<CachedValue> {
 }
 
 fn set_cell(sheet: &mut Sheet, row: u32, col: u32, value: CellValue) {
-    // find or create row
-    if let Some(r) = sheet.rows.iter_mut().find(|r| r.row == row) {
-        if let Some(c) = r.cells.iter_mut().find(|c| c.col == col) {
-            c.value = value;
-        } else {
-            r.cells.push(Cell::new(col, value));
+    debug_assert!(
+        sheet.rows.windows(2).all(|w| w[0].row < w[1].row),
+        "sheet.rows invariant broken: rows must be strictly sorted"
+    );
+    match sheet.rows.binary_search_by(|r| r.row.cmp(&row)) {
+        Ok(r_idx) => {
+            let r = &mut sheet.rows[r_idx];
+            debug_assert!(
+                r.cells.windows(2).all(|w| w[0].col < w[1].col),
+                "row.cells invariant broken: cells must be strictly sorted"
+            );
+            match r.cells.binary_search_by(|c| c.col.cmp(&col)) {
+                Ok(c_idx) => r.cells[c_idx].value = value,
+                Err(c_idx) => r.cells.insert(c_idx, Cell::new(col, value)),
+            }
         }
-    } else {
-        let mut r = Row::new(row);
-        r.cells.push(Cell::new(col, value));
-        sheet.rows.push(r);
+        Err(r_idx) => {
+            let mut r = Row::new(row);
+            r.cells.push(Cell::new(col, value));
+            sheet.rows.insert(r_idx, r);
+        }
     }
 }
 
@@ -1084,6 +1094,29 @@ fn columns_to_sheet(
     Ok(style_work)
 }
 
+fn arrow_array_to_cell_value(arr: &dyn arrow_array::Array, idx: usize) -> CellValue {
+    if arr.is_null(idx) {
+        return CellValue::Empty;
+    }
+    if let Some(f64_arr) = arr.as_any().downcast_ref::<arrow_array::Float64Array>() {
+        CellValue::Number(f64_arr.value(idx))
+    } else if let Some(f32_arr) = arr.as_any().downcast_ref::<arrow_array::Float32Array>() {
+        CellValue::Number(f32_arr.value(idx) as f64)
+    } else if let Some(i64_arr) = arr.as_any().downcast_ref::<arrow_array::Int64Array>() {
+        CellValue::Number(i64_arr.value(idx) as f64)
+    } else if let Some(i32_arr) = arr.as_any().downcast_ref::<arrow_array::Int32Array>() {
+        CellValue::Number(i32_arr.value(idx) as f64)
+    } else if let Some(b_arr) = arr.as_any().downcast_ref::<arrow_array::BooleanArray>() {
+        CellValue::Bool(b_arr.value(idx))
+    } else if let Some(str_arr) = arr.as_any().downcast_ref::<arrow_array::StringArray>() {
+        CellValue::Str(str_arr.value(idx).to_string())
+    } else if let Some(lstr_arr) = arr.as_any().downcast_ref::<arrow_array::LargeStringArray>() {
+        CellValue::Str(lstr_arr.value(idx).to_string())
+    } else {
+        CellValue::Empty
+    }
+}
+
 fn arrow_like_to_sheet(
     sheet: &mut Sheet,
     table: &Bound<'_, PyAny>,
@@ -1094,11 +1127,40 @@ fn arrow_like_to_sheet(
     if ncols == 0 || nrows == 0 {
         return Ok(false);
     }
-    // Prefer to_pylist per column for type fidelity without heavy arrow FFI
+    let mut arrow_cols: Vec<arrow_array::ArrayRef> = Vec::with_capacity(ncols);
+    let mut use_py_pylist = false;
+
+    for c in 0..ncols {
+        let col = table.call_method1("column", (c,))?;
+        if let Ok(py_arr) = col.extract::<pyo3_arrow::PyArray>() {
+            arrow_cols.push(py_arr.into_inner().0);
+        } else {
+            use_py_pylist = true;
+            break;
+        }
+    }
+
+    if !use_py_pylist && arrow_cols.len() == ncols {
+        sheet.rows.reserve(nrows);
+        for r in 0..nrows {
+            let mut row = Row::new((r as u32) + 1);
+            for (ci, arr) in arrow_cols.iter().enumerate() {
+                let val = arrow_array_to_cell_value(arr.as_ref(), r);
+                if !matches!(val, CellValue::Empty) {
+                    row.cells.push(Cell::new((ci as u32) + 1, val));
+                }
+            }
+            if !row.cells.is_empty() {
+                sheet.rows.push(row);
+            }
+        }
+        return Ok(false);
+    }
+
+    // Fallback: to_pylist per column for generic Python/Arrow array objects
     let mut col_lists: Vec<Bound<'_, PyList>> = Vec::with_capacity(ncols);
     for c in 0..ncols {
         let col = table.call_method1("column", (c,))?;
-        // chunked array → combine or to_pylist
         let pylist = if col.hasattr("to_pylist")? {
             col.call_method0("to_pylist")?
         } else if col.hasattr("combine_chunks")? {
@@ -1145,9 +1207,9 @@ fn apply_row_dims(sheet: &mut Sheet, row_dims: Option<&Bound<'_, PyAny>>) -> PyR
         PyValueError::new_err("row_dims must be a list of dicts {row, height?, hidden?}")
     })?;
     for item in list.iter() {
-        let d = item.cast::<PyDict>().map_err(|_| {
-            PyValueError::new_err("row_dims items must be dicts")
-        })?;
+        let d = item
+            .cast::<PyDict>()
+            .map_err(|_| PyValueError::new_err("row_dims items must be dicts"))?;
         // 0-based or 1-based? Use 1-based `row` key; accept `row_idx` 0-based
         let row_num: u32 = if let Some(r) = d.get_item("row")? {
             r.extract()?
@@ -1197,9 +1259,9 @@ fn apply_col_dims(sheet: &mut Sheet, col_dims: Option<&Bound<'_, PyAny>>) -> PyR
         PyValueError::new_err("col_dims must be a list of dicts {min, max, width?, hidden?}")
     })?;
     for item in list.iter() {
-        let d = item.cast::<PyDict>().map_err(|_| {
-            PyValueError::new_err("col_dims items must be dicts")
-        })?;
+        let d = item
+            .cast::<PyDict>()
+            .map_err(|_| PyValueError::new_err("col_dims items must be dicts"))?;
         let min: u32 = d
             .get_item("min")?
             .or(d.get_item("col")?)
@@ -1254,14 +1316,20 @@ fn parse_sheet_dict(sheet_obj: &Bound<'_, PyAny>, opts: &WriteOptions) -> PyResu
             .and_then(|n| n.extract())
             .unwrap_or_else(|_| "Sheet".into());
         let mut sheet = Sheet::new(name);
-        if let Ok(vis) = sheet_obj.getattr("visibility").or_else(|_| sheet_obj.getattr("state")) {
+        if let Ok(vis) = sheet_obj
+            .getattr("visibility")
+            .or_else(|_| sheet_obj.getattr("state"))
+        {
             if let Ok(s) = vis.extract::<String>() {
                 if let Some(st) = SheetState::parse(&s) {
                     sheet.state = st;
                 }
             }
         }
-        if let Ok(cols) = sheet_obj.getattr("columns").or_else(|_| sheet_obj.getattr("data")) {
+        if let Ok(cols) = sheet_obj
+            .getattr("columns")
+            .or_else(|_| sheet_obj.getattr("data"))
+        {
             if !cols.is_none() {
                 columns_to_sheet(&mut sheet, &cols, opts.date1904)?;
             }
@@ -1291,7 +1359,11 @@ fn parse_sheet_dict(sheet_obj: &Bound<'_, PyAny>, opts: &WriteOptions) -> PyResu
     }
 
     let mut style_work = false;
-    if let Some(cols) = d.get_item("columns")?.or(d.get_item("data")?) {
+    if let Some(cols) = d
+        .get_item("columns")?
+        .or(d.get_item("data")?)
+        .or(d.get_item("table")?)
+    {
         if !cols.is_none() {
             if columns_to_sheet(&mut sheet, &cols, opts.date1904)? {
                 style_work = true;
@@ -1302,13 +1374,13 @@ fn parse_sheet_dict(sheet_obj: &Bound<'_, PyAny>, opts: &WriteOptions) -> PyResu
     // rows as list of lists (row-major alternative)
     if let Some(rows) = d.get_item("rows")? {
         if !rows.is_none() {
-            let row_list = rows.cast::<PyList>().map_err(|_| {
-                PyValueError::new_err("rows must be a list of row sequences")
-            })?;
+            let row_list = rows
+                .cast::<PyList>()
+                .map_err(|_| PyValueError::new_err("rows must be a list of row sequences"))?;
             for (ri, row_obj) in row_list.iter().enumerate() {
-                let cells = row_obj.cast::<PyList>().map_err(|_| {
-                    PyValueError::new_err("each row must be a list of cell values")
-                })?;
+                let cells = row_obj
+                    .cast::<PyList>()
+                    .map_err(|_| PyValueError::new_err("each row must be a list of cell values"))?;
                 let mut row = Row::new((ri as u32) + 1);
                 for (ci, cell) in cells.iter().enumerate() {
                     let val =
@@ -1340,10 +1412,7 @@ fn parse_sheet_dict(sheet_obj: &Bound<'_, PyAny>, opts: &WriteOptions) -> PyResu
     }
 
     // W2 styles
-    if let Some(cs) = d
-        .get_item("cell_styles")?
-        .or(d.get_item("styles")?)
-    {
+    if let Some(cs) = d.get_item("cell_styles")?.or(d.get_item("styles")?) {
         if !cs.is_none() {
             apply_cell_styles(&mut sheet, &cs)?;
             style_work = true;
@@ -1362,10 +1431,7 @@ fn parse_sheet_dict(sheet_obj: &Bound<'_, PyAny>, opts: &WriteOptions) -> PyResu
             style_work = true;
         }
     }
-    if let Some(cf) = d
-        .get_item("conditional_formatting")?
-        .or(d.get_item("cf")?)
-    {
+    if let Some(cf) = d.get_item("conditional_formatting")?.or(d.get_item("cf")?) {
         if !cf.is_none() {
             sheet.conditional_formatting = parse_conditional_formatting(&cf)?;
             style_work = true;
@@ -1416,7 +1482,10 @@ fn apply_structural_sheet(sheet: &mut Sheet, d: &Bound<'_, PyDict>) -> PyResult<
             sheet.hyperlinks = parse_hyperlinks(&hl)?;
         }
     }
-    if let Some(p) = d.get_item("protection")?.or(d.get_item("sheet_protection")?) {
+    if let Some(p) = d
+        .get_item("protection")?
+        .or(d.get_item("sheet_protection")?)
+    {
         if !p.is_none() {
             sheet.protection = Some(parse_sheet_protection(&p)?);
         }
@@ -1485,31 +1554,22 @@ fn apply_structural_sheet(sheet: &mut Sheet, d: &Bound<'_, PyDict>) -> PyResult<
 }
 
 fn parse_hyperlinks(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Hyperlink>> {
-    let list = obj.cast::<PyList>().map_err(|_| {
-        PyValueError::new_err("hyperlinks must be a list of dicts")
-    })?;
+    let list = obj
+        .cast::<PyList>()
+        .map_err(|_| PyValueError::new_err("hyperlinks must be a list of dicts"))?;
     let mut out = Vec::with_capacity(list.len());
     for item in list.iter() {
-        let d = item.cast::<PyDict>().map_err(|_| {
-            PyValueError::new_err("each hyperlink must be a dict")
-        })?;
+        let d = item
+            .cast::<PyDict>()
+            .map_err(|_| PyValueError::new_err("each hyperlink must be a dict"))?;
         let ref_: String = d
             .get_item("ref")?
             .or(d.get_item("ref_")?)
             .ok_or_else(|| PyValueError::new_err("hyperlink requires ref"))?
             .extract()?;
-        let target = d
-            .get_item("target")?
-            .map(|v| v.extract())
-            .transpose()?;
-        let location = d
-            .get_item("location")?
-            .map(|v| v.extract())
-            .transpose()?;
-        let display = d
-            .get_item("display")?
-            .map(|v| v.extract())
-            .transpose()?;
+        let target = d.get_item("target")?.map(|v| v.extract()).transpose()?;
+        let location = d.get_item("location")?.map(|v| v.extract()).transpose()?;
+        let display = d.get_item("display")?.map(|v| v.extract()).transpose()?;
         out.push(Hyperlink {
             ref_,
             target,
@@ -1528,18 +1588,15 @@ fn parse_sheet_protection(obj: &Bound<'_, PyAny>) -> PyResult<SheetProtection> {
             already_hashed: false,
         });
     }
-    let d = obj.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("protection must be bool or dict")
-    })?;
+    let d = obj
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("protection must be bool or dict"))?;
     let sheet = d
         .get_item("sheet")?
         .map(|v| v.extract::<bool>())
         .transpose()?
         .unwrap_or(true);
-    let password = d
-        .get_item("password")?
-        .map(|v| v.extract())
-        .transpose()?;
+    let password = d.get_item("password")?.map(|v| v.extract()).transpose()?;
     let already_hashed = d
         .get_item("already_hashed")?
         .map(|v| v.extract::<bool>())
@@ -1553,14 +1610,14 @@ fn parse_sheet_protection(obj: &Bound<'_, PyAny>) -> PyResult<SheetProtection> {
 }
 
 fn parse_scenarios(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Scenario>> {
-    let list = obj.cast::<PyList>().map_err(|_| {
-        PyValueError::new_err("scenarios must be a list")
-    })?;
+    let list = obj
+        .cast::<PyList>()
+        .map_err(|_| PyValueError::new_err("scenarios must be a list"))?;
     let mut out = Vec::new();
     for item in list.iter() {
-        let d = item.cast::<PyDict>().map_err(|_| {
-            PyValueError::new_err("scenario must be a dict")
-        })?;
+        let d = item
+            .cast::<PyDict>()
+            .map_err(|_| PyValueError::new_err("scenario must be a dict"))?;
         let name: String = d
             .get_item("name")?
             .ok_or_else(|| PyValueError::new_err("scenario requires name"))?
@@ -1586,9 +1643,9 @@ fn parse_scenarios(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Scenario>> {
 }
 
 fn parse_print_options(obj: &Bound<'_, PyAny>) -> PyResult<PrintOptions> {
-    let d = obj.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("print_options must be a dict")
-    })?;
+    let d = obj
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("print_options must be a dict"))?;
     Ok(PrintOptions {
         horizontal_centered: d
             .get_item("horizontal_centered")?
@@ -1614,9 +1671,9 @@ fn parse_print_options(obj: &Bound<'_, PyAny>) -> PyResult<PrintOptions> {
 }
 
 fn parse_page_margins(obj: &Bound<'_, PyAny>) -> PyResult<PageMargins> {
-    let d = obj.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("page_margins must be a dict")
-    })?;
+    let d = obj
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("page_margins must be a dict"))?;
     let mut m = PageMargins::default();
     if let Some(v) = d.get_item("left")? {
         m.left = v.extract()?;
@@ -1640,9 +1697,9 @@ fn parse_page_margins(obj: &Bound<'_, PyAny>) -> PyResult<PageMargins> {
 }
 
 fn parse_page_setup(obj: &Bound<'_, PyAny>) -> PyResult<PageSetup> {
-    let d = obj.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("page_setup must be a dict")
-    })?;
+    let d = obj
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("page_setup must be a dict"))?;
     Ok(PageSetup {
         orientation: d
             .get_item("orientation")?
@@ -1667,9 +1724,9 @@ fn parse_page_setup(obj: &Bound<'_, PyAny>) -> PyResult<PageSetup> {
 }
 
 fn parse_header_footer(obj: &Bound<'_, PyAny>) -> PyResult<HeaderFooter> {
-    let d = obj.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("header_footer must be a dict")
-    })?;
+    let d = obj
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("header_footer must be a dict"))?;
     Ok(HeaderFooter {
         odd_header_center: d
             .get_item("odd_header_center")?
@@ -1705,14 +1762,14 @@ fn parse_header_footer(obj: &Bound<'_, PyAny>) -> PyResult<HeaderFooter> {
 }
 
 fn parse_tables(obj: &Bound<'_, PyAny>) -> PyResult<Vec<TableDef>> {
-    let list = obj.cast::<PyList>().map_err(|_| {
-        PyValueError::new_err("tables must be a list")
-    })?;
+    let list = obj
+        .cast::<PyList>()
+        .map_err(|_| PyValueError::new_err("tables must be a list"))?;
     let mut out = Vec::new();
     for item in list.iter() {
-        let d = item.cast::<PyDict>().map_err(|_| {
-            PyValueError::new_err("table must be a dict")
-        })?;
+        let d = item
+            .cast::<PyDict>()
+            .map_err(|_| PyValueError::new_err("table must be a dict"))?;
         let display_name: String = d
             .get_item("display_name")?
             .or(d.get_item("name")?)
@@ -1750,14 +1807,14 @@ fn parse_tables(obj: &Bound<'_, PyAny>) -> PyResult<Vec<TableDef>> {
 }
 
 fn parse_comments(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Comment>> {
-    let list = obj.cast::<PyList>().map_err(|_| {
-        PyValueError::new_err("comments must be a list")
-    })?;
+    let list = obj
+        .cast::<PyList>()
+        .map_err(|_| PyValueError::new_err("comments must be a list"))?;
     let mut out = Vec::new();
     for item in list.iter() {
-        let d = item.cast::<PyDict>().map_err(|_| {
-            PyValueError::new_err("comment must be a dict")
-        })?;
+        let d = item
+            .cast::<PyDict>()
+            .map_err(|_| PyValueError::new_err("comment must be a dict"))?;
         let ref_: String = d
             .get_item("ref")?
             .or(d.get_item("ref_")?)
@@ -1794,9 +1851,9 @@ fn parse_comments(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Comment>> {
 }
 
 fn parse_series(obj: &Bound<'_, PyAny>) -> PyResult<Series> {
-    let d = obj.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("series must be a dict")
-    })?;
+    let d = obj
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("series must be a dict"))?;
     Ok(Series {
         title_ref: d.get_item("title_ref")?.map(|v| v.extract()).transpose()?,
         title_literal: d
@@ -1804,10 +1861,26 @@ fn parse_series(obj: &Bound<'_, PyAny>) -> PyResult<Series> {
             .or(d.get_item("title")?)
             .map(|v| v.extract())
             .transpose()?,
-        cat_ref: d.get_item("cat_ref")?.or(d.get_item("cat")?).map(|v| v.extract()).transpose()?,
-        val_ref: d.get_item("val_ref")?.or(d.get_item("val")?).map(|v| v.extract()).transpose()?,
-        x_ref: d.get_item("x_ref")?.or(d.get_item("x")?).map(|v| v.extract()).transpose()?,
-        y_ref: d.get_item("y_ref")?.or(d.get_item("y")?).map(|v| v.extract()).transpose()?,
+        cat_ref: d
+            .get_item("cat_ref")?
+            .or(d.get_item("cat")?)
+            .map(|v| v.extract())
+            .transpose()?,
+        val_ref: d
+            .get_item("val_ref")?
+            .or(d.get_item("val")?)
+            .map(|v| v.extract())
+            .transpose()?,
+        x_ref: d
+            .get_item("x_ref")?
+            .or(d.get_item("x")?)
+            .map(|v| v.extract())
+            .transpose()?,
+        y_ref: d
+            .get_item("y_ref")?
+            .or(d.get_item("y")?)
+            .map(|v| v.extract())
+            .transpose()?,
         bubble_size_ref: d
             .get_item("bubble_size_ref")?
             .or(d.get_item("bubble")?)
@@ -1824,9 +1897,9 @@ fn parse_anchor(obj: &Bound<'_, PyAny>) -> PyResult<Anchor> {
             height_cm: 7.5,
         });
     }
-    let d = obj.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("anchor must be str or dict")
-    })?;
+    let d = obj
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("anchor must be str or dict"))?;
     let kind: String = d
         .get_item("type")?
         .map(|v| v.extract())
@@ -1846,8 +1919,16 @@ fn parse_anchor(obj: &Bound<'_, PyAny>) -> PyResult<Anchor> {
                 .extract()?,
         }),
         "absolute" => Ok(Anchor::Absolute {
-            x_emu: d.get_item("x")?.map(|v| v.extract()).transpose()?.unwrap_or(0),
-            y_emu: d.get_item("y")?.map(|v| v.extract()).transpose()?.unwrap_or(0),
+            x_emu: d
+                .get_item("x")?
+                .map(|v| v.extract())
+                .transpose()?
+                .unwrap_or(0),
+            y_emu: d
+                .get_item("y")?
+                .map(|v| v.extract())
+                .transpose()?
+                .unwrap_or(0),
             cx_emu: d
                 .get_item("cx")?
                 .map(|v| v.extract())
@@ -1887,28 +1968,27 @@ fn parse_anchor(obj: &Bound<'_, PyAny>) -> PyResult<Anchor> {
 }
 
 fn parse_charts(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Chart>> {
-    let list = obj.cast::<PyList>().map_err(|_| {
-        PyValueError::new_err("charts must be a list")
-    })?;
+    let list = obj
+        .cast::<PyList>()
+        .map_err(|_| PyValueError::new_err("charts must be a list"))?;
     let mut out = Vec::new();
     for item in list.iter() {
-        let d = item.cast::<PyDict>().map_err(|_| {
-            PyValueError::new_err("chart must be a dict")
-        })?;
+        let d = item
+            .cast::<PyDict>()
+            .map_err(|_| PyValueError::new_err("chart must be a dict"))?;
         let type_s: String = d
             .get_item("type")?
             .or(d.get_item("chart_type")?)
             .ok_or_else(|| PyValueError::new_err("chart requires type"))?
             .extract()?;
-        let chart_type = ChartType::parse(&type_s).ok_or_else(|| {
-            PyValueError::new_err(format!("unknown chart type {type_s:?}"))
-        })?;
+        let chart_type = ChartType::parse(&type_s)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown chart type {type_s:?}")))?;
         let title = d.get_item("title")?.map(|v| v.extract()).transpose()?;
         let mut series = Vec::new();
         if let Some(s) = d.get_item("series")? {
-            let sl = s.cast::<PyList>().map_err(|_| {
-                PyValueError::new_err("chart series must be a list")
-            })?;
+            let sl = s
+                .cast::<PyList>()
+                .map_err(|_| PyValueError::new_err("chart series must be a list"))?;
             for ser in sl.iter() {
                 series.push(parse_series(&ser)?);
             }
@@ -1918,10 +1998,7 @@ fn parse_charts(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Chart>> {
         } else {
             Anchor::default()
         };
-        let legend_pos = d
-            .get_item("legend_pos")?
-            .map(|v| v.extract())
-            .transpose()?;
+        let legend_pos = d.get_item("legend_pos")?.map(|v| v.extract()).transpose()?;
         let style = d.get_item("style")?.map(|v| v.extract()).transpose()?;
         out.push(Chart {
             chart_type,
@@ -1936,14 +2013,14 @@ fn parse_charts(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Chart>> {
 }
 
 fn parse_defined_names(obj: &Bound<'_, PyAny>) -> PyResult<Vec<DefinedName>> {
-    let list = obj.cast::<PyList>().map_err(|_| {
-        PyValueError::new_err("defined_names must be a list")
-    })?;
+    let list = obj
+        .cast::<PyList>()
+        .map_err(|_| PyValueError::new_err("defined_names must be a list"))?;
     let mut out = Vec::new();
     for item in list.iter() {
-        let d = item.cast::<PyDict>().map_err(|_| {
-            PyValueError::new_err("defined name must be a dict")
-        })?;
+        let d = item
+            .cast::<PyDict>()
+            .map_err(|_| PyValueError::new_err("defined name must be a dict"))?;
         let name: String = d
             .get_item("name")?
             .ok_or_else(|| PyValueError::new_err("defined name requires name"))?
@@ -1973,14 +2050,14 @@ fn parse_defined_names(obj: &Bound<'_, PyAny>) -> PyResult<Vec<DefinedName>> {
 }
 
 fn parse_chartsheets(obj: &Bound<'_, PyAny>) -> PyResult<Vec<ChartsheetSpec>> {
-    let list = obj.cast::<PyList>().map_err(|_| {
-        PyValueError::new_err("chartsheets must be a list")
-    })?;
+    let list = obj
+        .cast::<PyList>()
+        .map_err(|_| PyValueError::new_err("chartsheets must be a list"))?;
     let mut out = Vec::new();
     for item in list.iter() {
-        let d = item.cast::<PyDict>().map_err(|_| {
-            PyValueError::new_err("chartsheet must be a dict")
-        })?;
+        let d = item
+            .cast::<PyDict>()
+            .map_err(|_| PyValueError::new_err("chartsheet must be a dict"))?;
         let title: String = d
             .get_item("name")?
             .or(d.get_item("title")?)
@@ -1997,9 +2074,9 @@ fn parse_chartsheets(obj: &Bound<'_, PyAny>) -> PyResult<Vec<ChartsheetSpec>> {
 }
 
 fn parse_doc_props(obj: &Bound<'_, PyAny>) -> PyResult<DocProps> {
-    let d = obj.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("props must be a dict")
-    })?;
+    let d = obj
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("props must be a dict"))?;
     let mut p = DocProps::default();
     if let Some(v) = d.get_item("title")? {
         p.title = Some(v.extract()?);
@@ -2044,6 +2121,66 @@ fn parse_doc_props(obj: &Bound<'_, PyAny>) -> PyResult<DocProps> {
     Ok(p)
 }
 
+fn try_parse_numeric_grid(
+    sheet_name: String,
+    data_obj: &Bound<'_, PyAny>,
+) -> PyResult<Option<NumericGrid>> {
+    if let Ok(interface) = data_obj.getattr("__array_interface__") {
+        if let Ok(dict) = interface.cast::<PyDict>() {
+            let shape_obj = dict.get_item("shape")?;
+            let typestr_obj = dict.get_item("typestr")?;
+            let data_obj_item = dict.get_item("data")?;
+            let strides = dict.get_item("strides")?;
+
+            if let (Some(shape_any), Some(type_any), Some(data_any)) =
+                (shape_obj, typestr_obj, data_obj_item)
+            {
+                if let (Ok(shape), Ok(typestr), Ok(data)) = (
+                    shape_any.cast::<PyTuple>(),
+                    type_any.extract::<String>(),
+                    data_any.cast::<PyTuple>(),
+                ) {
+                    let is_c_contiguous =
+                        strides.is_none() || strides.as_ref().map_or(false, |s| s.is_none());
+                    if shape.len() == 2 && is_c_contiguous {
+                        let nrows: usize = shape.get_item(0)?.extract()?;
+                        let ncols: usize = shape.get_item(1)?.extract()?;
+                        let ptr_val: usize = data.get_item(0)?.extract()?;
+                        if ptr_val != 0 {
+                            if let Some(total) = nrows.checked_mul(ncols) {
+                                if typestr.ends_with("f8") {
+                                    let slice = unsafe {
+                                        std::slice::from_raw_parts(ptr_val as *const f64, total)
+                                    };
+                                    return Ok(Some(NumericGrid {
+                                        sheet_name,
+                                        nrows: nrows as u32,
+                                        ncols: ncols as u32,
+                                        values: Arc::new(slice.to_vec()),
+                                    }));
+                                } else if typestr.ends_with("f4") {
+                                    let slice = unsafe {
+                                        std::slice::from_raw_parts(ptr_val as *const f32, total)
+                                    };
+                                    let f64_values: Vec<f64> =
+                                        slice.iter().map(|&x| x as f64).collect();
+                                    return Ok(Some(NumericGrid {
+                                        sheet_name,
+                                        nrows: nrows as u32,
+                                        ncols: ncols as u32,
+                                        values: Arc::new(f64_values),
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn build_workbook_from_py(
     sheets: &Bound<'_, PyAny>,
     string_mode: &str,
@@ -2068,9 +2205,9 @@ fn build_workbook_from_py(
         auto_sst_threshold: AUTO_SST_THRESHOLD,
     };
 
-    let sheet_list = sheets.cast::<PyList>().map_err(|_| {
-        PyValueError::new_err("sheets must be a list of sheet dicts")
-    })?;
+    let sheet_list = sheets
+        .cast::<PyList>()
+        .map_err(|_| PyValueError::new_err("sheets must be a list of sheet dicts"))?;
     if sheet_list.is_empty() {
         return Err(PyValueError::new_err("sheets must be non-empty"));
     }
@@ -2091,6 +2228,40 @@ fn build_workbook_from_py(
         macro_enabled,
         vba_archive_path: None,
     };
+
+    if sheet_list.len() == 1 {
+        let first_sheet = &sheet_list.get_item(0)?;
+        if let Ok(dict) = first_sheet.cast::<PyDict>() {
+            let name = opt_str(dict, "name")?.unwrap_or_else(|| "Sheet1".to_string());
+            let has_grid = dict.contains("grid")?;
+            let has_cols = dict.contains("columns")? || dict.contains("data")?;
+            let has_rows = dict.contains("rows")?;
+
+            if has_grid {
+                if has_cols || has_rows {
+                    return Err(PyValueError::new_err(
+                        "'grid' key is mutually exclusive with 'columns' and 'rows'",
+                    ));
+                }
+
+                // Check eligibility: no styles, merges, CF, DV, freeze_panes attached
+                let is_eligible = !dict.contains("cell_styles")?
+                    && !dict.contains("style_palette")?
+                    && !dict.contains("conditional_formatting")?
+                    && !dict.contains("data_validations")?
+                    && !dict.contains("merged_cells")?
+                    && !dict.contains("freeze_panes")?;
+
+                if is_eligible {
+                    if let Some(grid_obj) = dict.get_item("grid")? {
+                        if let Ok(Some(grid)) = try_parse_numeric_grid(name, &grid_obj) {
+                            wb.numeric_columns = Some(grid);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     if let Some(p) = props {
         if !p.is_none() {
@@ -2246,6 +2417,68 @@ pub fn py_write_excel_turbo(
         .map_err(write_err_to_py)
 }
 
+/// Write an XLSX workbook streaming to a file path.
+#[pyfunction(name = "write_excel_turbo_stream")]
+#[pyo3(signature = (
+    path,
+    sheets,
+    *,
+    string_mode = "inline",
+    emit_cached_values = true,
+    date1904 = false,
+    features = None,
+    active_tab = 0,
+    named_styles = None,
+    props = None,
+    defined_names = None,
+    chartsheets = None,
+    lock_structure = false,
+    external_links = None,
+    creator = None,
+    macro_enabled = false,
+))]
+pub fn py_write_excel_turbo_stream(
+    py: Python<'_>,
+    path: &str,
+    sheets: &Bound<'_, PyAny>,
+    string_mode: &str,
+    emit_cached_values: bool,
+    date1904: bool,
+    features: Option<&Bound<'_, PyAny>>,
+    active_tab: u32,
+    named_styles: Option<&Bound<'_, PyAny>>,
+    props: Option<&Bound<'_, PyAny>>,
+    defined_names: Option<&Bound<'_, PyAny>>,
+    chartsheets: Option<&Bound<'_, PyAny>>,
+    lock_structure: bool,
+    external_links: Option<&Bound<'_, PyAny>>,
+    creator: Option<&str>,
+    macro_enabled: bool,
+) -> PyResult<()> {
+    let wb = build_workbook_from_py(
+        sheets,
+        string_mode,
+        emit_cached_values,
+        date1904,
+        features,
+        active_tab,
+        named_styles,
+        props,
+        defined_names,
+        chartsheets,
+        lock_structure,
+        external_links,
+        creator,
+        macro_enabled,
+    )?;
+    py.detach(|| {
+        let file = std::fs::File::create(path)?;
+        save_workbook_stream(&wb, file)?;
+        Ok::<(), std::io::Error>(())
+    })
+    .map_err(write_err_to_py)
+}
+
 /// Write workbook and return XLSX bytes (no filesystem).
 #[pyfunction(name = "write_excel_turbo_bytes")]
 #[pyo3(signature = (
@@ -2308,4 +2541,102 @@ pub fn py_write_excel_turbo_bytes<'py>(
 #[allow(dead_code)]
 fn _use_turbo_err(e: TurboError) -> PyErr {
     turbo_err_to_py(e)
+}
+
+#[pyclass(name = "EditableSheet")]
+pub struct PyEditableSheet {
+    sheet_name: String,
+    overlay: Arc<std::sync::Mutex<WorkbookOverlay>>,
+}
+
+#[pymethods]
+impl PyEditableSheet {
+    #[pyo3(name = "set_cell")]
+    fn py_set_cell(&self, row: u32, col: u32, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let cell_val = py_to_cell_value(value, false)?;
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        ov.set_cell(&self.sheet_name, row, col, cell_val);
+        Ok(())
+    }
+
+    #[pyo3(name = "set_cell_style", signature = (row, col, *, font=None, fill=None, border=None, num_fmt=None))]
+    fn py_set_cell_style(
+        &self,
+        row: u32,
+        col: u32,
+        font: Option<&Bound<'_, PyAny>>,
+        fill: Option<&Bound<'_, PyAny>>,
+        border: Option<&Bound<'_, PyAny>>,
+        num_fmt: Option<&str>,
+    ) -> PyResult<()> {
+        let mut desc = StyleDesc::default();
+        if let Some(f) = font {
+            desc.font = Some(parse_font(f)?);
+        }
+        if let Some(f) = fill {
+            desc.fill = Some(parse_fill(f)?);
+        }
+        if let Some(b) = border {
+            desc.border = Some(parse_border(b)?);
+        }
+        if let Some(fmt) = num_fmt {
+            desc.num_fmt = Some(fmt.to_string());
+        }
+
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        ov.set_cell_style(&self.sheet_name, row, col, desc);
+        Ok(())
+    }
+}
+
+#[pyclass(name = "EditableWorkbook")]
+pub struct PyEditableWorkbook {
+    overlay: Arc<std::sync::Mutex<WorkbookOverlay>>,
+}
+
+#[pymethods]
+impl PyEditableWorkbook {
+    fn __getitem__(&self, sheet_name: &str) -> PyResult<PyEditableSheet> {
+        let ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if !ov.archive_map.sheet_name_map.contains_key(sheet_name)
+            && !ov.sheet_overlays.contains_key(sheet_name)
+        {
+            return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                "Sheet '{sheet_name}' not found in workbook"
+            )));
+        }
+        Ok(PyEditableSheet {
+            sheet_name: sheet_name.to_string(),
+            overlay: Arc::clone(&self.overlay),
+        })
+    }
+
+    fn save(&self, path: &str) -> PyResult<()> {
+        let ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let bytes = ov.save().map_err(turbo_err_to_py)?;
+        std::fs::write(path, bytes).map_err(write_err_to_py)?;
+        Ok(())
+    }
+}
+
+#[pyfunction(name = "edit_excel")]
+pub fn py_edit_excel(py: Python<'_>, path: &str) -> PyResult<PyEditableWorkbook> {
+    let zip_bytes = py.detach(|| std::fs::read(path)).map_err(write_err_to_py)?;
+    let archive_map = ArchiveMap::parse(Arc::new(zip_bytes)).map_err(turbo_err_to_py)?;
+    let overlay = WorkbookOverlay::new(archive_map);
+    Ok(PyEditableWorkbook {
+        overlay: Arc::new(std::sync::Mutex::new(overlay)),
+    })
 }

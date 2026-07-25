@@ -38,8 +38,7 @@ impl FromStr for ColumnNameFrom {
             "looked_up" => Ok(Self::LookedUp),
             "generated" => Ok(Self::Generated),
             _ => Err(
-                KyraxErrorKind::InvalidParameters(format!("invalid ColumnNameFrom: {s}"))
-                    .into(),
+                KyraxErrorKind::InvalidParameters(format!("invalid ColumnNameFrom: {s}")).into(),
             ),
         }
     }
@@ -88,9 +87,7 @@ impl FromStr for DTypeFrom {
             "provided_by_index" => Ok(Self::ProvidedByIndex),
             "provided_by_name" => Ok(Self::ProvidedByName),
             "guessed" => Ok(Self::Guessed),
-            _ => Err(
-                KyraxErrorKind::InvalidParameters(format!("invalid DTypesFrom: {s}")).into(),
-            ),
+            _ => Err(KyraxErrorKind::InvalidParameters(format!("invalid DTypesFrom: {s}")).into()),
         }
     }
 }

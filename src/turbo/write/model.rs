@@ -51,7 +51,9 @@ impl SheetState {
 #[derive(Debug, Clone)]
 pub enum FormulaKind {
     Normal,
-    Array { ref_: String },
+    Array {
+        ref_: String,
+    },
     DataTable {
         ref_: String,
         dt2d: bool,
@@ -443,8 +445,7 @@ impl WriteFeatures {
     /// Full core/app/custom props + workbook protection.
     pub const PROPS: WriteFeatures = WriteFeatures(1 << 11);
 
-    pub const CORE: WriteFeatures =
-        WriteFeatures(Self::VALUES.0 | Self::FORMULAS.0 | Self::DIMS.0);
+    pub const CORE: WriteFeatures = WriteFeatures(Self::VALUES.0 | Self::FORMULAS.0 | Self::DIMS.0);
 
     /// CORE + styles + CF/DV (W2 default when styles supplied).
     pub const WITH_STYLES: WriteFeatures =
