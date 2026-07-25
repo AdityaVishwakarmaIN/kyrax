@@ -21,7 +21,7 @@ The single source of truth for the version is **`Cargo.toml`**:
 
 ```toml
 [package]
-version = "1.0.2"
+version = "1.0.4"
 ```
 
 `pyproject.toml` declares `dynamic = ["version"]`, so maturin copies the version
@@ -106,14 +106,14 @@ Edit `Cargo.toml` and increase the version, following
 
 ```toml
 [package]
-version = "1.0.1"   # was 1.0.0
+version = "1.0.4"   # was 1.0.3
 ```
 
 ### Step 2 — commit the bump
 
 ```bash
 git add Cargo.toml
-git commit -m "Release 1.0.1"
+git commit -m "Release 1.0.4"
 git push
 ```
 
@@ -122,8 +122,8 @@ git push
 The tag **must** be `v` + the exact version you put in `Cargo.toml`:
 
 ```bash
-git tag v1.0.1
-git push origin v1.0.1
+git tag v1.0.4
+git push origin v1.0.4
 ```
 
 Pushing the tag triggers the **Release** workflow, which builds all wheels and
