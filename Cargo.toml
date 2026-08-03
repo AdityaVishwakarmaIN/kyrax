@@ -1,6 +1,6 @@
 [package]
 name = "kyrax"
-version = "1.0.4"
+version = "1.0.5"
 description = "kyrax: a fast Excel engine"
 authors = ["Aditya Vishwakarma <aditya.vishwakarma@vertexconsulting.in>"]
 rust-version = "1.85.0"
