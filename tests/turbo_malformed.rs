@@ -580,3 +580,249 @@ fn pivot_missing_cache_rel_no_panic() {
     // May be empty or a pivot with empty cache fields — either is fine.
     assert!(pivs.len() <= 1);
 }
+
+/// Zip64 EOCD sentinels without a Zip64 record: the read path must report a
+/// real error, not silently read the workbook as having missing parts.
+#[test]
+fn zip64_sentinel_without_record_is_error() {
+    let sheet = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1"><c r="A1" t="inlineStr"><is><t>H</t></is></c></row>
+  </sheetData>
+</worksheet>"#;
+    let path = tmp_xlsx("zip64_sentinel");
+    write_store_zip(
+        &path,
+        &[
+            ("[Content_Types].xml", CONTENT_TYPES.as_bytes()),
+            ("_rels/.rels", RELS_ROOT.as_bytes()),
+            ("xl/workbook.xml", WORKBOOK.as_bytes()),
+            ("xl/_rels/workbook.xml.rels", WB_RELS.as_bytes()),
+            ("xl/worksheets/sheet1.xml", sheet),
+            (
+                "xl/styles.xml",
+                br#"<?xml version="1.0"?><styleSheet><fonts count="1"><font/></fonts><fills count="1"><fill/></fills><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellXfs></styleSheet>"#,
+            ),
+            (
+                "xl/sharedStrings.xml",
+                br#"<?xml version="1.0"?><sst count="0" uniqueCount="0"></sst>"#,
+            ),
+        ],
+    );
+
+    // Patch the EOCD central-directory size to the 0xFFFFFFFF sentinel while
+    // leaving no Zip64 locator/record behind. This must error loudly.
+    let mut bytes = std::fs::read(&path).unwrap();
+    let eocd = bytes
+        .windows(4)
+        .rposition(|w| w == b"PK\x05\x06")
+        .expect("eocd");
+    bytes[eocd + 12..eocd + 16].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    let res = read_workbook_turbo(path.to_str().unwrap(), Features::ALL);
+    assert!(
+        res.is_err(),
+        "Zip64 sentinels without a Zip64 record must error, got Ok"
+    );
+}
+
+// ----------------------------------------------------------------------------
+// T1-2b image read path: the six failure hops must skip (or error on genuine
+// zip corruption), never panic.
+// ----------------------------------------------------------------------------
+
+/// A drawing + optional rels + optional media part, packed into a minimal store
+/// zip that references the drawing from sheet1.
+fn write_image_hop_zip(name: &str, drawing: &[u8], drels: &[u8], media: Option<(&str, &[u8])>) {
+    let sheet = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheetData>
+    <row r="1"><c r="A1" t="inlineStr"><is><t>H</t></is></c></row>
+    <row r="2"><c r="A2"><v>1</v></c></row>
+  </sheetData>
+  <drawing r:id="rId1"/>
+</worksheet>"#;
+    let sheet_rels = br#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/>
+</Relationships>"#;
+    let ct = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+  <Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>
+</Types>"#;
+
+    let path = tmp_xlsx(name);
+    let mut entries: Vec<(&str, &[u8])> = vec![
+        ("[Content_Types].xml", ct),
+        ("_rels/.rels", RELS_ROOT.as_bytes()),
+        ("xl/workbook.xml", WORKBOOK.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", WB_RELS.as_bytes()),
+        ("xl/worksheets/sheet1.xml", sheet),
+        ("xl/worksheets/_rels/sheet1.xml.rels", sheet_rels),
+        ("xl/drawings/drawing1.xml", drawing),
+        ("xl/drawings/_rels/drawing1.xml.rels", drels),
+        (
+            "xl/styles.xml",
+            br#"<?xml version="1.0"?><styleSheet><fonts count="1"><font/></fonts><fills count="1"><fill/></fills><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellXfs></styleSheet>"#,
+        ),
+    ];
+    if let Some((media_name, media_bytes)) = media {
+        entries.push((media_name, media_bytes));
+    }
+    write_store_zip(&path, &entries);
+}
+
+/// Assert that reading the given hop-fixture with Features::IMAGES returns Ok
+/// and reports zero images (the hop degrades to skip).
+fn assert_images_skip(name: &str, drawing: &[u8], drels: &[u8], media: Option<(&str, &[u8])>) {
+    write_image_hop_zip(name, drawing, drels, media);
+    let path = tmp_xlsx(name);
+    let wb = read_workbook_turbo(path.to_str().unwrap(), Features::IMAGES)
+        .expect("image hop must degrade, not error");
+    let imgs = wb.sheets[0].images.as_ref().expect("images flag on");
+    assert!(
+        imgs.is_empty(),
+        "hop {name} must skip the image, got {imgs:?}"
+    );
+}
+
+/// A valid one-cell pic anchor whose blip r:embed is `embed_rid`.
+fn pic_anchor(embed_rid: &str) -> Vec<u8> {
+    format!(
+        r#"<?xml version="1.0"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+ xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <xdr:oneCellAnchor>
+    <xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:ext cx="914400" cy="914400"/>
+    <xdr:pic>
+      <xdr:nvPicPr><xdr:cNvPr id="1" name="Picture 1"/><xdr:cNvPicPr/></xdr:nvPicPr>
+      <xdr:blipFill><a:blip r:embed="{embed_rid}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>
+      <xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>
+    </xdr:pic>
+    <xdr:clientData/>
+  </xdr:oneCellAnchor>
+</xdr:wsDr>"#
+    )
+    .into_bytes()
+}
+
+const IMG_RELS: &[u8] = br#"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>
+</Relationships>"#;
+
+/// (1) dangling r:embed: blip points at a rel id that does not exist.
+#[test]
+fn image_dangling_r_embed_skips() {
+    let drels = br#"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>
+</Relationships>"#;
+    assert_images_skip("hop_dangling_rid", &pic_anchor("rId99"), drels, None);
+}
+
+/// (3) rel kind is not Image (blip → chart rel).
+#[test]
+fn image_rel_kind_not_image_skips() {
+    let drels = br#"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/>
+</Relationships>"#;
+    assert_images_skip("hop_wrong_kind", &pic_anchor("rId1"), drels, None);
+}
+
+/// (2) rel → media entry missing from the zip.
+#[test]
+fn image_rel_missing_media_skips() {
+    assert_images_skip("hop_missing_media", &pic_anchor("rId1"), IMG_RELS, None);
+}
+
+/// (4) pic anchor without a blip.
+#[test]
+fn image_pic_without_blip_skips() {
+    let drawing = br#"<?xml version="1.0"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+ xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <xdr:oneCellAnchor>
+    <xdr:from><xdr:col>0</xdr:col><xdr:row>0</xdr:row></xdr:from>
+    <xdr:ext cx="914400" cy="914400"/>
+    <xdr:pic>
+      <xdr:nvPicPr><xdr:cNvPr id="1" name="Picture 1"/><xdr:cNvPicPr/></xdr:nvPicPr>
+      <xdr:blipFill><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>
+      <xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>
+    </xdr:pic>
+    <xdr:clientData/>
+  </xdr:oneCellAnchor>
+</xdr:wsDr>"#;
+    assert_images_skip("hop_no_blip", drawing, IMG_RELS, None);
+}
+
+/// (5) zero-byte media entry.
+#[test]
+fn image_zero_byte_media_skips() {
+    assert_images_skip(
+        "hop_zero_media",
+        &pic_anchor("rId1"),
+        IMG_RELS,
+        Some(("xl/media/image1.png", &[])),
+    );
+}
+
+/// (4b) truncated / malformed drawing part: the tolerant scan must not panic.
+#[test]
+fn image_truncated_drawing_no_panic() {
+    let drawing = br#"<?xml version="1.0"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing">
+  <xdr:oneCellAnchor>
+    <xdr:from><xdr:col>0</xdr:col><xdr:row>0</xdr:row></xdr:from>
+    <xdr:pic>
+      <xdr:blipFill><a:blip r:embed="rId1"
+  <xdr:twoCellAnchor><xdr:from><xdr:col>0</xdr:col>"#;
+    write_image_hop_zip(
+        "hop_trunc_drawing",
+        drawing,
+        IMG_RELS,
+        Some(("xl/media/image1.png", b"PNGDATA")),
+    );
+    let path = tmp_xlsx("hop_trunc_drawing");
+    let _ = std::panic::catch_unwind(|| {
+        let _ = read_workbook_turbo(path.to_str().unwrap(), Features::IMAGES);
+    })
+    .expect("truncated drawing XML must not panic");
+}
+
+/// Every stress2_malformed_ fixture must read with Features::IMAGES without
+/// panicking (Ok or Err are both acceptable; a panic is not).
+#[test]
+fn stress2_malformed_sweep_images_no_panic() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata");
+    let mut any = false;
+    for entry in std::fs::read_dir(&dir).expect("testdata dir") {
+        let entry = entry.expect("read_dir entry");
+        let name = entry.file_name();
+        let name = name.to_str().expect("utf8 fixture name");
+        if !name.starts_with("stress2_malformed_") || !name.ends_with(".xlsx") {
+            continue;
+        }
+        any = true;
+        let path = entry.path();
+        let res = std::panic::catch_unwind(|| {
+            read_workbook_turbo(path.to_str().unwrap(), Features::IMAGES)
+        });
+        assert!(
+            res.is_ok(),
+            "reading {name} with Features::IMAGES must not panic"
+        );
+    }
+    assert!(any, "no stress2_malformed_ fixtures found");
+}

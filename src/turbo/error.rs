@@ -9,6 +9,9 @@ pub enum TurboError {
     Format(String),
     MissingPart(String),
     Arrow(String),
+    /// A row/column insert or delete was refused because performing it would
+    /// corrupt the workbook (all-or-nothing). Carries the human-readable reason.
+    Refused(String),
 }
 
 impl fmt::Display for TurboError {
@@ -19,6 +22,7 @@ impl fmt::Display for TurboError {
             TurboError::Format(e) => write!(f, "format error: {e}"),
             TurboError::MissingPart(e) => write!(f, "missing part: {e}"),
             TurboError::Arrow(e) => write!(f, "arrow error: {e}"),
+            TurboError::Refused(e) => write!(f, "refused: {e}"),
         }
     }
 }

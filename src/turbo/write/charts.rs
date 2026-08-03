@@ -106,6 +106,60 @@ impl ChartType {
     }
 }
 
+/// Bar/column and line/area grouping semantics.
+///
+/// `Clustered` and `Standard` are the family defaults: bar/column charts
+/// emit `clustered`, line/area charts emit `standard`. `Stacked` and
+/// `PercentStacked` are shared by both families.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Grouping {
+    Clustered,
+    Standard,
+    Stacked,
+    PercentStacked,
+}
+
+impl Default for Grouping {
+    fn default() -> Self {
+        Grouping::Clustered
+    }
+}
+
+impl Grouping {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "clustered" | "cluster" => Some(Grouping::Clustered),
+            "standard" => Some(Grouping::Standard),
+            "stacked" => Some(Grouping::Stacked),
+            "percentstacked" | "percent_stacked" | "percent" => Some(Grouping::PercentStacked),
+            _ => None,
+        }
+    }
+
+    /// Stacked and percent-stacked need an overlap of 100 on 2D bar/column,
+    /// or Excel renders the bars side by side and the chart looks broken.
+    pub fn is_stacked(self) -> bool {
+        matches!(self, Grouping::Stacked | Grouping::PercentStacked)
+    }
+
+    /// Map to the OOXML grouping vocabulary valid for the chart family.
+    fn ooxml_val(self, ct: &ChartType) -> &'static str {
+        if ct.bar_dir().is_some() {
+            match self {
+                Grouping::Clustered | Grouping::Standard => "clustered",
+                Grouping::Stacked => "stacked",
+                Grouping::PercentStacked => "percentStacked",
+            }
+        } else {
+            match self {
+                Grouping::Clustered | Grouping::Standard => "standard",
+                Grouping::Stacked => "stacked",
+                Grouping::PercentStacked => "percentStacked",
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Series {
     pub title_ref: Option<String>,
@@ -115,18 +169,33 @@ pub struct Series {
     pub x_ref: Option<String>,
     pub y_ref: Option<String>,
     pub bubble_size_ref: Option<String>,
+    /// srgbClr hex (e.g. "FF0000"); emitted as a solidFill inside spPr.
+    pub colour: Option<String>,
+    /// Marker symbol for line/scatter/radar series: circle, dash, diamond,
+    /// dot, none, plus, square, star, triangle, x, auto.
+    pub marker_symbol: Option<String>,
+    pub marker_size: Option<u8>,
+    /// Line/scatter smooth flag; emitted as `<smooth val="0|1"/>`.
+    pub smooth: Option<bool>,
 }
 
 #[derive(Clone, Debug)]
 pub enum Anchor {
     OneCell {
         cell: String,
+        /// EMU offset from the cell's top-left corner.
+        col_off: i64,
+        row_off: i64,
         width_cm: f64,
         height_cm: f64,
     },
     TwoCell {
         from_cell: String,
+        from_off: (i64, i64),
         to_cell: String,
+        to_off: (i64, i64),
+        /// `editAs` attribute: twoCell | oneCell | absolute. Omitted when None.
+        edit_as: Option<String>,
     },
     Absolute {
         x_emu: i64,
@@ -140,6 +209,8 @@ impl Default for Anchor {
     fn default() -> Self {
         Anchor::OneCell {
             cell: "E15".into(),
+            col_off: 0,
+            row_off: 0,
             width_cm: 15.0,
             height_cm: 7.5,
         }
@@ -154,6 +225,7 @@ pub struct Chart {
     pub anchor: Anchor,
     pub style: Option<u8>,
     pub legend_pos: Option<String>,
+    pub grouping: Grouping,
 }
 
 impl Default for Chart {
@@ -165,6 +237,7 @@ impl Default for Chart {
             anchor: Anchor::default(),
             style: None,
             legend_pos: Some("r".into()),
+            grouping: Grouping::Clustered,
         }
     }
 }
@@ -175,10 +248,17 @@ pub struct ChartsheetSpec {
     pub charts: Vec<Chart>,
 }
 
-/// cm → EMU (openpyxl: 1 cm = 360000 EMU).
+// EMU = English Metric Units: 914400 per inch, 12700 per point, 360000 per
+// centimetre (the openpyxl convention). Every anchor conversion goes through
+// these constants — never scatter magic numbers.
+pub const EMU_PER_INCH: f64 = 914400.0;
+pub const EMU_PER_POINT: f64 = 12700.0;
+pub const EMU_PER_CM: f64 = 360000.0;
+
+/// cm → EMU (1 cm = [`EMU_PER_CM`]).
 #[inline]
 pub fn cm_to_emu(cm: f64) -> i64 {
-    (cm * 360000.0).round() as i64
+    (cm * EMU_PER_CM).round() as i64
 }
 
 /// A1 → (row 1-based, col 1-based).
@@ -250,7 +330,34 @@ fn title_xml(text: &str) -> String {
     )
 }
 
+fn sp_pr_xml(ser: &Series) -> String {
+    let mut s = String::from("<spPr>");
+    if let Some(col) = &ser.colour {
+        s.push_str(&format!(
+            r#"<a:solidFill><a:srgbClr val="{}"/></a:solidFill>"#,
+            escape_attr(col)
+        ));
+    }
+    s.push_str(r#"<a:ln><a:prstDash val="solid"/></a:ln></spPr>"#);
+    s
+}
+
+fn marker_xml(ser: &Series) -> String {
+    let symbol = ser.marker_symbol.as_deref().unwrap_or("none");
+    let mut s = String::from("<marker>");
+    s.push_str(&format!(r#"<symbol val="{symbol}"/>"#));
+    if let Some(size) = ser.marker_size {
+        s.push_str(&format!(r#"<size val="{size}"/>"#));
+    }
+    s.push_str(r#"<spPr><a:ln><a:prstDash val="solid"/></a:ln></spPr>"#);
+    s.push_str("</marker>");
+    s
+}
+
 fn series_xml(ser: &Series, idx: usize, ct: &ChartType) -> String {
+    // Schema order inside <ser>: idx, order, tx, spPr, marker, dPt, dLbls,
+    // cat, val, smooth (xVal/yVal in place of cat/val for scatter). Excel
+    // rejects a chart part with out-of-order children, so keep this order.
     let mut s = String::new();
     s.push_str("<ser>");
     s.push_str(&format!(r#"<idx val="{idx}"/><order val="{idx}"/>"#));
@@ -262,14 +369,12 @@ fn series_xml(ser: &Series, idx: usize, ct: &ChartType) -> String {
     } else if let Some(v) = &ser.title_literal {
         s.push_str(&format!(r#"<tx><v>{}</v></tx>"#, escape_text(v)));
     }
-    s.push_str(r#"<spPr><a:ln><a:prstDash val="solid"/></a:ln></spPr>"#);
+    s.push_str(&sp_pr_xml(ser));
     if matches!(
         ct,
         ChartType::Line | ChartType::Line3D | ChartType::Scatter | ChartType::Radar
     ) {
-        s.push_str(
-            r#"<marker><symbol val="none"/><spPr><a:ln><a:prstDash val="solid"/></a:ln></spPr></marker>"#,
-        );
+        s.push_str(&marker_xml(ser));
     }
     if ct.is_scatter_family() {
         if let Some(x) = &ser.x_ref {
@@ -306,6 +411,16 @@ fn series_xml(ser: &Series, idx: usize, ct: &ChartType) -> String {
             ));
         }
     }
+    if matches!(ct, ChartType::Line | ChartType::Line3D | ChartType::Scatter) {
+        // Excel defaults scatter-with-lines to smooth=true when the element
+        // is absent, so emit an explicit 0 unless the caller asked for a curve.
+        let v = if ser.smooth.unwrap_or(false) {
+            "1"
+        } else {
+            "0"
+        };
+        s.push_str(&format!(r#"<smooth val="{v}"/>"#));
+    }
     s.push_str("</ser>");
     s
 }
@@ -313,17 +428,17 @@ fn series_xml(ser: &Series, idx: usize, ct: &ChartType) -> String {
 fn plot_chart_xml(chart: &Chart) -> String {
     let tag = chart.chart_type.tag();
     let mut s = format!("<{tag}>");
+    let grouping = chart.grouping.ooxml_val(&chart.chart_type);
     if let Some(dir) = chart.chart_type.bar_dir() {
         s.push_str(&format!(r#"<barDir val="{dir}"/>"#));
-        s.push_str(r#"<grouping val="clustered"/>"#);
+        s.push_str(&format!(r#"<grouping val="{grouping}"/>"#));
+    } else if matches!(
+        chart.chart_type,
+        ChartType::Line | ChartType::Line3D | ChartType::Area | ChartType::Area3D
+    ) {
+        s.push_str(&format!(r#"<grouping val="{grouping}"/>"#));
     }
     match chart.chart_type {
-        ChartType::Line | ChartType::Line3D => {
-            s.push_str(r#"<grouping val="standard"/>"#);
-        }
-        ChartType::Area | ChartType::Area3D => {
-            s.push_str(r#"<grouping val="standard"/>"#);
-        }
         ChartType::Pie | ChartType::Pie3D | ChartType::Doughnut => {
             s.push_str(r#"<varyColors val="1"/>"#);
         }
@@ -343,6 +458,10 @@ fn plot_chart_xml(chart: &Chart) -> String {
             s.push_str(r#"<gapWidth val="150"/>"#);
             if matches!(chart.chart_type, ChartType::Bar3D | ChartType::Col3D) {
                 s.push_str(r#"<gapDepth val="150"/>"#);
+            } else if chart.grouping.is_stacked() {
+                // Stacked bars sit on top of each other; without overlap=100
+                // Excel renders them side by side and the chart looks broken.
+                s.push_str(r#"<overlap val="100"/>"#);
             }
         }
         ChartType::Pie => {
@@ -419,51 +538,42 @@ fn axes_xml(chart: &Chart) -> String {
     s
 }
 
-/// Build drawing XML + chart rels.
+/// One image placed on a worksheet drawing (T1-2a).
+pub struct DrawingImage {
+    /// Placement anchor (shared chart anchor vocabulary).
+    pub anchor: Anchor,
+    /// Drawing rel id of this image within `drawingD.xml.rels` (1-based).
+    pub rel_id: usize,
+    /// `cNvPr id` within the drawing; must be unique across charts + images.
+    pub cnv_id: usize,
+}
+
+/// Build drawing XML + rels for charts only (chartsheets / existing callers).
 pub fn write_drawing(charts: &[Chart], chart_paths: &[String]) -> (String, String) {
+    write_drawing_full(charts, chart_paths, &[], &[])
+}
+
+/// Build drawing XML + merged rels for charts AND images in one worksheet
+/// drawing. OOXML allows exactly one drawing part per worksheet, so images join
+/// the chart drawing rather than creating a second part. Chart rels get
+/// `rId1..chart_count`; image rels continue from there (`rIdN+1..`), and each
+/// image's `<a:blip r:embed>` references its own rel id. `media_targets` are the
+/// drawing-relative Targets (e.g. `../media/image1.png`) aligned with `images`.
+pub fn write_drawing_full(
+    charts: &[Chart],
+    chart_paths: &[String],
+    images: &[DrawingImage],
+    media_targets: &[String],
+) -> (String, String) {
     let mut drawing = format!(
         r#"<wsDr xmlns:a="{DRAWING_NS}" xmlns:c="{CHART_NS}" xmlns:r="{REL_NS}" xmlns="{SHEET_DRAWING_NS}">"#
     );
     for (i, chart) in charts.iter().enumerate() {
         let rid = i + 1;
-        let frame = graphic_frame(rid);
-        match &chart.anchor {
-            Anchor::OneCell {
-                cell,
-                width_cm,
-                height_cm,
-            } => {
-                let (row, col) = coord_to_tuple(cell);
-                let cx = cm_to_emu(*width_cm);
-                let cy = cm_to_emu(*height_cm);
-                drawing.push_str(&format!(
-                    r#"<oneCellAnchor><from><col>{}</col><colOff>0</colOff><row>{}</row><rowOff>0</rowOff></from><ext cx="{cx}" cy="{cy}"/>{frame}<clientData/></oneCellAnchor>"#,
-                    col - 1,
-                    row - 1,
-                ));
-            }
-            Anchor::TwoCell { from_cell, to_cell } => {
-                let (fr, fc) = coord_to_tuple(from_cell);
-                let (tr, tc) = coord_to_tuple(to_cell);
-                drawing.push_str(&format!(
-                    r#"<twoCellAnchor><from><col>{}</col><colOff>0</colOff><row>{}</row><rowOff>0</rowOff></from><to><col>{}</col><colOff>0</colOff><row>{}</row><rowOff>0</rowOff></to>{frame}<clientData/></twoCellAnchor>"#,
-                    fc - 1,
-                    fr - 1,
-                    tc - 1,
-                    tr - 1,
-                ));
-            }
-            Anchor::Absolute {
-                x_emu,
-                y_emu,
-                cx_emu,
-                cy_emu,
-            } => {
-                drawing.push_str(&format!(
-                    r#"<absoluteAnchor><pos x="{x_emu}" y="{y_emu}"/><ext cx="{cx_emu}" cy="{cy_emu}"/>{frame}<clientData/></absoluteAnchor>"#
-                ));
-            }
-        }
+        drawing.push_str(&anchor_wrap(&chart.anchor, &graphic_frame(rid)));
+    }
+    for img in images {
+        drawing.push_str(&anchor_wrap(&img.anchor, &picture_xml(img)));
     }
     drawing.push_str("</wsDr>");
 
@@ -476,8 +586,83 @@ pub fn write_drawing(charts: &[Chart], chart_paths: &[String]) -> (String, Strin
             escape_attr(path)
         ));
     }
+    for (i, img) in images.iter().enumerate() {
+        rels.push_str(&format!(
+            r#"<Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{}" Id="rId{}"/>"#,
+            escape_attr(&media_targets[i]),
+            img.rel_id
+        ));
+    }
     rels.push_str("</Relationships>");
     (drawing, rels)
+}
+
+/// Wrap an anchor-agnostic drawing body (`graphicFrame` or `pic`) in its
+/// anchor element.
+fn anchor_wrap(anchor: &Anchor, body: &str) -> String {
+    match anchor {
+        Anchor::OneCell {
+            cell,
+            col_off,
+            row_off,
+            width_cm,
+            height_cm,
+        } => {
+            let (row, col) = coord_to_tuple(cell);
+            let cx = cm_to_emu(*width_cm);
+            let cy = cm_to_emu(*height_cm);
+            format!(
+                r#"<oneCellAnchor><from><col>{}</col><colOff>{col_off}</colOff><row>{}</row><rowOff>{row_off}</rowOff></from><ext cx="{cx}" cy="{cy}"/>{body}<clientData/></oneCellAnchor>"#,
+                col - 1,
+                row - 1,
+            )
+        }
+        Anchor::TwoCell {
+            from_cell,
+            from_off,
+            to_cell,
+            to_off,
+            edit_as,
+        } => {
+            let (fr, fc) = coord_to_tuple(from_cell);
+            let (tr, tc) = coord_to_tuple(to_cell);
+            let edit = edit_as
+                .as_ref()
+                .map(|e| format!(r#" editAs="{}""#, escape_attr(e)))
+                .unwrap_or_default();
+            format!(
+                r#"<twoCellAnchor{edit}><from><col>{}</col><colOff>{}</colOff><row>{}</row><rowOff>{}</rowOff></from><to><col>{}</col><colOff>{}</colOff><row>{}</row><rowOff>{}</rowOff></to>{body}<clientData/></twoCellAnchor>"#,
+                fc - 1,
+                from_off.0,
+                fr - 1,
+                from_off.1,
+                tc - 1,
+                to_off.0,
+                tr - 1,
+                to_off.1,
+            )
+        }
+        Anchor::Absolute {
+            x_emu,
+            y_emu,
+            cx_emu,
+            cy_emu,
+        } => {
+            format!(
+                r#"<absoluteAnchor><pos x="{x_emu}" y="{y_emu}"/><ext cx="{cx_emu}" cy="{cy_emu}"/>{body}<clientData/></absoluteAnchor>"#
+            )
+        }
+    }
+}
+
+/// Minimal valid `<pic>` for an image; the blip references the drawing rel
+/// whose id is `rel_id` (the actual media part lives in `xl/media/`).
+fn picture_xml(img: &DrawingImage) -> String {
+    let cnv = img.cnv_id;
+    format!(
+        r#"<pic><nvPicPr><cNvPr id="{cnv}" name="Picture {cnv}"/><cNvPicPr><a:picLocks noChangeAspect="1"/></cNvPicPr></nvPicPr><blipFill><a:blip r:embed="rId{}"/><a:stretch><a:fillRect/></a:stretch></blipFill><spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></spPr></pic>"#,
+        img.rel_id
+    )
 }
 
 fn graphic_frame(idx: usize) -> String {
@@ -497,4 +682,185 @@ pub fn write_chartsheet_xml(_title: &str, drawing_rid: &str) -> String {
 fn _use_xml_helpers(out: &mut Vec<u8>, s: &str) {
     write_escaped_attr(out, s);
     write_escaped_text(out, s);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bar_chart(grouping: Grouping) -> Chart {
+        Chart {
+            chart_type: ChartType::Bar,
+            series: vec![Series {
+                cat_ref: Some("Sheet1!$A$1:$A$3".into()),
+                val_ref: Some("Sheet1!$B$1:$B$3".into()),
+                ..Series::default()
+            }],
+            grouping,
+            ..Chart::default()
+        }
+    }
+
+    fn col_chart(grouping: Grouping) -> Chart {
+        Chart {
+            chart_type: ChartType::Col,
+            series: vec![Series {
+                cat_ref: Some("Sheet1!$A$1:$A$3".into()),
+                val_ref: Some("Sheet1!$B$1:$B$3".into()),
+                ..Series::default()
+            }],
+            grouping,
+            ..Chart::default()
+        }
+    }
+
+    fn ser_block(xml: &str) -> &str {
+        let start = xml.find("<ser>").expect("chart has a <ser> element");
+        let end = xml.find("</ser>").expect("chart has a </ser> element");
+        &xml[start..end]
+    }
+
+    fn idx_of(hay: &str, needle: &str) -> usize {
+        hay.find(needle)
+            .unwrap_or_else(|| panic!("expected {needle:?} in {hay:?}"))
+    }
+
+    #[test]
+    fn stacked_bar_emits_grouping_and_overlap() {
+        let xml = write_chart_space(&bar_chart(Grouping::Stacked));
+        assert!(xml.contains(r#"<grouping val="stacked"/>"#), "{xml}");
+        assert!(xml.contains(r#"<overlap val="100"/>"#), "{xml}");
+    }
+
+    #[test]
+    fn percent_stacked_col_emits_grouping_and_overlap() {
+        let xml = write_chart_space(&col_chart(Grouping::PercentStacked));
+        assert!(xml.contains(r#"<grouping val="percentStacked"/>"#), "{xml}");
+        assert!(xml.contains(r#"<overlap val="100"/>"#), "{xml}");
+    }
+
+    #[test]
+    fn clustered_bar_has_no_overlap() {
+        let xml = write_chart_space(&bar_chart(Grouping::Clustered));
+        assert!(xml.contains(r#"<grouping val="clustered"/>"#), "{xml}");
+        assert!(!xml.contains("<overlap"), "{xml}");
+    }
+
+    #[test]
+    fn line_uses_standard_grouping_vocabulary() {
+        let chart = Chart {
+            chart_type: ChartType::Line,
+            grouping: Grouping::Stacked,
+            ..Chart::default()
+        };
+        let xml = write_chart_space(&chart);
+        assert!(xml.contains(r#"<grouping val="stacked"/>"#), "{xml}");
+    }
+
+    #[test]
+    fn series_colour_emits_solid_fill() {
+        let chart = Chart {
+            series: vec![Series {
+                colour: Some("FF0000".into()),
+                val_ref: Some("Sheet1!$B$1:$B$3".into()),
+                ..Series::default()
+            }],
+            ..Chart::default()
+        };
+        let xml = write_chart_space(&chart);
+        assert!(
+            xml.contains(r#"<spPr><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>"#),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn marker_symbol_and_size_roundtrip() {
+        let chart = Chart {
+            chart_type: ChartType::Line,
+            series: vec![Series {
+                marker_symbol: Some("diamond".into()),
+                marker_size: Some(7),
+                val_ref: Some("Sheet1!$B$1:$B$3".into()),
+                ..Series::default()
+            }],
+            ..Chart::default()
+        };
+        let xml = write_chart_space(&chart);
+        assert!(xml.contains(r#"<symbol val="diamond"/>"#), "{xml}");
+        assert!(xml.contains(r#"<size val="7"/>"#), "{xml}");
+    }
+
+    #[test]
+    fn marker_defaults_to_symbol_none() {
+        let chart = Chart {
+            chart_type: ChartType::Line,
+            series: vec![Series {
+                val_ref: Some("Sheet1!$B$1:$B$3".into()),
+                ..Series::default()
+            }],
+            ..Chart::default()
+        };
+        let xml = write_chart_space(&chart);
+        assert!(xml.contains(r#"<symbol val="none"/>"#), "{xml}");
+    }
+
+    #[test]
+    fn smooth_emitted_for_line_series() {
+        let chart = Chart {
+            chart_type: ChartType::Line,
+            series: vec![Series {
+                smooth: Some(true),
+                val_ref: Some("Sheet1!$B$1:$B$3".into()),
+                ..Series::default()
+            }],
+            ..Chart::default()
+        };
+        let xml = write_chart_space(&chart);
+        assert!(xml.contains(r#"<smooth val="1"/>"#), "{xml}");
+    }
+
+    #[test]
+    fn smooth_defaults_to_straight_lines() {
+        let chart = Chart {
+            chart_type: ChartType::Scatter,
+            series: vec![Series {
+                x_ref: Some("Sheet1!$A$1:$A$3".into()),
+                y_ref: Some("Sheet1!$B$1:$B$3".into()),
+                ..Series::default()
+            }],
+            ..Chart::default()
+        };
+        let xml = write_chart_space(&chart);
+        assert!(xml.contains(r#"<smooth val="0"/>"#), "{xml}");
+    }
+
+    #[test]
+    fn ser_child_order_with_all_features() {
+        let chart = Chart {
+            chart_type: ChartType::Line,
+            series: vec![Series {
+                title_literal: Some("Sales".into()),
+                colour: Some("0000FF".into()),
+                marker_symbol: Some("circle".into()),
+                marker_size: Some(5),
+                cat_ref: Some("Sheet1!$A$1:$A$3".into()),
+                val_ref: Some("Sheet1!$B$1:$B$3".into()),
+                smooth: Some(true),
+                ..Series::default()
+            }],
+            ..Chart::default()
+        };
+        let xml = write_chart_space(&chart);
+        let ser = ser_block(&xml);
+        let order = [
+            "<idx", "<order", "<tx>", "<spPr>", "<marker>", "<cat>", "<val>", "<smooth",
+        ];
+        let mut prev = 0usize;
+        for needle in order {
+            let at = idx_of(ser, needle);
+            assert!(at > prev, "element {needle:?} out of order in {ser:?}");
+            prev = at;
+        }
+    }
 }

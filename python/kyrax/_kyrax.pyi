@@ -310,8 +310,8 @@ class _ExcelReader:
 def read_excel(source: str | bytes) -> _ExcelReader:
     """Reads an excel file and returns an ExcelReader"""
 
-def read_excel_turbo(path: str) -> _TurboReader:
-    """Open an XLSX for turbo reading"""
+def read_excel_turbo(path: str, password: str | None = None) -> _TurboReader:
+    """Open an XLSX for turbo reading; `password` opens an encrypted workbook"""
 
 def write_excel_turbo(
     path: str,
@@ -330,8 +330,26 @@ def write_excel_turbo(
     external_links: list | None = None,
     creator: str | None = None,
     macro_enabled: bool = False,
+    recalculate: bool = False,
 ) -> None:
-    """Write an XLSX via the turbo write path (core + styles + structural)"""
+    """Write an XLSX via the turbo write path (core + styles + structural).
+
+    Each sheet dict may carry a ``pivots`` list to author pivot tables::
+
+        {"name": "PivotTable1", "source_range": "A1:C5",
+         "rows": ["Region"], "cols": ["Product"],
+         "data": [{"field": "Amount", "agg": "sum"}], "target_cell": "E3"}
+
+    ``rows``/``cols`` fields are header names or 0-based column indices;
+    ``data`` entries pair a field with ``sum``/``count``/``average``/``max``/
+    ``min``/``product``/``stdDev``/``stdDevp``/``var``/``varp``.
+    """
+
+def is_encrypted(path: str) -> bool:
+    """Detect an ECMA-376 encrypted workbook without a password"""
+
+def encryption_info(path: str) -> dict:
+    """Report an encrypted workbook's scheme, algorithm and spin count (no password)"""
 
 def write_excel_turbo_bytes(
     sheets: list,
@@ -349,8 +367,10 @@ def write_excel_turbo_bytes(
     external_links: list | None = None,
     creator: str | None = None,
     macro_enabled: bool = False,
+    recalculate: bool = False,
 ) -> bytes:
-    """Write an XLSX and return bytes"""
+    """Write an XLSX and return bytes (sheet dicts support the same ``pivots``
+    key as :func:`write_excel_turbo`)."""
 
 class _TurboReader:
     @property
@@ -369,6 +389,120 @@ class _TurboReader:
     def vba_project(self) -> bytes | None: ...
 
 class _TurboSheet: ...
+
+class EditableSheet:
+    """A live sheet handle on an :class:`EditableWorkbook`.
+
+    All indices are 1-BASED, matching openpyxl and Excel. ``insert_rows(2)``
+    puts a new blank row AT row 2 and pushes every existing row at or below
+    row 2 down. Operations are recorded and applied at ``save()`` time.
+    """
+
+    def set_cell(self, row: int, col: int, value: object) -> None:
+        """Set the value of cell ``(row, col)`` (1-based)."""
+    def set_cell_style(
+        self,
+        row: int,
+        col: int,
+        *,
+        font: dict | None = None,
+        fill: dict | None = None,
+        border: dict | None = None,
+        num_fmt: str | None = None,
+    ) -> None:
+        """Set a style on cell ``(row, col)`` (1-based)."""
+    def insert_rows(self, idx: int, amount: int = 1) -> None:
+        """Insert ``amount`` blank rows at 1-based ``idx``.
+
+        Rows at or below ``idx`` shift down. Raises ``InvalidParametersError``
+        when ``idx < 1``, and at ``save()`` time when the operation would
+        corrupt the sheet (an implicit-numbered row/cell at or below the shift
+        point, a grid limit of 1,048,576 rows would be exceeded, or a
+        shared-formula master would be orphaned).
+        """
+    def delete_rows(self, idx: int, amount: int = 1) -> None:
+        """Delete ``amount`` rows starting at 1-based ``idx``.
+
+        Rows below shift up. Raises ``InvalidParametersError`` when ``idx < 1``,
+        and at ``save()`` time when the operation would corrupt the sheet (an
+        implicit-numbered row/cell at or below the shift point, or a shared
+        formula's master would be removed while a dependent survives).
+        """
+    def insert_cols(self, idx: int, amount: int = 1) -> None:
+        """Insert ``amount`` blank columns at 1-based ``idx``.
+
+        Columns at or right of ``idx`` shift right. Raises ``InvalidParametersError``
+        when ``idx < 1``, and at ``save()`` time when the operation would corrupt
+        the sheet (an implicit-numbered cell at or right of the shift point, or
+        the 16,384-column grid limit would be exceeded).
+        """
+    def delete_cols(self, idx: int, amount: int = 1) -> None:
+        """Delete ``amount`` columns starting at 1-based ``idx``.
+
+        Columns to the right shift left. Raises ``InvalidParametersError`` when
+        ``idx < 1``, and at ``save()`` time when the operation would corrupt the
+        sheet (an implicit-numbered cell at or right of the shift point).
+        """
+    def move_range(
+        self,
+        range_string: str,
+        rows: int = 0,
+        cols: int = 0,
+        translate: bool = False,
+    ) -> None:
+        """Move a range of cells by ``rows`` and ``cols`` (positive is
+        down/right, negative is up/left).
+
+        Every cell in the range is relocated; the vacated source cells become
+        empty and destination cells are overwritten. Nothing else on the sheet
+        shifts. With ``translate=True`` the formulas *inside* the moved range
+        have their references translated by the same offset (openpyxl
+        ``move_range`` semantics; default ``False`` leaves them alone).
+
+        Merged ranges, hyperlinks, data validations and conditional formatting
+        anchors fully contained in the moved range follow it; anchors that
+        straddle the boundary stay put. Formulas *outside* the range that point
+        into it are **not** rewritten.
+
+        Raises ``InvalidParametersError`` when ``range_string`` is malformed or
+        at ``save()`` time when the move would push any cell off the grid
+        (1,048,576 rows / 16,384 columns), an implicit-numbered row/cell lies
+        inside the moved region, or a shared-formula ``ref=`` would leave the
+        grid — nothing is written.
+        """
+
+class EditableWorkbook:
+    """A byte-preserving edit handle over an existing XLSX (from ``edit_excel``).
+
+    Cell edits, styles, and row/column insert-delete operations are recorded
+    against a sparse overlay and applied together at ``save()``. Row/column
+    shifts are applied BEFORE cell edits, so an edit coordinate is final while
+    a shift moves the grid under it.
+    """
+
+    def __getitem__(self, sheet_name: str) -> EditableSheet:
+        """Return a live handle to the named sheet."""
+    def save(self, path: str) -> None:
+        """Write the edited workbook to ``path``.
+
+        ALL-OR-NOTHING: if any recorded operation is refused (a table header
+        row would be deleted, a shared-formula master orphaned, an
+        implicit-numbered row/cell hit, or a grid limit exceeded), an
+        ``InvalidParametersError`` is raised and NOTHING is written — the
+        destination file is left untouched.
+        """
+
+def edit_excel(path: str) -> EditableWorkbook:
+    """Open an existing XLSX for byte-preserving edits.
+
+    Prefer the friendlier :func:`load_workbook` (``edit_mode=True``) wrapper.
+    """
+
+def validate_excel(path: str) -> dict:
+    """Validate a workbook; returns a report dict, never raises for bad input."""
+
+def repair_excel(path: str, out_path: str, severity: str = "warning") -> dict:
+    """Repair a workbook into out_path; returns {wrote_output, report, actions}."""
 
 __version__: str
 

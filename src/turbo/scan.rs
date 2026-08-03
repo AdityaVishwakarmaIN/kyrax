@@ -339,7 +339,14 @@ pub struct FormulaRecord {
 #[derive(Clone)]
 enum FCell {
     Plain(u32),
-    Shared(u32),
+    /// Shared-formula dependent: the anchor is located by `si`; `rd`/`cd` are
+    /// the row/column delta from the anchor already resolved at load, so
+    /// translation on demand needs only the anchor text (E4).
+    Shared {
+        si: u32,
+        rd: i32,
+        cd: i32,
+    },
     Array {
         r0: u32,
         c0: u32,
@@ -399,7 +406,7 @@ impl FormulaColumn {
     pub fn shared_count(&self) -> usize {
         self.entries
             .iter()
-            .filter(|e| matches!(e.cell, FCell::Shared(_)))
+            .filter(|e| matches!(e.cell, FCell::Shared { .. }))
             .count()
     }
     pub fn records(&self) -> Vec<FormulaRecord> {
@@ -410,7 +417,7 @@ impl FormulaColumn {
                 col: e.col,
                 kind: match &e.cell {
                     FCell::Plain(_) => FormulaKind::Plain,
-                    FCell::Shared(si) => FormulaKind::Shared { si: *si },
+                    FCell::Shared { si, .. } => FormulaKind::Shared { si: *si },
                     FCell::Array { r0, c0, r1, c1, .. } => FormulaKind::Array {
                         r0: *r0,
                         c0: *c0,
@@ -436,61 +443,139 @@ impl FormulaColumn {
         }
         v
     }
-    fn formula_string(&self, e: &FEntry, anchor_by_si: &[Option<(u32, u32, u32)>]) -> String {
-        match &e.cell {
-            FCell::Plain(id) => String::from_utf8_lossy(self.fdict.resolve(*id)).into_owned(),
-            FCell::Array { text, .. } => {
-                String::from_utf8_lossy(self.fdict.resolve(*text)).into_owned()
-            }
-            FCell::DataTable(id) => String::from_utf8_lossy(self.fdict.resolve(*id)).into_owned(),
-            // Shared formula with no anchor (orphan `si=`) degrades to empty text.
-            FCell::Shared(si) => match anchor_by_si.get(*si as usize).and_then(|o| *o) {
-                Some((tid, orow, ocol)) => {
-                    let anchor = self.fdict.resolve(tid);
-                    let atext = std::str::from_utf8(anchor).unwrap_or("");
-                    formula::translate_body(
-                        atext,
-                        e.row as i32 - orow as i32,
-                        e.col as i32 - ocol as i32,
-                    )
+    /// Fill the stored `rd`/`cd` of every shared dependent from its anchor's
+    /// coordinates. Runs once at load, after chunks are merged (anchor
+    /// coordinates are final only then); it is a cheap pass over the entries,
+    /// no translation.
+    fn resolve_shared_deltas(&mut self) {
+        let abs = self.anchor_by_si();
+        for e in &mut self.entries {
+            if let FCell::Shared { si, rd, cd } = &mut e.cell {
+                if let Some((_, orow, ocol)) = abs.get(*si as usize).and_then(|o| *o) {
+                    *rd = e.row as i32 - orow as i32;
+                    *cd = e.col as i32 - ocol as i32;
                 }
-                None => String::new(),
-            },
+            }
+        }
+    }
+    /// Position of the entry holding data-row `row`, data-col `col`.
+    fn entry_index(&self, row: u32, col: u32) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|e| e.row == row && e.col == col)
+    }
+    /// Append the translated text of entry `i` to `out` (no span bookkeeping).
+    /// Plain / array / dataTable texts resolve straight out of the dict; a
+    /// shared dependent is translated from its anchor by its stored delta.
+    /// An orphan `si` (no anchor) appends nothing, matching the historical
+    /// empty-string degradation.
+    fn translate_into(&self, out: &mut Vec<u8>, i: usize, anchors: &[Option<(u32, u32, u32)>]) {
+        let e = &self.entries[i];
+        match &e.cell {
+            FCell::Plain(id) => out.extend_from_slice(self.fdict.resolve(*id)),
+            FCell::Array { text, .. } => out.extend_from_slice(self.fdict.resolve(*text)),
+            FCell::DataTable(id) => out.extend_from_slice(self.fdict.resolve(*id)),
+            FCell::Shared { si, rd, cd } => {
+                if let Some((tid, _, _)) = anchors.get(*si as usize).and_then(|o| *o) {
+                    let atext = std::str::from_utf8(self.fdict.resolve(tid)).unwrap_or("");
+                    formula::translate_body_into(out, atext, *rd, *cd);
+                }
+            }
         }
     }
     /// Translate the formula at data-row/col (0-based, header excluded).
+    /// Materialises an owned String on call (the historical entry point);
+    /// the lazy arena-backed path lives in [`FormulaTexts`].
     pub fn translate(&self, row: u32, col: u32) -> Option<String> {
-        let abs = self.anchor_by_si();
-        self.entries
-            .iter()
-            .find(|e| e.row == row && e.col == col)
-            .map(|e| self.formula_string(e, &abs))
+        let i = self.entry_index(row, col)?;
+        let anchors = self.anchor_by_si();
+        let mut out = Vec::with_capacity(32);
+        self.translate_into(&mut out, i, &anchors);
+        Some(String::from_utf8_lossy(&out).into_owned())
     }
-    /// Materialize every formula string (rayon-parallel).
+    /// Lazily-hydrated view over this column. Returns a handle that owns the
+    /// translation arena, so a caller can read a few formulas (or all of them)
+    /// with each formula translated at most once and no per-formula allocation.
+    pub fn lazy(&self) -> FormulaTexts<'_> {
+        FormulaTexts {
+            col: self,
+            anchors: self.anchor_by_si(),
+            bytes: Vec::new(),
+            spans: vec![None; self.entries.len()],
+            translated: 0,
+        }
+    }
+    /// Materialize every formula string (rayon-parallel, arena-backed).
     pub fn materialize_all(&self) -> Vec<String> {
         use rayon::prelude::*;
-        let abs = self.anchor_by_si();
-        self.entries
-            .par_iter()
-            .map(|e| self.formula_string(e, &abs))
+        let (bytes, spans) = self.build_arena_all();
+        spans
+            .into_par_iter()
+            .map(|(s, l)| {
+                String::from_utf8_lossy(&bytes[s as usize..(s + l) as usize]).into_owned()
+            })
             .collect()
+    }
+
+    /// Build one contiguous translation arena holding every entry's text,
+    /// returning it alongside each entry's `(start, len)` span.
+    ///
+    /// Parallel over entry chunks, each with its own local arena, merged at
+    /// the end by re-basing spans — no mutex on the hot path, no per-formula
+    /// allocation (E4 candidate C).
+    fn build_arena_all(&self) -> (Vec<u8>, Vec<(u32, u32)>) {
+        use rayon::prelude::*;
+        let n = self.entries.len();
+        let anchors = self.anchor_by_si();
+        const CHUNK: usize = 4096;
+        let nchunks = n.div_ceil(CHUNK);
+        let locals: Vec<(Vec<u8>, Vec<(u32, u32)>)> = (0..nchunks)
+            .into_par_iter()
+            .map(|k| {
+                let lo = k * CHUNK;
+                let hi = lo + CHUNK;
+                let hi = hi.min(n);
+                let mut bytes = Vec::with_capacity((hi - lo) * 12);
+                let mut spans = Vec::with_capacity(hi - lo);
+                for i in lo..hi {
+                    let start = bytes.len() as u32;
+                    self.translate_into(&mut bytes, i, &anchors);
+                    spans.push((start, bytes.len() as u32 - start));
+                }
+                (bytes, spans)
+            })
+            .collect();
+        let mut all_bytes = Vec::new();
+        let mut all_spans = Vec::with_capacity(n);
+        let mut base: u32 = 0;
+        for (bytes, spans) in locals {
+            for (s, l) in spans {
+                all_spans.push((s + base, l));
+            }
+            all_bytes.extend_from_slice(&bytes);
+            base += bytes.len() as u32;
+        }
+        (all_bytes, all_spans)
     }
 
     /// One-pass export rows: (row, col, kind tag, text, array ref A1).
     /// Avoids a second `records()` allocation over the same entries.
     pub fn materialize_export_rows(&self) -> Vec<(u32, u32, &'static str, String, Option<String>)> {
         use rayon::prelude::*;
-        let abs = self.anchor_by_si();
+        let (bytes, spans) = self.build_arena_all();
         self.entries
             .par_iter()
-            .map(|e| {
+            .enumerate()
+            .map(|(i, e)| {
                 let kind = match &e.cell {
                     FCell::Plain(_) => "plain",
-                    FCell::Shared(_) => "shared",
+                    FCell::Shared { .. } => "shared",
                     FCell::Array { .. } => "array",
                     FCell::DataTable(_) => "dataTable",
                 };
-                let text = self.formula_string(e, &abs);
+                let (s, l) = spans[i];
+                let text =
+                    String::from_utf8_lossy(&bytes[s as usize..(s + l) as usize]).into_owned();
                 let ref_a1 = match &e.cell {
                     FCell::Array { r0, c0, r1, c1, .. } => {
                         let range = CellRange {
@@ -506,6 +591,83 @@ impl FormulaColumn {
                 (e.row, e.col, kind, text, ref_a1)
             })
             .collect()
+    }
+}
+
+/// Lazily-hydrated view over a [`FormulaColumn`] (E4 decision D, with C as the
+/// materialisation strategy).
+///
+/// Holds one shared translation arena: each formula is translated into it on
+/// first access and its `(start, len)` span is remembered, so a later read of
+/// the same formula borrows the already-produced bytes instead of translating
+/// again. A caller that reads everything pays candidate C's single-arena cost
+/// (no per-formula allocation) rather than candidate A's String per formula.
+///
+/// Thread-safety: this handle is not `Sync` — a caller sharing it across
+/// threads should instead use [`FormulaColumn::materialize_all`] /
+/// [`FormulaColumn::materialize_export_rows`], which build per-chunk arenas in
+/// rayon and merge them at the end.
+pub struct FormulaTexts<'a> {
+    col: &'a FormulaColumn,
+    anchors: Vec<Option<(u32, u32, u32)>>,
+    bytes: Vec<u8>,
+    spans: Vec<Option<(u32, u32)>>,
+    translated: usize,
+}
+
+impl<'a> FormulaTexts<'a> {
+    /// Number of formulas translated so far (i.e. distinct first accesses).
+    /// Reading a formula twice does not increment this.
+    pub fn translated(&self) -> usize {
+        self.translated
+    }
+    pub fn len(&self) -> usize {
+        self.spans.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.spans.is_empty()
+    }
+    /// Translate the formula at data-row/col (0-based, header excluded) into
+    /// the shared arena and return its text as a borrow of the arena. The same
+    /// formula read twice returns the same text without re-translating.
+    pub fn text(&mut self, row: u32, col: u32) -> Option<&str> {
+        let i = self.col.entry_index(row, col)?;
+        Some(self.text_at(i))
+    }
+    /// Translate entry `i` (index into `len()`) on first access.
+    pub fn text_at(&mut self, i: usize) -> &str {
+        if self.spans[i].is_none() {
+            let start = self.bytes.len() as u32;
+            self.col.translate_into(&mut self.bytes, i, &self.anchors);
+            let len = self.bytes.len() as u32 - start;
+            self.spans[i] = Some((start, len));
+            self.translated += 1;
+        }
+        let (s, l) = self.spans[i].expect("span filled above");
+        std::str::from_utf8(&self.bytes[s as usize..(s + l) as usize]).unwrap_or("")
+    }
+    /// Translate every formula into the arena (idempotent; only first accesses
+    /// do work). After this, every span is filled.
+    pub fn hydrate_all(&mut self) {
+        for i in 0..self.spans.len() {
+            if self.spans[i].is_none() {
+                let start = self.bytes.len() as u32;
+                self.col.translate_into(&mut self.bytes, i, &self.anchors);
+                let len = self.bytes.len() as u32 - start;
+                self.spans[i] = Some((start, len));
+                self.translated += 1;
+            }
+        }
+    }
+    /// `(start, len)` into [`FormulaTexts::bytes`] for entry `i` (filled by an
+    /// earlier `text_at`/`hydrate_all`).
+    pub fn byte_span(&self, i: usize) -> (usize, usize) {
+        let (s, l) = self.spans[i].expect("entry not yet hydrated");
+        (s as usize, l as usize)
+    }
+    /// The shared translation arena bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
     }
 }
 
@@ -538,11 +700,15 @@ pub(crate) struct Partial {
 
 impl Partial {
     pub fn take_formula_column(&mut self) -> FormulaColumn {
-        FormulaColumn {
+        let mut col = FormulaColumn {
             entries: std::mem::take(&mut self.fentries),
             fdict: std::mem::replace(&mut self.fdict, Dict::new()),
             anchors: std::mem::take(&mut self.anchors),
-        }
+        };
+        // E4: resolve each shared dependent's (row, col) delta from its anchor
+        // once, at load, so on-demand translation only touches the anchor text.
+        col.resolve_shared_deltas();
+        col
     }
     /// Convert value columns to Arrow arrays; consumes column buffers.
     pub fn into_arrow_columns(
@@ -653,8 +819,31 @@ impl Partial {
                             Some(MixedValue::Str(id)) => {
                                 if *id == NULL_IDX {
                                     sb.append_null();
-                                } else if let Some(s) = self.dict.strings().get(*id as usize) {
-                                    sb.append_value(s);
+                                } else {
+                                    // Resolve straight out of the intern pool.
+                                    //
+                                    // This used to call `self.dict.strings()`, which
+                                    // rebuilds the ENTIRE pool into a fresh
+                                    // `Vec<String>` — allocating every distinct string
+                                    // — just to index one element and drop it. Inside
+                                    // this per-cell loop that is O(cells x distinct)
+                                    // with an allocation per string per cell, and it
+                                    // made mixed-type columns quadratic: a 50k-row
+                                    // sheet took 118 s against 0.065 s for the same
+                                    // sheet with homogeneous columns.
+                                    //
+                                    // `try_resolve` is an offset lookup, and
+                                    // `from_utf8_lossy` borrows when the bytes are
+                                    // valid UTF-8, which interned XML text always is.
+                                    match self.dict.try_resolve(*id) {
+                                        Some(b) => sb.append_value(String::from_utf8_lossy(b)),
+                                        // Out of range cannot happen for ids produced
+                                        // by `intern`, but append SOMETHING regardless:
+                                        // the old code appended neither value nor null
+                                        // here, which would silently leave this column
+                                        // shorter than `nrows` and misalign the batch.
+                                        None => sb.append_null(),
+                                    }
                                 }
                             }
                         }
@@ -766,15 +955,60 @@ fn sheet_row_to_data_row(sheet_row: u32) -> usize {
 // ----------------------------------------------------------------------------
 // Core scanner
 // ----------------------------------------------------------------------------
-fn parse_region(
+/// The fixed schema a streaming window must emit for one column (B6).
+///
+/// The eager path infers a column's type from every row before building any
+/// Arrow array. A streaming reader cannot see the whole sheet before emitting
+/// the first batch, so it runs a type-only pre-pass over the sheet and then
+/// seeds every window's columns with these targets — making every batch's
+/// schema identical AND equal to what the eager path produces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ColTarget {
+    /// All-null or numeric-only column → Float64 with nulls (eager `Column::Unset`/`Num`).
+    Num,
+    /// String-only column → Dictionary<Int32, Utf8> (eager `Column::Str`).
+    Str,
+    /// Mixed numeric + string column → Utf8 via ryu + pool resolution (eager `Column::Mixed`).
+    Mixed,
+}
+
+impl ColTarget {
+    fn seed(self) -> Column {
+        match self {
+            ColTarget::Num => Column::Num {
+                v: Vec::new(),
+                valid: BitVec::new(),
+            },
+            ColTarget::Str => Column::Str(Vec::new()),
+            ColTarget::Mixed => Column::Mixed(Vec::new()),
+        }
+    }
+}
+
+/// Parse one row-aligned byte region of a worksheet (streaming path uses this
+/// per window; `parse_parallel` chunks a full sheet into these regions).
+pub(crate) fn parse_region(
     x: &[u8],
     lo: usize,
     hi: usize,
     has_header: bool,
     shared: Option<&StringArena>,
     feat: ScanFeat,
+    // Base data-row index for the sequential (no `@r`) fallback. 0 for the
+    // eager path and the first streaming window; the count of data rows
+    // already emitted for later streaming windows, so sparse coordinates stay
+    // globally absolute across windows.
+    row_offset: usize,
+    // Fixed per-column schema from the streaming pre-pass. `None` keeps the
+    // eager inferred behavior; `Some` seeds every column (and pre-sizes the
+    // column set to the target count) so a window emits the pre-pass schema.
+    targets: Option<&[ColTarget]>,
 ) -> Partial {
-    let mut cols: Vec<Column> = Vec::new();
+    let mut cols: Vec<Column> = if let Some(t) = targets {
+        t.iter().map(|&t| t.seed()).collect()
+    } else {
+        Vec::new()
+    };
     let mut style_cols: Vec<Vec<u32>> = Vec::new();
     let mut header: Vec<Vec<u8>> = Vec::new();
     let mut dict = Dict::new();
@@ -785,7 +1019,11 @@ fn parse_region(
     let mut row_dims: Vec<super::meta::RowDim> = Vec::new();
     let mut scratch: Vec<u8> = Vec::new();
     let mut fscratch: Vec<u8> = Vec::new();
-    let mut ncols = 0usize;
+    let mut ncols = if let Some(t) = targets {
+        t.len()
+    } else {
+        0usize
+    };
 
     // Local data-row cursor (0-based within this partial). Absolute data-row =
     // abs_start + dr. abs_start is fixed from the first data row's sheet `@r`
@@ -807,6 +1045,7 @@ fn parse_region(
         cols: &mut [Column],
         style_cols: &mut [Vec<u32>],
         feat: ScanFeat,
+        row_offset: usize,
     ) -> u32 {
         let abs = if let Some(sr) = sheet_row {
             let a = sheet_row_to_data_row(sr);
@@ -816,9 +1055,11 @@ fn parse_region(
             }
             a
         } else {
-            // No row @r: sequential packing from abs_start (0 if unset).
+            // No row @r: sequential packing from abs_start. The streaming path
+            // passes the global data-row count already emitted as `row_offset`
+            // so sparse coordinates stay absolute across windows; eager passes 0.
             if !*abs_start_set {
-                *abs_start = 0;
+                *abs_start = row_offset;
                 *abs_start_set = true;
             }
             *abs_start + *dr
@@ -881,6 +1122,7 @@ fn parse_region(
                     &mut cols,
                     &mut style_cols,
                     feat,
+                    row_offset,
                 );
                 for c in cols.iter_mut() {
                     c.pad_to(dr + 1);
@@ -912,6 +1154,7 @@ fn parse_region(
                 &mut cols,
                 &mut style_cols,
                 feat,
+                row_offset,
             )
         } else {
             0
@@ -975,7 +1218,12 @@ fn parse_region(
             };
 
             if col >= cols.len() {
-                cols.resize_with(col + 1, || Column::Unset);
+                cols.resize_with(col + 1, || {
+                    targets
+                        .and_then(|t| t.get(col).copied())
+                        .map(ColTarget::seed)
+                        .unwrap_or(Column::Unset)
+                });
             }
             if feat.styles && col >= style_cols.len() {
                 style_cols.resize_with(col + 1, Vec::new);
@@ -1074,7 +1322,9 @@ fn parse_region(
                                     fentries.push(FEntry {
                                         row: abs_row,
                                         col: col as u32,
-                                        cell: FCell::Shared(si),
+                                        // Deltas are resolved once, after chunks
+                                        // merge (see resolve_shared_deltas).
+                                        cell: FCell::Shared { si, rd: 0, cd: 0 },
                                     });
                                 }
                                 Some(b"array") => {
@@ -1348,7 +1598,7 @@ pub(crate) fn parse_parallel(
         .collect();
     let partials: Vec<Partial> = ranges
         .par_iter()
-        .map(|&(lo, hi, has_header)| parse_region(xml, lo, hi, has_header, shared, feat))
+        .map(|&(lo, hi, has_header)| parse_region(xml, lo, hi, has_header, shared, feat, 0, None))
         .collect();
     Ok(merge_partials(partials, feat))
 }
@@ -1634,7 +1884,11 @@ fn merge_partials(mut partials: Vec<Partial>, feat: ScanFeat) -> Partial {
             for e in &p.fentries {
                 let cell = match &e.cell {
                     FCell::Plain(id) => FCell::Plain(fremap[*id as usize]),
-                    FCell::Shared(si) => FCell::Shared(*si),
+                    FCell::Shared { si, .. } => FCell::Shared {
+                        si: *si,
+                        rd: 0,
+                        cd: 0,
+                    },
                     FCell::Array {
                         r0,
                         c0,
@@ -1720,5 +1974,233 @@ fn merge_partials(mut partials: Vec<Partial>, feat: ScanFeat) -> Partial {
         anchors: ganchors,
         cell_errors: gerrors,
         row_dims: grow_dims,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn synthetic_hydration_column(n: usize) -> FormulaColumn {
+    let bodies = [
+        "A2*2",
+        "A2+B2",
+        "SUM(A2:A50)",
+        "IF(C2>0,D2,\"none\")",
+        "VLOOKUP($A$2,$B$1:$D$99,2,FALSE)",
+        "CONCATENATE(\"R\",ROW())",
+    ];
+    let mut fdict = Dict::new();
+    let mut anchors = Vec::new();
+    for (si, b) in bodies.iter().enumerate() {
+        let id = fdict.intern(b.as_bytes());
+        anchors.push(AnchorDef {
+            si: si as u32,
+            text: id,
+            orow: 1,
+            ocol: 1,
+        });
+    }
+    let mut entries = Vec::with_capacity(n + bodies.len());
+    for (si, _) in bodies.iter().enumerate() {
+        entries.push(FEntry {
+            row: 1,
+            col: 1,
+            cell: FCell::Shared {
+                si: si as u32,
+                rd: 0,
+                cd: 0,
+            },
+        });
+    }
+    for k in 0..n {
+        let si = (k % bodies.len()) as u32;
+        entries.push(FEntry {
+            row: (2 + k / bodies.len()) as u32,
+            col: 1,
+            cell: FCell::Shared {
+                si,
+                rd: (1 + k / bodies.len()) as i32,
+                cd: 0,
+            },
+        });
+    }
+    FormulaColumn {
+        entries,
+        fdict,
+        anchors,
+    }
+}
+
+#[cfg(test)]
+impl FormulaColumn {
+    /// E4 candidate A reference shape: a fresh `String` per formula (via
+    /// `translate_into` into a fresh buffer), sequential like the E4 race's
+    /// `cand_a`. What shipped before the arena; the perf gate races the lazy
+    /// arena path against this.
+    pub(crate) fn materialize_all_naive(&self) -> Vec<String> {
+        let anchors = self.anchor_by_si();
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let mut out = Vec::with_capacity(32);
+                self.translate_into(&mut out, i, &anchors);
+                String::from_utf8_lossy(&out).into_owned()
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a formula column from anchor bodies and shared dependents.
+    /// Anchors sit at data-row 1 / data-col 1 (delta 0 for the anchor cell
+    /// itself); each dependent carries its already-resolved (si, rd, cd).
+    fn col(anchor_texts: &[&str], deps: &[(u32, u32, u32, i32, i32)]) -> FormulaColumn {
+        let mut fdict = Dict::new();
+        let mut anchors = Vec::new();
+        for (si, t) in anchor_texts.iter().enumerate() {
+            let id = fdict.intern(t.as_bytes());
+            anchors.push(AnchorDef {
+                si: si as u32,
+                text: id,
+                orow: 1,
+                ocol: 1,
+            });
+        }
+        let mut entries = Vec::new();
+        for (si, _) in anchor_texts.iter().enumerate() {
+            entries.push(FEntry {
+                row: 1,
+                col: 1,
+                cell: FCell::Shared {
+                    si: si as u32,
+                    rd: 0,
+                    cd: 0,
+                },
+            });
+        }
+        for &(row, col, si, rd, cd) in deps {
+            entries.push(FEntry {
+                row,
+                col,
+                cell: FCell::Shared { si, rd, cd },
+            });
+        }
+        FormulaColumn {
+            entries,
+            fdict,
+            anchors,
+        }
+    }
+
+    #[test]
+    fn dependent_translates_correctly_on_first_access() {
+        let c = col(&["A2*2"], &[(3, 1, 0, 2, 0)]);
+        assert_eq!(c.translate(3, 1).as_deref(), Some("A4*2"));
+        // The anchor itself reads back its own text (delta 0).
+        assert_eq!(c.translate(1, 1).as_deref(), Some("A2*2"));
+    }
+
+    #[test]
+    fn same_dependent_read_twice_translates_once() {
+        let c = col(&["B2+G2"], &[(4, 2, 0, 3, 1)]);
+        let mut texts = c.lazy();
+        let first = texts.text(4, 2).expect("dependent present").to_string();
+        assert_eq!(texts.translated(), 1);
+        let second = texts.text(4, 2).expect("dependent present").to_string();
+        assert_eq!(texts.translated(), 1, "second read must not re-translate");
+        assert_eq!(first, second);
+        assert_eq!(first, "C5+H5");
+    }
+
+    #[test]
+    fn dependent_translation_out_of_grid_is_ref() {
+        // Anchor "A1" one row below the dependent: rd = -1 pushes row 1 → 0,
+        // which is out of grid, so the operand degrades to #REF!.
+        let c = col(&["A1"], &[(0, 1, 0, -1, 0)]);
+        assert_eq!(c.translate(0, 1).as_deref(), Some("#REF!"));
+    }
+
+    #[test]
+    fn anchor_with_no_dependents_reads_its_own_text() {
+        let c = col(&["SUM(A1:A5)"], &[]);
+        assert_eq!(c.translate(1, 1).as_deref(), Some("SUM(A1:A5)"));
+        // materialize over just the anchor is a single-row arena build.
+        assert_eq!(c.materialize_all(), vec!["SUM(A1:A5)".to_string()]);
+    }
+
+    #[test]
+    fn orphan_shared_si_still_degrades_to_empty() {
+        // A dependent whose si has no anchor must stay an empty string, never
+        // panic — the historical degradation (turbo_malformed pins it too).
+        let c = FormulaColumn {
+            entries: vec![FEntry {
+                row: 5,
+                col: 0,
+                cell: FCell::Shared {
+                    si: 99,
+                    rd: 0,
+                    cd: 0,
+                },
+            }],
+            fdict: Dict::new(),
+            anchors: Vec::new(),
+        };
+        assert_eq!(c.translate(5, 0).as_deref(), Some(""));
+        assert_eq!(c.materialize_all(), vec!["".to_string()]);
+    }
+
+    #[test]
+    fn shared_deltas_resolved_at_take() {
+        // Exercises the real construction path: deltas are filled by
+        // resolve_shared_deltas from anchor coordinates, not handed in.
+        let mut p = Partial {
+            header: Vec::new(),
+            cols: Vec::new(),
+            dict: Dict::new(),
+            nrows: 0,
+            ncols: 0,
+            abs_start: 0,
+            style_cols: Vec::new(),
+            fentries: vec![
+                FEntry {
+                    row: 2,
+                    col: 0,
+                    cell: FCell::Shared {
+                        si: 0,
+                        rd: 0,
+                        cd: 0,
+                    },
+                },
+                FEntry {
+                    row: 7,
+                    col: 2,
+                    cell: FCell::Shared {
+                        si: 0,
+                        rd: 0,
+                        cd: 0,
+                    },
+                },
+            ],
+            fdict: {
+                let mut d = Dict::new();
+                d.intern(b"A2*2");
+                d
+            },
+            anchors: vec![AnchorDef {
+                si: 0,
+                text: 0,
+                orow: 2,
+                ocol: 0,
+            }],
+            cell_errors: Vec::new(),
+            row_dims: Vec::new(),
+        };
+        let col = p.take_formula_column();
+        // Anchor cell (row 2, col 0) → delta 0 → reads its own text.
+        assert_eq!(col.translate(2, 0).as_deref(), Some("A2*2"));
+        // Dependent (row 7, col 2) → delta (5, 2) → A2*2 becomes C7*2.
+        assert_eq!(col.translate(7, 2).as_deref(), Some("C7*2"));
     }
 }

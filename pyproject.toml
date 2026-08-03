@@ -84,6 +84,13 @@ warn_unused_ignores = true
 testpaths = "python/tests"
 log_cli = true
 log_cli_level = "INFO"
+markers = [
+    "excel_com: requires the opt-in isolated Windows Excel COM oracle",
+    "large: requires explicit large-fixture resource preflight and opt-in",
+    "northstar: records controlled CPU, wall-time, RSS, GIL, or scaling measurements",
+    "destructive_input: runs malformed or hostile inputs only under the subprocess guard",
+    "known_gap: records an architecture requirement that is demonstrably absent",
+]
 
 [tool.ruff]
 line-length = 100

@@ -18,7 +18,7 @@ def test_numeric_grid_fastlane_float64():
         # Test single sheet numpy array pass-through
         kyrax.write_excel_turbo(
             str(output_path),
-            [{"name": "Sheet1", "data": arr}],
+            [{"name": "Sheet1", "grid": arr}],
         )
         assert output_path.exists()
 
@@ -39,19 +39,21 @@ def test_numeric_grid_fastlane_float32():
 
         kyrax.write_excel_turbo(
             str(output_path),
-            [{"name": "Sheet1", "data": arr}],
+            [{"name": "Sheet1", "grid": arr}],
         )
         assert output_path.exists()
 
 @pytest.mark.skipif(not HAS_NUMPY, reason="NumPy not installed")
-def test_numeric_grid_transposed_fallback():
+def test_numeric_grid_transposed_is_rejected_safely():
     with tempfile.TemporaryDirectory() as tmpdir:
         output_path = Path(tmpdir) / "transposed_fallback.xlsx"
         arr = np.arange(20, dtype=np.float64).reshape((4, 5)).T # Non C-contiguous view
 
-        # Should fall back safely without memory corruption
-        kyrax.write_excel_turbo(
-            str(output_path),
-            [{"name": "Sheet1", "data": arr}],
-        )
-        assert output_path.exists()
+        # The documented zero-copy grid contract requires C-contiguous input.
+        # A non-contiguous view must fail safely rather than being misread.
+        with pytest.raises(ValueError, match="C-contiguous"):
+            kyrax.write_excel_turbo(
+                str(output_path),
+                [{"name": "Sheet1", "grid": arr}],
+            )
+        assert not output_path.exists()

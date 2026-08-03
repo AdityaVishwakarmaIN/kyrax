@@ -3,23 +3,45 @@
 //! Port of the verified `_reference/struct_proto` prototype into a library module.
 //! Enable with the `__arrow` feature (or any feature that enables `__arrow`).
 
+pub mod crypto;
 mod decode;
 mod error;
 mod formula;
+pub mod io;
 mod meta;
+#[cfg(test)]
+mod perfgate;
+mod refshift;
 mod scan;
+pub mod stream;
 mod structural;
 mod styles;
 mod zipmin;
 
+pub mod calc;
+pub mod mutate;
 pub mod overlay;
+
+/// Dependent-feature fixups for row/column insert and delete (T1-1d).
+///
+/// The splice in `mutate.rs` rewrites sheetData and the dimension; everything
+/// else that names a coordinate (merges, autoFilter, hyperlinks, DV/CF, breaks,
+/// panes/selections, tables, workbook defined names) is fixed up here.
+pub mod fixup;
 
 /// Turbo WRITE path (silo A core). Additive; does not alter the read path.
 pub mod write;
 
+/// C2 validate & repair: the tolerant reader surfaced as a checked report.
+pub mod validate;
+
+/// Phase 3 — the Tier 3 MEDIUM/LOW capabilities neither library held before.
+pub mod features;
+
 #[cfg(feature = "python")]
 pub mod python;
 
+pub use calc::{CalcOptions, CalcReport, hydrate_workbook};
 pub use error::{TurboError, TurboResult};
 pub use formula::translate_body;
 pub use meta::{
@@ -30,23 +52,31 @@ pub use meta::{
 };
 pub use overlay::{SheetOverlay, WorkbookOverlay};
 pub use scan::{CellError, FormulaColumn, FormulaKind, FormulaRecord};
+pub use stream::{
+    SheetStream, StreamOptions, StreamSummary, build_values_batch, cell_errors_to_batch,
+};
 pub use structural::{
     AnchorCell, CellRange, ChartAnchor, ChartMeta, ChartType, Comment, DefinedName, Hyperlink,
-    LinkTarget, NameKind, Person, PivotCacheMeta, PivotDataField, PivotTableMeta, Scope,
-    SeriesMeta, SheetComments, Table, TableColumn, TableStyle, ThreadedComment, VbaProject, a1,
-    range_a1,
+    ImageMeta, LinkTarget, NameKind, Person, PivotCacheMeta, PivotDataField, PivotTableMeta,
+    ReadImageAnchor, ReadImageMarker, Scope, SeriesMeta, SheetComments, Table, TableColumn,
+    TableStyle, ThreadedComment, VbaProject, a1, range_a1,
 };
 pub use styles::{
     Alignment, Border, CKind, Color, Dxf, DxfFont, Fill, Font, NamedStyleRec, Protection, Resolved,
     Side, StyleTable, Xf,
 };
-pub use zipmin::{ArchiveMap, ZipEntryMeta};
+pub use validate::{
+    Finding, FindingCode, RepairAction, RepairOptions, Severity, ValidateReport, repair_workbook,
+    validate_workbook,
+};
+pub use zipmin::{ArchiveMap, ZipEntryMeta, find_entry, read_entry};
 
 use arrow_array::{ArrayRef, UInt32Array};
 use scan::{ScanFeat, parse_parallel, parse_shared_strings, sheet_data_region};
+use std::sync::Arc;
 use structural::{RelKind, parse_rels, parse_workbook, resolve_zip_path};
 use styles::parse_style_table;
-use zipmin::{inflate, read_entry};
+use zipmin::inflate;
 
 // ----------------------------------------------------------------------------
 // Feature flags (plain bitflags, no extra deps)
@@ -92,6 +122,8 @@ impl Features {
     pub const PIVOTS: Features = Features(1 << 14);
     /// VBA presence + raw `vbaProject.bin` bytes.
     pub const VBA: Features = Features(1 << 15);
+    /// Images: drawing pic anchors + media bytes.
+    pub const IMAGES: Features = Features(1 << 16);
 
     pub const ALL: Features = Features(
         Self::VALUES.0
@@ -109,7 +141,8 @@ impl Features {
             | Self::COND_FORMAT.0
             | Self::CHARTS.0
             | Self::PIVOTS.0
-            | Self::VBA.0,
+            | Self::VBA.0
+            | Self::IMAGES.0,
     );
 
     #[inline]
@@ -174,6 +207,8 @@ pub struct TurboSheet {
     pub threaded_comments: Option<Vec<ThreadedComment>>,
     /// Charts on this sheet, gated by [`Features::CHARTS`].
     pub charts: Option<Vec<ChartMeta>>,
+    /// Images on this sheet, gated by [`Features::IMAGES`].
+    pub images: Option<Vec<ImageMeta>>,
     /// Pivot tables on this sheet, gated by [`Features::PIVOTS`].
     pub pivots: Option<Vec<PivotTableMeta>>,
 
@@ -216,12 +251,59 @@ pub struct TurboWorkbook {
 }
 
 // ----------------------------------------------------------------------------
+// Encrypted-workbook support (C1c)
+// ----------------------------------------------------------------------------
+
+/// Read the raw zip bytes of a workbook, transparently decrypting an ECMA-376
+/// encrypted (OLE/CFB) package when a password is supplied. The decrypted
+/// bytes stay in memory and are handed to the existing zip reader unchanged;
+/// they are never written to disk.
+#[cfg(feature = "encryption")]
+fn open_package_bytes(path: &str, password: Option<&str>) -> TurboResult<Vec<u8>> {
+    use crypto::CryptoError;
+    let raw = std::fs::read(path)?;
+    if !crypto::is_encrypted(&raw) {
+        return Ok(raw);
+    }
+    let pwd = password.ok_or_else(|| {
+        TurboError::Format("encrypted workbook: a password is required to open it".into())
+    })?;
+    crypto::decrypt_workbook(&raw, pwd).map_err(|e| match e {
+        CryptoError::WrongPassword => {
+            TurboError::Format("wrong password for encrypted workbook".into())
+        }
+        other => TurboError::Format(format!("encrypted workbook: {other}")),
+    })
+}
+
+/// Non-`encryption` build: still detect the container and refuse with a clear
+/// message instead of letting the zip reader report corruption.
+#[cfg(not(feature = "encryption"))]
+fn open_package_bytes(path: &str, _password: Option<&str>) -> TurboResult<Vec<u8>> {
+    let raw = std::fs::read(path)?;
+    if crypto::is_encrypted(&raw) {
+        return Err(TurboError::Format(
+            "encrypted workbook (OLE/CFB): this build has no `encryption` feature".into(),
+        ));
+    }
+    Ok(raw)
+}
+
+// ----------------------------------------------------------------------------
 // Entry point
 // ----------------------------------------------------------------------------
 
 /// List worksheet names from `xl/workbook.xml` without parsing sheet data.
 pub fn list_sheet_names(path: &str) -> TurboResult<Vec<String>> {
-    let zip = std::fs::read(path)?;
+    list_sheet_names_with_password(path, None)
+}
+
+/// Like [`list_sheet_names`], but opens an encrypted workbook with `password`.
+pub fn list_sheet_names_with_password(
+    path: &str,
+    password: Option<&str>,
+) -> TurboResult<Vec<String>> {
+    let zip = open_package_bytes(path, password)?;
     let wb_xml = read_entry(&zip, "xl/workbook.xml")?
         .ok_or_else(|| TurboError::MissingPart("xl/workbook.xml".into()))?;
     let (sheet_metas, _) = parse_workbook(&wb_xml);
@@ -234,7 +316,19 @@ pub fn list_sheet_names(path: &str) -> TurboResult<Vec<String>> {
 /// Inflates and scans **every** worksheet. Prefer
 /// [`read_workbook_turbo_sheet`] when only one sheet is needed.
 pub fn read_workbook_turbo(path: &str, features: Features) -> TurboResult<TurboWorkbook> {
-    read_workbook_turbo_filtered(path, features, None)
+    read_workbook_turbo_filtered(path, features, None, None)
+}
+
+/// Like [`read_workbook_turbo`], but opens an encrypted workbook with `password`.
+///
+/// `None` means "no password"; an encrypted file then fails with a clear
+/// "password required" error rather than a zip-corruption error.
+pub fn read_workbook_turbo_with_password(
+    path: &str,
+    features: Features,
+    password: Option<&str>,
+) -> TurboResult<TurboWorkbook> {
+    read_workbook_turbo_filtered(path, features, None, password)
 }
 
 /// Like [`read_workbook_turbo`], but inflate+scan only the sheet at `sheet_idx`
@@ -247,7 +341,17 @@ pub fn read_workbook_turbo_sheet(
     features: Features,
     sheet_idx: usize,
 ) -> TurboResult<TurboWorkbook> {
-    read_workbook_turbo_filtered(path, features, Some(sheet_idx))
+    read_workbook_turbo_filtered(path, features, Some(sheet_idx), None)
+}
+
+/// Like [`read_workbook_turbo_sheet`], but opens an encrypted workbook with `password`.
+pub fn read_workbook_turbo_sheet_with_password(
+    path: &str,
+    features: Features,
+    sheet_idx: usize,
+    password: Option<&str>,
+) -> TurboResult<TurboWorkbook> {
+    read_workbook_turbo_filtered(path, features, Some(sheet_idx), password)
 }
 
 /// Internal entry: `only_sheet = None` parses all sheets; `Some(i)` parses only sheet `i`.
@@ -255,9 +359,10 @@ fn read_workbook_turbo_filtered(
     path: &str,
     features: Features,
     only_sheet: Option<usize>,
+    password: Option<&str>,
 ) -> TurboResult<TurboWorkbook> {
     let features = features.union(Features::VALUES);
-    let zip = std::fs::read(path)?;
+    let zip = open_package_bytes(path, password)?;
 
     // Shared strings (optional part)
     let shared = match read_entry(&zip, "xl/sharedStrings.xml")? {
@@ -338,6 +443,7 @@ fn read_workbook_turbo_filtered(
         || features.contains(Features::TABLES)
         || features.contains(Features::COMMENTS)
         || features.contains(Features::CHARTS)
+        || features.contains(Features::IMAGES)
         || features.contains(Features::PIVOTS);
 
     // Stream C workbook-level: persons, VBA, pivot caches
@@ -420,25 +526,35 @@ fn read_workbook_turbo_filtered(
         // Chartsheet: empty grid; still load chart sidecars when requested
         if is_chartsheet {
             let mut sheet = empty_sheet(meta.name.clone(), meta.state, meta.kind, features);
-            if features.contains(Features::CHARTS) {
+            if features.contains(Features::CHARTS) || features.contains(Features::IMAGES) {
                 let sheet_file = sheet_path.rsplit('/').next().unwrap_or("sheet1.xml");
                 let rels_path = format!("xl/chartsheets/_rels/{sheet_file}.rels");
                 let rels = match read_entry(&zip, &rels_path)? {
                     Some(rx) => parse_rels(&rx),
                     None => Default::default(),
                 };
-                sheet.charts = Some(load_sheet_charts(
-                    &zip,
-                    sheet_base_dir,
-                    &rels,
-                    sheet_idx as u32,
-                )?);
+                if features.contains(Features::CHARTS) {
+                    sheet.charts = Some(load_sheet_charts(
+                        &zip,
+                        sheet_base_dir,
+                        &rels,
+                        sheet_idx as u32,
+                    )?);
+                }
+                if features.contains(Features::IMAGES) {
+                    sheet.images = Some(load_sheet_images(
+                        &zip,
+                        sheet_base_dir,
+                        &rels,
+                        sheet_idx as u32,
+                    )?);
+                }
             }
             sheets.push(sheet);
             continue;
         }
 
-        let sheet_xml = match zipmin::find_entry(&zip, &sheet_path) {
+        let sheet_xml = match zipmin::find_entry(&zip, &sheet_path)? {
             Some((m, c, u)) => inflate(m, c, u)?,
             None => {
                 return Err(TurboError::MissingPart(sheet_path));
@@ -569,6 +685,17 @@ fn read_workbook_turbo_filtered(
 
         let charts = if features.contains(Features::CHARTS) {
             Some(load_sheet_charts(
+                &zip,
+                "xl/worksheets/",
+                &rels,
+                sheet_idx as u32,
+            )?)
+        } else {
+            None
+        };
+
+        let images = if features.contains(Features::IMAGES) {
+            Some(load_sheet_images(
                 &zip,
                 "xl/worksheets/",
                 &rels,
@@ -736,6 +863,7 @@ fn read_workbook_turbo_filtered(
             comments,
             threaded_comments,
             charts,
+            images,
             pivots,
             sheet_state: meta.state,
             sheet_kind: meta.kind,
@@ -819,6 +947,58 @@ fn load_sheet_charts(
     Ok(charts)
 }
 
+/// Read the images on a sheet: worksheet drawing rel → drawing part → pic
+/// anchors (`blip r:embed`) → drawing rels → media part bytes.
+///
+/// Failure behaviour mirrors [`load_sheet_charts`] hop for hop: every
+/// image-specific problem (dangling `r:embed`, a rel pointing at a missing
+/// entry, a rel that is not an image, a malformed drawing part, a pic without
+/// a blip, or a zero-byte media entry) skips that image. Only genuine zip-format
+/// corruption propagates as a `TurboError` via `?`. Never panics.
+fn load_sheet_images(
+    zip: &[u8],
+    sheet_base_dir: &str,
+    sheet_rels: &structural::RelMap,
+    sheet_idx: u32,
+) -> TurboResult<Vec<ImageMeta>> {
+    let mut images = Vec::new();
+    for rel in sheet_rels.values().filter(|r| r.kind == RelKind::Drawing) {
+        let drawing_path = resolve_zip_path(sheet_base_dir, &rel.target);
+        let Some(dx) = read_entry(zip, &drawing_path)? else {
+            continue;
+        };
+        let anchors = structural::parse_drawing_image_anchors(&dx);
+        let drawing_file = drawing_path.rsplit('/').next().unwrap_or("drawing1.xml");
+        let drels_path = format!("xl/drawings/_rels/{drawing_file}.rels");
+        let drels = match read_entry(zip, &drels_path)? {
+            Some(rx) => parse_rels(&rx),
+            None => Default::default(),
+        };
+        for (blip_rid, anchor) in anchors {
+            let Some(irel) = drels.get(&blip_rid) else {
+                continue;
+            };
+            if irel.kind != RelKind::Image {
+                continue;
+            }
+            let media_path = resolve_zip_path("xl/drawings/", &irel.target);
+            let Some(bytes) = read_entry(zip, &media_path)? else {
+                continue;
+            };
+            if bytes.is_empty() {
+                continue;
+            }
+            images.push(ImageMeta {
+                sheet: sheet_idx,
+                part: media_path,
+                anchor,
+                bytes: Arc::new(bytes),
+            });
+        }
+    }
+    Ok(images)
+}
+
 fn empty_sheet(name: String, state: SheetState, kind: SheetKind, features: Features) -> TurboSheet {
     TurboSheet {
         name,
@@ -859,6 +1039,11 @@ fn empty_sheet(name: String, state: SheetState, kind: SheetKind, features: Featu
             None
         },
         charts: if features.contains(Features::CHARTS) {
+            Some(Vec::new())
+        } else {
+            None
+        },
+        images: if features.contains(Features::IMAGES) {
             Some(Vec::new())
         } else {
             None

@@ -273,11 +273,13 @@ fn scan_brackets(f: &[u8], i: usize) -> usize {
     f.len() - i
 }
 
-/// Translate a formula body (no leading '=') by (rdelta, cdelta).
-pub fn translate_body(body: &str, rd: i32, cd: i32) -> String {
+/// Translate a formula body (no leading '=') by (rdelta, cdelta), appending
+/// the translated text into `out`. The buffer keeps growing across calls, so a
+/// caller materialising many formulas into one arena pays no per-formula
+/// allocation. The caller pre-sizes when it wants a tight first allocation.
+pub fn translate_body_into(out: &mut Vec<u8>, body: &str, rd: i32, cd: i32) {
     let f = body.as_bytes();
     let n = f.len();
-    let mut out: Vec<u8> = Vec::with_capacity(n + 8);
     let mut tok: Vec<u8> = Vec::new();
 
     fn flush(tok: &mut Vec<u8>, out: &mut Vec<u8>, rd: i32, cd: i32) {
@@ -301,7 +303,7 @@ pub fn translate_body(body: &str, rd: i32, cd: i32) -> String {
         let c = f[i];
         match c {
             b'"' => {
-                flush(&mut tok, &mut out, rd, cd);
+                flush(&mut tok, out, rd, cd);
                 let adv = scan_dquote(f, i);
                 out.extend_from_slice(&f[i..i + adv]);
                 i += adv;
@@ -329,7 +331,7 @@ pub fn translate_body(body: &str, rd: i32, cd: i32) -> String {
                 i += adv;
             }
             b' ' | b'\n' => {
-                flush(&mut tok, &mut out, rd, cd);
+                flush(&mut tok, out, rd, cd);
                 out.push(c);
                 i += 1;
             }
@@ -338,7 +340,7 @@ pub fn translate_body(body: &str, rd: i32, cd: i32) -> String {
                     tok.push(c);
                     i += 1;
                 } else {
-                    flush(&mut tok, &mut out, rd, cd);
+                    flush(&mut tok, out, rd, cd);
                     // two-char ops >= <= <>
                     if (c == b'>' && f.get(i + 1) == Some(&b'='))
                         || (c == b'<'
@@ -361,12 +363,12 @@ pub fn translate_body(body: &str, rd: i32, cd: i32) -> String {
                 i += 1;
             }
             b')' | b'}' => {
-                flush(&mut tok, &mut out, rd, cd);
+                flush(&mut tok, out, rd, cd);
                 out.push(c);
                 i += 1;
             }
             b',' | b';' => {
-                flush(&mut tok, &mut out, rd, cd);
+                flush(&mut tok, out, rd, cd);
                 out.push(c);
                 i += 1;
             }
@@ -376,7 +378,15 @@ pub fn translate_body(body: &str, rd: i32, cd: i32) -> String {
             }
         }
     }
-    flush(&mut tok, &mut out, rd, cd);
+    flush(&mut tok, out, rd, cd);
+}
+
+/// Translate a formula body (no leading '=') by (rdelta, cdelta) into an owned
+/// String. Thin wrapper over [`translate_body_into`]; kept for callers that
+/// need a fresh `String` per formula.
+pub fn translate_body(body: &str, rd: i32, cd: i32) -> String {
+    let mut out = Vec::with_capacity(body.len() + 8);
+    translate_body_into(&mut out, body, rd, cd);
     String::from_utf8_lossy(&out).into_owned()
 }
 

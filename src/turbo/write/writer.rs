@@ -3,9 +3,12 @@
 
 use super::cf_dv::emit_data_validations;
 use super::charts::{
-    Anchor, ChartsheetSpec, write_chart_space, write_chartsheet_xml, write_drawing,
+    Anchor, ChartsheetSpec, DrawingImage, write_chart_space, write_chartsheet_xml, write_drawing,
+    write_drawing_full,
 };
+use super::media::MediaInterner;
 use super::model::*;
+use super::pivot::build_pivot_parts;
 use super::structural::{
     PKG_REL_NS, collect_defined_names, emit_auto_filter, emit_breaks, emit_default_page_margins,
     emit_defined_names_xml, emit_header_footer, emit_hyperlinks, emit_merges, emit_page_margins,
@@ -16,6 +19,8 @@ use super::structural::{
 use super::style_engine::{StyleDesc, StyleEngine};
 use super::xml::*;
 use super::zip::{PrecompressedPart, StreamingZipWriter, ZipWriter, compress_part};
+use crate::turbo::meta::AutoFilterMeta;
+use crate::turbo::range_a1;
 use std::cell::RefCell;
 use std::io::{self, Seek};
 
@@ -91,6 +96,7 @@ struct SheetZipParts {
     parts: Vec<PrecompressedPart>,
     need_vml: bool,
     ct_overrides: Vec<(String, &'static str)>,
+    pivot_wirings: Vec<PivotCacheWiring>,
 }
 
 /// Extra package part produced while writing a sheet.
@@ -105,6 +111,49 @@ struct ExtraPart {
 struct SheetEmit {
     rels: Option<Vec<u8>>,
     extras: Vec<ExtraPart>,
+    /// One entry per authored pivot on this sheet: the cache id the pivot parts
+    /// were emitted with + the pivot's global part index (for the workbook
+    /// `<pivotCaches>` / workbook rels wiring).
+    pivot_wirings: Vec<PivotCacheWiring>,
+}
+
+/// Deterministic per-pivot assignment: the global part index (drives
+/// `pivotCacheDefinitionN.xml` / `pivotTableN.xml` numbering) and the cache id.
+#[derive(Clone, Copy)]
+struct PivotAssign {
+    part_index: usize,
+    cache_id: u32,
+}
+
+/// A pivot cache that reached the workbook level: its cacheId (referenced from
+/// workbook.xml `<pivotCaches>` and the pivot table) and its part index
+/// (determines the `pivotCache/pivotCacheDefinitionN.xml` rel target).
+struct PivotCacheWiring {
+    cache_id: u32,
+    part_index: usize,
+}
+
+/// Assign a global part index + cache id to every authored pivot, in sheet and
+/// spec order, so single- and multi-sheet writes number parts identically.
+fn assign_pivot_parts(sheets: &[Sheet]) -> Vec<Vec<PivotAssign>> {
+    let mut out = Vec::with_capacity(sheets.len());
+    let mut next = 0usize;
+    for sheet in sheets {
+        let per: Vec<PivotAssign> = sheet
+            .pivots
+            .iter()
+            .map(|_| {
+                let a = PivotAssign {
+                    part_index: next,
+                    cache_id: next as u32,
+                };
+                next += 1;
+                a
+            })
+            .collect();
+        out.push(per);
+    }
+    out
 }
 
 pub fn save_workbook(wb: &Workbook, path: &str) -> io::Result<()> {
@@ -159,6 +208,17 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
     }
 
     let sheets_ref: &[Sheet] = owned_sheets.as_deref().unwrap_or(&wb.sheets);
+
+    // Intern all images up front (first-seen order → deterministic media
+    // numbering). The registry is then read-only for the parallel sheet path.
+    let mut interner = MediaInterner::new();
+    if features.contains(WriteFeatures::IMAGES) {
+        for sh in sheets_ref {
+            for img in &sh.images {
+                interner.intern(&img.bytes, img.format);
+            }
+        }
+    }
 
     // Styles already resolved serially above (W2). SST: pre-build only when
     // multi-sheet parallel emit needs a frozen table; single-sheet builds during
@@ -226,6 +286,8 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
     // (rayon default pool) vs serial max(one sheet); see P4_NOTES.
     let mut took_parallel_path = false;
     let mut xml_scratch = take_xml_scratch(0);
+    let pivot_assigns = assign_pivot_parts(sheets_ref);
+    let mut pivot_wirings: Vec<PivotCacheWiring> = Vec::new();
     if let Some(ref grid) = wb.numeric_columns {
         write_numeric_grid_sheet_into(grid, &mut xml_scratch);
         zip.add_recycle("xl/worksheets/sheet1.xml", &mut xml_scratch);
@@ -239,8 +301,11 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
                 &mut SstAccess::Build(&mut sst),
                 &mut counters,
                 features,
+                &interner,
+                &pivot_assigns[i],
                 &mut xml_scratch,
             );
+            pivot_wirings.extend(emit.pivot_wirings);
             for ex in &emit.extras {
                 if ex.path.ends_with(".vml") {
                     need_vml_default = true;
@@ -347,6 +412,8 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
                         &mut SstAccess::Fixed(&sst),
                         &mut local_counters,
                         features,
+                        &interner,
+                        &pivot_assigns[i],
                         &mut xml,
                     );
                     let mut parts =
@@ -361,6 +428,7 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
                             ct_overrides.push((format!("/{}", ex.path), ct));
                         }
                     }
+                    let pivot_wirings = emit.pivot_wirings;
                     parts.push(compress_part(
                         format!("xl/worksheets/sheet{}.xml", i + 1),
                         &xml,
@@ -379,6 +447,7 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
                         parts,
                         need_vml,
                         ct_overrides,
+                        pivot_wirings,
                     }
                 })
                 .collect();
@@ -390,6 +459,7 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
                     need_vml_default = true;
                 }
                 all_ct_overrides.extend(result.ct_overrides);
+                pivot_wirings.extend(result.pivot_wirings);
                 for part in result.parts {
                     zip.add_precompressed(part);
                 }
@@ -426,6 +496,13 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
     }
     put_xml_scratch(xml_scratch);
 
+    // Media parts: one per unique image, STORE (never deflate — PNG/JPEG/GIF
+    // are already compressed). Global parts, emitted once in dedup order.
+    for i in 0..interner.len() {
+        let name = interner.media_part_name(i);
+        zip.add_stored(&name, interner.media_bytes(i));
+    }
+
     // External links (F100 thin stub)
     for (i, link) in wb.external_links.iter().enumerate() {
         let n = i + 1;
@@ -451,6 +528,16 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
         zip.add_buf("xl/sharedStrings.xml", write_sst(&sst));
     }
 
+    // Workbook-level pivot wiring: after sheets/chartsheets/extlinks/styles/
+    // theme (+sst) the pivot-cache relationships get the next contiguous rIds.
+    // workbook.xml's `<pivotCaches>` and workbook.xml.rels must agree.
+    let pivot_rel_base = ws_count + cs_count + wb.external_links.len() + (has_sst as usize) + 2;
+    let pivot_rel_ids: Vec<String> = pivot_wirings
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("rId{}", pivot_rel_base + i + 1))
+        .collect();
+
     let sheet_names_states: Vec<(String, SheetState)> = if wb.numeric_columns.is_some() {
         let g = wb.numeric_columns.as_ref().unwrap();
         vec![(g.sheet_name.clone(), SheetState::Visible)]
@@ -464,11 +551,25 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
 
     zip.add_buf(
         "xl/workbook.xml",
-        write_workbook_xml(wb, &sheet_names_states, &chartsheet_names, features),
+        write_workbook_xml(
+            wb,
+            &sheet_names_states,
+            &chartsheet_names,
+            features,
+            &pivot_wirings,
+            &pivot_rel_ids,
+        ),
     );
     zip.add_buf(
         "xl/_rels/workbook.xml.rels",
-        write_workbook_rels(ws_count, cs_count, wb.external_links.len(), has_sst),
+        write_workbook_rels(
+            ws_count,
+            cs_count,
+            wb.external_links.len(),
+            has_sst,
+            &pivot_wirings,
+            &pivot_rel_ids,
+        ),
     );
     zip.add("_rels/.rels", root_rels_xml(has_custom).as_bytes());
     zip.add_buf(
@@ -480,6 +581,7 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
             wb.macro_enabled,
             need_vml_default,
             &all_ct_overrides,
+            &interner.media_defaults(),
         ),
     );
 
@@ -511,6 +613,20 @@ fn stream_add_entry<W: io::Write + Seek>(
     zip.write_chunk(data)?;
     zip.finish_entry()
 }
+
+/// Stream an already-compressed part (images) with the STORE method — the
+/// chunk passes straight through to the sink, never through deflate.
+fn stream_add_stored<W: io::Write + Seek>(
+    zip: &mut StreamingZipWriter<W>,
+    name: &str,
+    data: &[u8],
+) -> io::Result<()> {
+    zip.start_entry(name, METHOD_STORE)?;
+    zip.write_chunk(data)?;
+    zip.finish_entry()
+}
+
+const METHOD_STORE: u16 = 0;
 
 pub fn save_workbook_stream<W: io::Write + Seek>(wb: &Workbook, w: W) -> io::Result<W> {
     let mut wb_local;
@@ -557,6 +673,17 @@ pub fn save_workbook_stream<W: io::Write + Seek>(wb: &Workbook, w: W) -> io::Res
     }
 
     let sheets_ref: &[Sheet] = owned_sheets.as_deref().unwrap_or(&wb.sheets);
+
+    // Intern all images up front (first-seen order → deterministic media
+    // numbering), same as the buffered path.
+    let mut interner = MediaInterner::new();
+    if features.contains(WriteFeatures::IMAGES) {
+        for sh in sheets_ref {
+            for img in &sh.images {
+                interner.intern(&img.bytes, img.format);
+            }
+        }
+    }
 
     let mut sst = SstBuilder::new();
     let mut counters = PartCounters::default();
@@ -614,6 +741,8 @@ pub fn save_workbook_stream<W: io::Write + Seek>(wb: &Workbook, w: W) -> io::Res
     stream_add_entry(&mut zip, "xl/styles.xml", &styles_xml)?;
 
     let mut xml_scratch = take_xml_scratch(0);
+    let pivot_assigns = assign_pivot_parts(sheets_ref);
+    let mut pivot_wirings: Vec<PivotCacheWiring> = Vec::new();
     if let Some(ref grid) = wb.numeric_columns {
         zip.start_entry("xl/worksheets/sheet1.xml", METHOD_DEFLATE)?;
         write_numeric_grid_sheet_stream(&mut zip, grid, &mut xml_scratch)?;
@@ -630,8 +759,11 @@ pub fn save_workbook_stream<W: io::Write + Seek>(wb: &Workbook, w: W) -> io::Res
                 &mut SstAccess::Build(&mut sst),
                 &mut counters,
                 features,
+                &interner,
+                &pivot_assigns[i],
                 &mut xml_scratch,
             )?;
+            pivot_wirings.extend(emit.pivot_wirings);
             for ex in &emit.extras {
                 if ex.path.ends_with(".vml") {
                     need_vml_default = true;
@@ -681,6 +813,15 @@ pub fn save_workbook_stream<W: io::Write + Seek>(wb: &Workbook, w: W) -> io::Res
     }
     put_xml_scratch(xml_scratch);
 
+    // Media parts: STORE only (never deflate), in dedup order.
+    for i in 0..interner.len() {
+        stream_add_stored(
+            &mut zip,
+            &interner.media_part_name(i),
+            interner.media_bytes(i),
+        )?;
+    }
+
     for (i, link) in wb.external_links.iter().enumerate() {
         let n = i + 1;
         let path = format!("xl/externalLinks/externalLink{n}.xml");
@@ -706,6 +847,15 @@ pub fn save_workbook_stream<W: io::Write + Seek>(wb: &Workbook, w: W) -> io::Res
         stream_add_entry(&mut zip, "xl/sharedStrings.xml", &write_sst(&sst))?;
     }
 
+    // Workbook-level pivot wiring: sheets/chartsheets/extlinks/styles/theme
+    // (+sst) precede the pivot-cache relationships.
+    let pivot_rel_base = ws_count + cs_count + wb.external_links.len() + (has_sst as usize) + 2;
+    let pivot_rel_ids: Vec<String> = pivot_wirings
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("rId{}", pivot_rel_base + i + 1))
+        .collect();
+
     let sheet_names_states: Vec<(String, SheetState)> = if wb.numeric_columns.is_some() {
         let g = wb.numeric_columns.as_ref().unwrap();
         vec![(g.sheet_name.clone(), SheetState::Visible)]
@@ -720,12 +870,26 @@ pub fn save_workbook_stream<W: io::Write + Seek>(wb: &Workbook, w: W) -> io::Res
     stream_add_entry(
         &mut zip,
         "xl/workbook.xml",
-        &write_workbook_xml(wb, &sheet_names_states, &chartsheet_names, features),
+        &write_workbook_xml(
+            wb,
+            &sheet_names_states,
+            &chartsheet_names,
+            features,
+            &pivot_wirings,
+            &pivot_rel_ids,
+        ),
     )?;
     stream_add_entry(
         &mut zip,
         "xl/_rels/workbook.xml.rels",
-        &write_workbook_rels(ws_count, cs_count, wb.external_links.len(), has_sst),
+        &write_workbook_rels(
+            ws_count,
+            cs_count,
+            wb.external_links.len(),
+            has_sst,
+            &pivot_wirings,
+            &pivot_rel_ids,
+        ),
     )?;
     stream_add_entry(
         &mut zip,
@@ -742,12 +906,23 @@ pub fn save_workbook_stream<W: io::Write + Seek>(wb: &Workbook, w: W) -> io::Res
             wb.macro_enabled,
             need_vml_default,
             &all_ct_overrides,
+            &interner.media_defaults(),
         ),
     )?;
 
     let finished = zip.finish()?;
     super::zip::shrink_comp_scratch();
     Ok(finished)
+}
+
+/// Emit `<autoFilter>`. The `ref` is always written when the model carries it;
+/// the `filterColumn` children only under the MERGES feature family, so a
+/// values-only workload (flag off) pays nothing extra.
+fn emit_sheet_auto_filter(out: &mut Vec<u8>, af: &AutoFilterMeta, features: WriteFeatures) {
+    let with_cols =
+        features.contains(WriteFeatures::MERGES) || features.contains(WriteFeatures::ALL);
+    let cols: &[crate::turbo::meta::FilterColumnMeta] = if with_cols { &af.columns } else { &[] };
+    emit_auto_filter(out, &range_a1(&af.ref_), cols);
 }
 
 fn write_sheet_package_stream<W: io::Write + Seek>(
@@ -759,6 +934,8 @@ fn write_sheet_package_stream<W: io::Write + Seek>(
     sst: &mut SstAccess<'_>,
     counters: &mut PartCounters,
     features: WriteFeatures,
+    interner: &MediaInterner,
+    pivot_assigns: &[PivotAssign],
     chunk_buf: &mut Vec<u8>,
 ) -> io::Result<SheetEmit> {
     zip.start_entry(sheet_path, METHOD_DEFLATE)?;
@@ -939,6 +1116,7 @@ fn write_sheet_package_stream<W: io::Write + Seek>(
     let mut rels: Vec<(String, String, Option<String>)> = Vec::new();
     let mut next_rid: usize = 0;
     let mut extras: Vec<ExtraPart> = Vec::new();
+    let mut pivot_wirings: Vec<PivotCacheWiring> = Vec::new();
 
     let do_merges =
         features.contains(WriteFeatures::MERGES) || features.contains(WriteFeatures::ALL);
@@ -949,7 +1127,7 @@ fn write_sheet_package_stream<W: io::Write + Seek>(
         emit_scenarios(chunk_buf, &sheet.scenarios);
     }
     if let Some(af) = &sheet.auto_filter {
-        emit_auto_filter(chunk_buf, af);
+        emit_sheet_auto_filter(chunk_buf, af, features);
     }
     if !sheet.merges.is_empty() {
         let _ = do_merges;
@@ -982,23 +1160,33 @@ fn write_sheet_package_stream<W: io::Write + Seek>(
     }
     emit_breaks(chunk_buf, &sheet.row_breaks, &sheet.col_breaks);
 
-    if !sheet.charts.is_empty() && features.contains(WriteFeatures::CHARTS) {
+    let has_charts = !sheet.charts.is_empty() && features.contains(WriteFeatures::CHARTS);
+    let has_images = !sheet.images.is_empty() && features.contains(WriteFeatures::IMAGES);
+    if has_charts || has_images {
         counters.drawing_id += 1;
         let did = counters.drawing_id;
         let mut chart_rel_paths = Vec::new();
-        for ch in &sheet.charts {
-            counters.chart_id += 1;
-            let cid = counters.chart_id;
-            extras.push(ExtraPart {
-                path: format!("xl/charts/chart{cid}.xml"),
-                data: write_chart_space(ch).into_bytes(),
-                content_type: Some(
-                    "application/vnd.openxmlformats-officedocument.drawingml.chart+xml",
-                ),
-            });
-            chart_rel_paths.push(format!("../charts/chart{cid}.xml"));
+        if has_charts {
+            for ch in &sheet.charts {
+                counters.chart_id += 1;
+                let cid = counters.chart_id;
+                extras.push(ExtraPart {
+                    path: format!("xl/charts/chart{cid}.xml"),
+                    data: write_chart_space(ch).into_bytes(),
+                    content_type: Some(
+                        "application/vnd.openxmlformats-officedocument.drawingml.chart+xml",
+                    ),
+                });
+                chart_rel_paths.push(format!("../charts/chart{cid}.xml"));
+            }
         }
-        let (drawing_xml, drawing_rels) = write_drawing(&sheet.charts, &chart_rel_paths);
+        let (drawing_images, media_targets) = build_drawing_images(sheet, interner);
+        let (drawing_xml, drawing_rels) = write_drawing_full(
+            &sheet.charts,
+            &chart_rel_paths,
+            &drawing_images,
+            &media_targets,
+        );
         extras.push(ExtraPart {
             path: format!("xl/drawings/drawing{did}.xml"),
             data: drawing_xml.into_bytes(),
@@ -1068,6 +1256,41 @@ fn write_sheet_package_stream<W: io::Write + Seek>(
         push(chunk_buf, b"</tableParts>");
     }
 
+    // Pivots (Task B5b): same parts as the buffered path, written through the
+    // streaming sink via `extras`; the sheet rel entry carries the pivot table.
+    if !sheet.pivots.is_empty() && features.contains(WriteFeatures::PIVOTS) {
+        for (pivot, assign) in sheet.pivots.iter().zip(pivot_assigns.iter()) {
+            let parts = build_pivot_parts(sheet, pivot, assign.cache_id, assign.part_index);
+            let Some(parts) = parts else {
+                continue;
+            };
+            for (path, data) in parts.parts {
+                let content_type = parts
+                    .content_types
+                    .iter()
+                    .find(|(p, _)| *p == format!("/{path}"))
+                    .map(|(_, c)| *c);
+                extras.push(ExtraPart {
+                    path,
+                    data,
+                    content_type,
+                });
+            }
+            // No `next_rid += 1` here: this is the last relationship of
+            // the loop body and nothing reads the counter again.
+            rels.push((
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable"
+                    .into(),
+                format!("/{}", parts.table_part),
+                None,
+            ));
+            pivot_wirings.push(PivotCacheWiring {
+                cache_id: parts.cache_id,
+                part_index: parts.part_index,
+            });
+        }
+    }
+
     push(chunk_buf, b"</worksheet>");
 
     let mut rels_xml: Option<Vec<u8>> = None;
@@ -1124,6 +1347,7 @@ fn write_sheet_package_stream<W: io::Write + Seek>(
     Ok(SheetEmit {
         rels: rels_xml,
         extras,
+        pivot_wirings,
     })
 }
 
@@ -1205,6 +1429,8 @@ fn needs_auto_features(wb: &Workbook) -> bool {
             || !s.comments.is_empty()
             || !s.tables.is_empty()
             || !s.charts.is_empty()
+            || !s.images.is_empty()
+            || !s.pivots.is_empty()
             || s.protection.is_some()
             || s.auto_filter.is_some()
             || s.tab_color_rgb.is_some()
@@ -1282,6 +1508,7 @@ fn emit_chartsheet(
     SheetEmit {
         rels: Some(cs_rels.into_bytes()),
         extras,
+        pivot_wirings: Vec::new(),
     }
 }
 
@@ -1363,6 +1590,7 @@ fn write_content_types(
     macro_enabled: bool,
     need_vml: bool,
     extra_overrides: &[(String, &'static str)],
+    media_defaults: &[(String, &'static str)],
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(2048);
     push(
@@ -1375,6 +1603,13 @@ fn write_content_types(
             &mut out,
             br#"<Default Extension="vml" ContentType="application/vnd.openxmlformats-officedocument.vmlDrawing"/>"#,
         );
+    }
+    for (ext, ct) in media_defaults {
+        push(&mut out, br#"<Default Extension=""#);
+        push_str(&mut out, ext);
+        push(&mut out, br#"" ContentType=""#);
+        push_str(&mut out, ct);
+        push(&mut out, br#""/>"#);
     }
     let wb_ct = if macro_enabled {
         "application/vnd.ms-excel.sheet.macroEnabled.main+xml"
@@ -1431,6 +1666,8 @@ fn write_workbook_rels(
     chartsheet_count: usize,
     ext_link_count: usize,
     has_sst: bool,
+    pivot_wirings: &[PivotCacheWiring],
+    pivot_rel_ids: &[String],
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(1024);
     push(
@@ -1494,6 +1731,16 @@ fn write_workbook_rels(
         write_u32(&mut out, rid);
         push(&mut out, br#""/>"#);
     }
+    for (w, rid) in pivot_wirings.iter().zip(pivot_rel_ids.iter()) {
+        push(
+            &mut out,
+            br#"<Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="pivotCache/pivotCacheDefinition"#,
+        );
+        write_u32(&mut out, (w.part_index + 1) as u32);
+        push(&mut out, br#".xml" Id=""#);
+        push_str(&mut out, rid);
+        push(&mut out, br#""/>"#);
+    }
     push(&mut out, b"</Relationships>");
     out
 }
@@ -1503,6 +1750,8 @@ fn write_workbook_xml(
     sheets: &[(String, SheetState)],
     chartsheets: &[String],
     _features: WriteFeatures,
+    pivot_wirings: &[PivotCacheWiring],
+    pivot_rel_ids: &[String],
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(1024);
     push(
@@ -1577,6 +1826,17 @@ fn write_workbook_xml(
     }
 
     push(&mut out, br#"<calcPr calcId="124519" fullCalcOnLoad="1"/>"#);
+    if !pivot_wirings.is_empty() {
+        push(&mut out, b"<pivotCaches>");
+        for (w, rid) in pivot_wirings.iter().zip(pivot_rel_ids.iter()) {
+            push(&mut out, br#"<pivotCache cacheId=""#);
+            write_u32(&mut out, w.cache_id);
+            push(&mut out, br#"" r:id=""#);
+            push_str(&mut out, rid);
+            push(&mut out, br#""/>"#);
+        }
+        push(&mut out, b"</pivotCaches>");
+    }
     push(&mut out, b"</workbook>");
     out
 }
@@ -1708,6 +1968,10 @@ pub fn write_worksheet(
     sst: &mut SstBuilder,
 ) -> Vec<u8> {
     let mut counters = PartCounters::default();
+    let mut interner = MediaInterner::new();
+    for img in &sheet.images {
+        interner.intern(&img.bytes, img.format);
+    }
     let mut out = Vec::new();
     let _ = write_sheet_package(
         sheet,
@@ -1716,6 +1980,8 @@ pub fn write_worksheet(
         &mut SstAccess::Build(sst),
         &mut counters,
         WriteFeatures::ALL,
+        &interner,
+        &[],
         &mut out,
     );
     out
@@ -1748,7 +2014,9 @@ fn preassign_counter_starts(sheets: &[Sheet], features: WriteFeatures) -> Vec<Pa
 }
 
 fn advance_counters_for_sheet(c: &mut PartCounters, sheet: &Sheet, features: WriteFeatures) {
-    if !sheet.charts.is_empty() && features.contains(WriteFeatures::CHARTS) {
+    let has_charts = !sheet.charts.is_empty() && features.contains(WriteFeatures::CHARTS);
+    let has_images = !sheet.images.is_empty() && features.contains(WriteFeatures::IMAGES);
+    if has_charts || has_images {
         c.drawing_id += 1;
         c.chart_id += sheet.charts.len();
     }
@@ -1767,6 +2035,8 @@ fn write_sheet_package(
     sst: &mut SstAccess<'_>,
     counters: &mut PartCounters,
     features: WriteFeatures,
+    interner: &MediaInterner,
+    pivot_assigns: &[PivotAssign],
     out: &mut Vec<u8>,
 ) -> SheetEmit {
     let need_r = sheet_needs_r_ns(sheet);
@@ -1941,6 +2211,7 @@ fn write_sheet_package(
     let mut rels: Vec<(String, String, Option<String>)> = Vec::new();
     let mut next_rid: usize = 0;
     let mut extras: Vec<ExtraPart> = Vec::new();
+    let mut pivot_wirings: Vec<PivotCacheWiring> = Vec::new();
 
     let do_merges =
         features.contains(WriteFeatures::MERGES) || features.contains(WriteFeatures::ALL);
@@ -1952,7 +2223,7 @@ fn write_sheet_package(
         emit_scenarios(out, &sheet.scenarios);
     }
     if let Some(af) = &sheet.auto_filter {
-        emit_auto_filter(out, af);
+        emit_sheet_auto_filter(out, af, features);
     }
     if !sheet.merges.is_empty() {
         let _ = do_merges;
@@ -1986,24 +2257,34 @@ fn write_sheet_package(
     }
     emit_breaks(out, &sheet.row_breaks, &sheet.col_breaks);
 
-    // Drawing + charts
-    if !sheet.charts.is_empty() && features.contains(WriteFeatures::CHARTS) {
+    // Drawing + charts + images (one drawing part per worksheet)
+    let has_charts = !sheet.charts.is_empty() && features.contains(WriteFeatures::CHARTS);
+    let has_images = !sheet.images.is_empty() && features.contains(WriteFeatures::IMAGES);
+    if has_charts || has_images {
         counters.drawing_id += 1;
         let did = counters.drawing_id;
         let mut chart_rel_paths = Vec::new();
-        for ch in &sheet.charts {
-            counters.chart_id += 1;
-            let cid = counters.chart_id;
-            extras.push(ExtraPart {
-                path: format!("xl/charts/chart{cid}.xml"),
-                data: write_chart_space(ch).into_bytes(),
-                content_type: Some(
-                    "application/vnd.openxmlformats-officedocument.drawingml.chart+xml",
-                ),
-            });
-            chart_rel_paths.push(format!("../charts/chart{cid}.xml"));
+        if has_charts {
+            for ch in &sheet.charts {
+                counters.chart_id += 1;
+                let cid = counters.chart_id;
+                extras.push(ExtraPart {
+                    path: format!("xl/charts/chart{cid}.xml"),
+                    data: write_chart_space(ch).into_bytes(),
+                    content_type: Some(
+                        "application/vnd.openxmlformats-officedocument.drawingml.chart+xml",
+                    ),
+                });
+                chart_rel_paths.push(format!("../charts/chart{cid}.xml"));
+            }
         }
-        let (drawing_xml, drawing_rels) = write_drawing(&sheet.charts, &chart_rel_paths);
+        let (drawing_images, media_targets) = build_drawing_images(sheet, interner);
+        let (drawing_xml, drawing_rels) = write_drawing_full(
+            &sheet.charts,
+            &chart_rel_paths,
+            &drawing_images,
+            &media_targets,
+        );
         extras.push(ExtraPart {
             path: format!("xl/drawings/drawing{did}.xml"),
             data: drawing_xml.into_bytes(),
@@ -2075,6 +2356,43 @@ fn write_sheet_package(
         push(out, b"</tableParts>");
     }
 
+    // Pivots (Task B5b): cache definition + records + table part + their rels.
+    // A pivot is referenced from a worksheet ONLY through the sheet rels — the
+    // sheet XML has no pivot element — so all parts ship as extras and the rel
+    // is appended below like a table rel.
+    if !sheet.pivots.is_empty() && features.contains(WriteFeatures::PIVOTS) {
+        for (pivot, assign) in sheet.pivots.iter().zip(pivot_assigns.iter()) {
+            let parts = build_pivot_parts(sheet, pivot, assign.cache_id, assign.part_index);
+            let Some(parts) = parts else {
+                continue;
+            };
+            for (path, data) in parts.parts {
+                let content_type = parts
+                    .content_types
+                    .iter()
+                    .find(|(p, _)| *p == format!("/{path}"))
+                    .map(|(_, c)| *c);
+                extras.push(ExtraPart {
+                    path,
+                    data,
+                    content_type,
+                });
+            }
+            // No `next_rid += 1` here: this is the last relationship of
+            // the loop body and nothing reads the counter again.
+            rels.push((
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable"
+                    .into(),
+                format!("/{}", parts.table_part),
+                None,
+            ));
+            pivot_wirings.push(PivotCacheWiring {
+                cache_id: parts.cache_id,
+                part_index: parts.part_index,
+            });
+        }
+    }
+
     push(out, b"</worksheet>");
 
     // sheet rels
@@ -2126,7 +2444,31 @@ fn write_sheet_package(
     SheetEmit {
         rels: rels_xml,
         extras,
+        pivot_wirings,
     }
+}
+
+/// Resolve a sheet's images into drawing entries. Rel ids continue after the
+/// chart rels (`rId chart_count + 1 ..`); `cNvPr` ids stay unique across both.
+/// `media_targets` are the drawing-relative media paths, aligned with `images`.
+fn build_drawing_images(
+    sheet: &Sheet,
+    interner: &MediaInterner,
+) -> (Vec<DrawingImage>, Vec<String>) {
+    let mut images = Vec::new();
+    let mut targets = Vec::new();
+    for (i, img) in sheet.images.iter().enumerate() {
+        let media_index = interner
+            .lookup(&img.bytes)
+            .expect("image was interned before sheet emission");
+        images.push(DrawingImage {
+            anchor: img.anchor.clone(),
+            rel_id: sheet.charts.len() + i + 1,
+            cnv_id: sheet.charts.len() + i + 1,
+        });
+        targets.push(interner.media_rel_target(media_index));
+    }
+    (images, targets)
 }
 
 /// Parse simple A1 (no sheet, no $) → (row, col) 1-based.
@@ -2276,6 +2618,12 @@ fn write_cell(
         }
         CellValue::Formula { text, kind, cached } => {
             push(out, b"\"");
+            // The cached result's type must be declared on the cell, or Excel
+            // reads a non-numeric `<v>` as a number and shows garbage. Numeric
+            // caches take the implicit default and emit no `t=`.
+            if let Some(cv) = cached {
+                push(out, formula_result_type(cv));
+            }
             match kind {
                 FormulaKind::Normal => {
                     push(out, b"><f>");
@@ -2339,6 +2687,19 @@ fn write_cell(
             }
             push(out, b"</c>");
         }
+    }
+}
+
+/// The `t=` attribute a formula cell needs so Excel reads its cached `<v>`
+/// with the right type. A number carries no attribute (that is the default);
+/// `str` is a computed string, which is deliberately NOT the shared-string
+/// `t="s"` form — a formula result is never an SST index.
+fn formula_result_type(cv: &CachedValue) -> &'static [u8] {
+    match cv {
+        CachedValue::Number(_) => b"",
+        CachedValue::Bool(_) => br#" t="b""#,
+        CachedValue::Error(_) => br#" t="e""#,
+        CachedValue::Str(_) => br#" t="str""#,
     }
 }
 
@@ -2411,6 +2772,7 @@ fn chrono_days(year: i32, month: u32, day: u32) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::charts::{Chart, ChartType, Series};
     use super::*;
     use std::sync::Arc;
 
@@ -2504,5 +2866,405 @@ mod tests {
         // inflate not needed; name appears in workbook.xml compressed or stored
         // just ensure write succeeds multi-sheet
         assert!(bytes.len() > 1000);
+    }
+
+    fn sample_auto_filter() -> AutoFilterMeta {
+        AutoFilterMeta {
+            ref_: crate::turbo::structural::CellRange {
+                r0: 0,
+                c0: 0,
+                r1: 5,
+                c1: 3,
+            },
+            columns: vec![crate::turbo::meta::FilterColumnMeta {
+                col_id: 0,
+                hidden_button: false,
+                show_button: true,
+                values: vec!["Alice".into(), "Carol".into()],
+                blank: Some(false),
+            }],
+        }
+    }
+
+    #[test]
+    fn auto_filter_flag_on_emits_columns() {
+        let mut sheet = Sheet::new("F");
+        sheet.auto_filter = Some(sample_auto_filter());
+        let mut counters = PartCounters::default();
+        let mut sst = SstBuilder::new();
+        let mut out = Vec::new();
+        let _ = write_sheet_package(
+            &sheet,
+            false,
+            true,
+            &mut SstAccess::Build(&mut sst),
+            &mut counters,
+            WriteFeatures::MERGES,
+            &MediaInterner::new(),
+            &[],
+            &mut out,
+        );
+        let s = String::from_utf8_lossy(&out);
+        assert!(s.contains(r#"<autoFilter ref="A1:D6">"#), "{s}");
+        assert!(s.contains("<filterColumn"), "{s}");
+        assert!(s.contains(r#"<filter val="Alice"/>"#), "{s}");
+    }
+
+    #[test]
+    fn auto_filter_flag_off_emits_no_columns() {
+        let mut sheet = Sheet::new("F");
+        sheet.auto_filter = Some(sample_auto_filter());
+        let mut counters = PartCounters::default();
+        let mut sst = SstBuilder::new();
+        let mut out = Vec::new();
+        let _ = write_sheet_package(
+            &sheet,
+            false,
+            true,
+            &mut SstAccess::Build(&mut sst),
+            &mut counters,
+            WriteFeatures::CORE,
+            &MediaInterner::new(),
+            &[],
+            &mut out,
+        );
+        let s = String::from_utf8_lossy(&out);
+        assert!(!s.contains("<filterColumn"), "{s}");
+        assert!(!s.contains("<filters"), "{s}");
+    }
+
+    #[test]
+    fn auto_filter_roundtrip_survives() {
+        let path = format!("{}/testdata/gap_sheetmeta.xlsx", env!("CARGO_MANIFEST_DIR"));
+        let read = crate::turbo::read_workbook_turbo(&path, crate::turbo::Features::SHEET_META)
+            .expect("read fixture");
+        let af = read.sheets[0]
+            .auto_filter
+            .clone()
+            .expect("fixture has an autofilter with filters");
+        assert_eq!(af.columns.len(), 1);
+        assert_eq!(
+            af.columns[0].values,
+            vec!["Alice".to_string(), "Carol".to_string()]
+        );
+
+        let mut wb = Workbook::new();
+        let mut sheet = Sheet::new("Out");
+        sheet.auto_filter = Some(af);
+        wb.sheets = vec![sheet];
+        let bytes = write_workbook_bytes(&wb).unwrap();
+        let tmp = std::env::temp_dir().join("kyrax_autofilter_roundtrip.xlsx");
+        std::fs::write(&tmp, &bytes).unwrap();
+        let re = crate::turbo::read_workbook_turbo(
+            tmp.to_str().unwrap(),
+            crate::turbo::Features::SHEET_META,
+        )
+        .expect("re-read written workbook");
+        let af2 = re.sheets[0]
+            .auto_filter
+            .as_ref()
+            .expect("autofilter survived");
+        assert_eq!(af2.columns.len(), 1);
+        assert_eq!(af2.columns[0].col_id, 0);
+        assert_eq!(af2.columns[0].hidden_button, false);
+        assert_eq!(af2.columns[0].show_button, true);
+        assert_eq!(
+            af2.columns[0].values,
+            vec!["Alice".to_string(), "Carol".to_string()]
+        );
+        assert_eq!(af2.columns[0].blank, Some(false));
+    }
+
+    // ------------------------------------------------------------------
+    // Images (T1-2a): packaging + rels + content types + dedup + determinism.
+    // ------------------------------------------------------------------
+
+    const TEST_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x01, 0x02, 0x03,
+    ];
+    const TEST_JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46];
+
+    fn entry(bytes: &[u8], name: &str) -> String {
+        let v = crate::turbo::zipmin::read_entry(bytes, name)
+            .unwrap()
+            .unwrap_or_else(|| panic!("missing entry {name}"));
+        String::from_utf8_lossy(&v).into_owned()
+    }
+
+    fn wb_with_image(png: bool) -> Workbook {
+        let mut wb = Workbook::with_sheet("Data");
+        wb.sheets[0].images.push(Image {
+            bytes: Arc::from(if png { TEST_PNG } else { TEST_JPEG }),
+            format: if png {
+                ImageFormat::Png
+            } else {
+                ImageFormat::Jpeg
+            },
+            anchor: Anchor::OneCell {
+                cell: "B2".into(),
+                col_off: 0,
+                row_off: 0,
+                width_cm: 4.0,
+                height_cm: 3.0,
+            },
+        });
+        wb
+    }
+
+    #[test]
+    fn image_roundtrips_into_valid_package() {
+        let bytes = write_workbook_bytes(&wb_with_image(true)).unwrap();
+
+        // Media part: stored verbatim, never deflated.
+        let (method, data, _) = crate::turbo::zipmin::find_entry(&bytes, "xl/media/image1.png")
+            .unwrap()
+            .unwrap();
+        assert_eq!(method, 0, "media must be STORE, not deflate");
+        assert_eq!(data, TEST_PNG);
+
+        // Worksheet references its drawing.
+        let sheet_xml = entry(&bytes, "xl/worksheets/sheet1.xml");
+        assert!(
+            sheet_xml.contains(r#"<drawing r:id="rId1"/>"#),
+            "{sheet_xml}"
+        );
+
+        // Sheet rels point at the drawing part.
+        let sheet_rels = entry(&bytes, "xl/worksheets/_rels/sheet1.xml.rels");
+        assert!(
+            sheet_rels.contains("relationships/drawing")
+                && sheet_rels.contains(r#"Target="/xl/drawings/drawing1.xml""#)
+                && sheet_rels.contains(r#"Id="rId1""#),
+            "{sheet_rels}"
+        );
+
+        // Drawing part: one pic referencing the media rel.
+        let drawing = entry(&bytes, "xl/drawings/drawing1.xml");
+        assert!(drawing.contains("<pic>"), "{drawing}");
+        assert!(drawing.contains(r#"<a:blip r:embed="rId1"/>"#), "{drawing}");
+
+        // Drawing rels: image relationship to the media part.
+        let drawing_rels = entry(&bytes, "xl/drawings/_rels/drawing1.xml.rels");
+        assert!(
+            drawing_rels.contains("relationships/image")
+                && drawing_rels.contains(r#"Target="../media/image1.png""#)
+                && drawing_rels.contains(r#"Id="rId1""#),
+            "{drawing_rels}"
+        );
+
+        // Content types: png Default + drawing Override.
+        let ct = entry(&bytes, "[Content_Types].xml");
+        assert!(
+            ct.contains(r#"<Default Extension="png" ContentType="image/png"/>"#),
+            "{ct}"
+        );
+        assert!(
+            ct.contains(r#"PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml""#),
+            "{ct}"
+        );
+    }
+
+    #[test]
+    fn image_dedup_on_two_sheets_collapses_to_one_media_part() {
+        let mut wb = Workbook::with_sheet("A");
+        wb.sheets.push(Sheet::new("B"));
+        for sh in &mut wb.sheets {
+            sh.images.push(Image {
+                bytes: Arc::from(TEST_PNG),
+                format: ImageFormat::Png,
+                anchor: Anchor::default(),
+            });
+        }
+        let bytes = write_workbook_bytes(&wb).unwrap();
+
+        // One media part shared by both sheets.
+        let (_, data, _) = crate::turbo::zipmin::find_entry(&bytes, "xl/media/image1.png")
+            .unwrap()
+            .unwrap();
+        assert_eq!(data, TEST_PNG);
+        assert!(
+            crate::turbo::zipmin::find_entry(&bytes, "xl/media/image2.png")
+                .unwrap()
+                .is_none(),
+            "dedup must not create a second media part"
+        );
+
+        // Both drawings reference image1.
+        let d1 = entry(&bytes, "xl/drawings/_rels/drawing1.xml.rels");
+        let d2 = entry(&bytes, "xl/drawings/_rels/drawing2.xml.rels");
+        assert!(d1.contains(r#"Target="../media/image1.png""#), "{d1}");
+        assert!(d2.contains(r#"Target="../media/image1.png""#), "{d2}");
+    }
+
+    #[test]
+    fn image_output_is_byte_identical_across_runs() {
+        let wb = wb_with_image(true);
+        let a = write_workbook_bytes(&wb).unwrap();
+        let b = write_workbook_bytes(&wb).unwrap();
+        assert_eq!(a, b, "two runs over the same input must be byte-identical");
+    }
+
+    #[test]
+    fn chart_and_image_share_one_drawing_part() {
+        let mut wb = Workbook::with_sheet("Data");
+        wb.sheets[0].charts.push(Chart {
+            chart_type: ChartType::Col,
+            series: vec![Series {
+                cat_ref: Some("Data!$A$1:$A$3".into()),
+                val_ref: Some("Data!$B$1:$B$3".into()),
+                ..Series::default()
+            }],
+            ..Chart::default()
+        });
+        wb.sheets[0].images.push(Image {
+            bytes: Arc::from(TEST_JPEG),
+            format: ImageFormat::Jpeg,
+            anchor: Anchor::default(),
+        });
+        let bytes = write_workbook_bytes(&wb).unwrap();
+
+        // Exactly one drawing part, containing both a chart frame and a pic.
+        let drawing = entry(&bytes, "xl/drawings/drawing1.xml");
+        assert!(drawing.contains("<graphicFrame>"), "{drawing}");
+        assert!(drawing.contains("<pic>"), "{drawing}");
+        assert!(drawing.contains(r#"<a:blip r:embed="rId2"/>"#), "{drawing}");
+        assert!(
+            crate::turbo::zipmin::find_entry(&bytes, "xl/drawings/drawing2.xml")
+                .unwrap()
+                .is_none(),
+            "images must join the chart drawing, not create a second one"
+        );
+
+        // Chart rel rId1, image rel rId2.
+        let drawing_rels = entry(&bytes, "xl/drawings/_rels/drawing1.xml.rels");
+        assert!(
+            drawing_rels.contains(r#"Id="rId1""#) && drawing_rels.contains("relationships/chart"),
+            "{drawing_rels}"
+        );
+        assert!(
+            drawing_rels.contains(r#"Id="rId2""#)
+                && drawing_rels.contains("relationships/image")
+                && drawing_rels.contains(r#"Target="../media/image1.jpeg""#),
+            "{drawing_rels}"
+        );
+
+        let ct = entry(&bytes, "[Content_Types].xml");
+        assert!(
+            ct.contains(r#"<Default Extension="jpeg" ContentType="image/jpeg"/>"#),
+            "{ct}"
+        );
+    }
+
+    fn wb_with_three_anchor_images() -> Workbook {
+        let mut wb = Workbook::with_sheet("Data");
+        wb.sheets[0].images.push(Image {
+            bytes: Arc::from(TEST_PNG),
+            format: ImageFormat::Png,
+            anchor: Anchor::OneCell {
+                cell: "B2".into(),
+                col_off: 76200,
+                row_off: 50800,
+                width_cm: 4.0,
+                height_cm: 3.0,
+            },
+        });
+        wb.sheets[0].images.push(Image {
+            bytes: Arc::from(TEST_JPEG),
+            format: ImageFormat::Jpeg,
+            anchor: Anchor::TwoCell {
+                from_cell: "C3".into(),
+                from_off: (1000, 2000),
+                to_cell: "F6".into(),
+                to_off: (3000, 4000),
+                edit_as: Some("oneCell".into()),
+            },
+        });
+        wb.sheets[0].images.push(Image {
+            bytes: Arc::from(TEST_PNG),
+            format: ImageFormat::Png,
+            anchor: Anchor::Absolute {
+                x_emu: 1_000_000,
+                y_emu: 2_000_000,
+                cx_emu: 3_000_000,
+                cy_emu: 4_000_000,
+            },
+        });
+        wb
+    }
+
+    #[test]
+    fn all_three_anchor_kinds_emit_offsets_and_edit_as() {
+        let bytes = write_workbook_bytes(&wb_with_three_anchor_images()).unwrap();
+        let drawing = entry(&bytes, "xl/drawings/drawing1.xml");
+        // oneCell: cell B2 -> col 1 / row 1 (0-based) with EMU offsets.
+        assert!(
+            drawing.contains(r#"<oneCellAnchor><from><col>1</col><colOff>76200</colOff><row>1</row><rowOff>50800</rowOff></from>"#),
+            "{drawing}"
+        );
+        let cx = crate::turbo::write::charts::cm_to_emu(4.0);
+        let cy = crate::turbo::write::charts::cm_to_emu(3.0);
+        assert!(
+            drawing.contains(&format!(r#"<ext cx="{cx}" cy="{cy}"/>"#)),
+            "{drawing}"
+        );
+        // twoCell: from C3, to F6, with offsets and editAs.
+        assert!(
+            drawing.contains(
+                r#"<twoCellAnchor editAs="oneCell"><from><col>2</col><colOff>1000</colOff><row>2</row><rowOff>2000</rowOff></from><to><col>5</col><colOff>3000</colOff><row>5</row><rowOff>4000</rowOff></to>"#
+            ),
+            "{drawing}"
+        );
+        // absolute: pos + ext in EMU.
+        assert!(
+            drawing.contains(
+                r#"<absoluteAnchor><pos x="1000000" y="2000000"/><ext cx="3000000" cy="4000000"/>"#
+            ),
+            "{drawing}"
+        );
+    }
+
+    #[test]
+    fn dedup_with_different_anchors_collapses_media_but_keeps_both_pics() {
+        let wb = wb_with_three_anchor_images();
+        let bytes = write_workbook_bytes(&wb).unwrap();
+
+        // Identical PNG bytes (images 1 and 3) share ONE media part; the JPEG is
+        // a second part. Two distinct byte sets -> exactly two media parts.
+        let (_, png_data, _) = crate::turbo::zipmin::find_entry(&bytes, "xl/media/image1.png")
+            .unwrap()
+            .unwrap();
+        assert_eq!(png_data, TEST_PNG);
+        assert!(
+            crate::turbo::zipmin::find_entry(&bytes, "xl/media/image2.png")
+                .unwrap()
+                .is_none(),
+            "second PNG must be deduped into image1.png"
+        );
+        let (_, jpeg_data, _) = crate::turbo::zipmin::find_entry(&bytes, "xl/media/image2.jpeg")
+            .unwrap()
+            .unwrap();
+        assert_eq!(jpeg_data, TEST_JPEG);
+
+        // Two anchor entries reference the SAME media part (rId1 and rId3).
+        let drawing = entry(&bytes, "xl/drawings/drawing1.xml");
+        assert_eq!(drawing.matches("<pic>").count(), 3, "{drawing}");
+        assert_eq!(
+            drawing.matches(r#"<a:blip r:embed="#).count(),
+            3,
+            "every pic needs a blip: {drawing}"
+        );
+        let drels = entry(&bytes, "xl/drawings/_rels/drawing1.xml.rels");
+        let target = r#"Target="../media/image1.png""#;
+        let first = drels.find(target).expect("media rel present");
+        assert!(
+            drels[first + 1..].contains(target),
+            "identical bytes with different anchors must both reference image1.png: {drels}"
+        );
+        assert_eq!(
+            drels.matches(target).count(),
+            2,
+            "exactly two rels must point at the shared media part: {drels}"
+        );
     }
 }

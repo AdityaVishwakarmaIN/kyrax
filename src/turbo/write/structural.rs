@@ -3,10 +3,12 @@
 
 use super::charts::coord_to_tuple;
 use super::model::{
-    Comment, DefinedName, DocProps, ExternalLink, HeaderFooter, Hyperlink, PageMargins, PageSetup,
-    PrintOptions, Scenario, Sheet, SheetProtection, TableDef, Workbook,
+    Comment, DefinedName, DocProps, HeaderFooter, Hyperlink, PageMargins, PageSetup, PrintOptions,
+    Scenario, Sheet, SheetProtection, TableDef, Workbook,
 };
 use super::xml::{escape_text, push, push_str, write_escaped_attr, write_f64, write_u32};
+use crate::turbo::meta::FilterColumnMeta;
+use crate::turbo::range_a1;
 use std::collections::HashMap;
 
 pub const SHEET_NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
@@ -76,10 +78,13 @@ pub fn abs_range(r: &str) -> String {
 
 pub fn collect_defined_names(wb: &Workbook) -> Vec<DefinedName> {
     let mut names = wb.defined_names.clone();
+    // FOUND: the writer already emits the hidden, sheet-scoped `_xlnm._FilterDatabase`
+    // defined name whenever a sheet carries an autoFilter. Excel requires it or it
+    // treats the filter as absent; it is always added here alongside `<autoFilter>`.
     for (idx, sheet) in wb.sheets.iter().enumerate() {
         let quoted = quote_sheetname(&sheet.name);
         if let Some(af) = &sheet.auto_filter {
-            let abs = abs_range(af);
+            let abs = abs_range(&range_a1(&af.ref_));
             names.push(DefinedName {
                 name: "_FilterDatabase".into(),
                 value: format!("{quoted}!{abs}"),
@@ -332,10 +337,54 @@ pub fn emit_scenarios(out: &mut Vec<u8>, scenarios: &[Scenario]) {
     push(out, b"</scenarios>");
 }
 
-pub fn emit_auto_filter(out: &mut Vec<u8>, ref_: &str) {
+/// Emit `<autoFilter ref="...">` plus its `filterColumn` children.
+///
+/// We emit exactly what the reader parses (see `crate::turbo::meta::scan_auto_filter`):
+/// `filterColumn` with `colId` / `hiddenButton` / `showButton`, containing a
+/// `<filters>` block with an optional `blank` attribute and `<filter val="..."/>`
+/// children. Known remaining read/write gaps (no read model, so nothing to emit):
+/// `customFilters` / `customFilter`, `top10`, `dynamicFilter`, `colorFilter`,
+/// `iconFilter`, and `sortState` / `sortCondition`.
+pub fn emit_auto_filter(out: &mut Vec<u8>, ref_: &str, columns: &[FilterColumnMeta]) {
     push(out, br#"<autoFilter ref=""#);
     write_escaped_attr(out, ref_);
-    push(out, br#""/>"#);
+    if columns.is_empty() {
+        push(out, br#""/>"#);
+        return;
+    }
+    push(out, b"\">");
+    for col in columns {
+        push(out, br#"<filterColumn colId=""#);
+        write_u32(out, col.col_id);
+        push(out, br#"" hiddenButton=""#);
+        write_u32(out, col.hidden_button as u32);
+        push(out, br#"" showButton=""#);
+        write_u32(out, col.show_button as u32);
+        if col.values.is_empty() && col.blank.is_none() {
+            push(out, br#""/>"#);
+            continue;
+        }
+        push(out, b"\">");
+        push(out, b"<filters");
+        if let Some(blank) = col.blank {
+            push(out, br#" blank=""#);
+            write_u32(out, blank as u32);
+            push(out, b"\"");
+        }
+        if col.values.is_empty() {
+            push(out, br#"/>"#);
+        } else {
+            push(out, b">");
+            for v in &col.values {
+                push(out, br#"<filter val=""#);
+                write_escaped_attr(out, v);
+                push(out, br#""/>"#);
+            }
+            push(out, b"</filters>");
+        }
+        push(out, b"</filterColumn>");
+    }
+    push(out, b"</autoFilter>");
 }
 
 pub fn emit_merges(out: &mut Vec<u8>, merges: &[String]) {
@@ -583,6 +632,9 @@ pub fn emit_defined_names_xml(names: &[DefinedName]) -> String {
     s
 }
 
+// Kept: the single predicate for "does this sheet need a structural part".
+// The writer inlines the check per part; this is the canonical statement.
+#[allow(dead_code)]
 pub fn sheet_has_structural(sheet: &Sheet) -> bool {
     sheet.tab_color_rgb.is_some()
         || sheet.protection.is_some()
@@ -616,5 +668,68 @@ mod tests {
     #[test]
     fn abs_range_basic() {
         assert_eq!(abs_range("A1:C5"), "$A$1:$C$5");
+    }
+
+    fn fc(col_id: u32, values: Vec<&str>, blank: Option<bool>) -> FilterColumnMeta {
+        FilterColumnMeta {
+            col_id,
+            hidden_button: false,
+            show_button: true,
+            values: values.into_iter().map(String::from).collect(),
+            blank,
+        }
+    }
+
+    #[test]
+    fn emit_auto_filter_value_filters() {
+        let mut out = Vec::new();
+        let cols = vec![fc(0, vec!["Alice", "Carol"], Some(false))];
+        emit_auto_filter(&mut out, "A1:D6", &cols);
+        let s = String::from_utf8_lossy(&out);
+        assert!(s.contains(r#"<autoFilter ref="A1:D6">"#), "{s}");
+        assert!(
+            s.contains(r#"<filterColumn colId="0" hiddenButton="0" showButton="1">"#),
+            "{s}"
+        );
+        assert!(s.contains(r#"<filters blank="0">"#), "{s}");
+        assert!(s.contains(r#"<filter val="Alice"/>"#), "{s}");
+        assert!(s.contains(r#"<filter val="Carol"/>"#), "{s}");
+        assert!(s.ends_with("</autoFilter>"), "{s}");
+    }
+
+    #[test]
+    fn emit_auto_filter_blank_only_self_closes_filters() {
+        let mut out = Vec::new();
+        let mut col = fc(3, vec![], Some(true));
+        col.hidden_button = true;
+        col.show_button = false;
+        emit_auto_filter(&mut out, "A1:B2", &[col]);
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            s.contains(r#"<filterColumn colId="3" hiddenButton="1" showButton="0">"#),
+            "{s}"
+        );
+        assert!(s.contains(r#"<filters blank="1"/>"#), "{s}");
+    }
+
+    #[test]
+    fn emit_auto_filter_empty_column_self_closes() {
+        let mut out = Vec::new();
+        emit_auto_filter(&mut out, "A1:C1", &[fc(1, vec![], None)]);
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            s.contains(r#"<filterColumn colId="1" hiddenButton="0" showButton="1"/>"#),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn emit_auto_filter_no_columns_self_closes() {
+        let mut out = Vec::new();
+        emit_auto_filter(&mut out, "A1:C3", &[]);
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            r#"<autoFilter ref="A1:C3"/>"#
+        );
     }
 }

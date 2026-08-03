@@ -61,12 +61,38 @@ pub struct PrecompressedPart {
     pub data: Vec<u8>,
 }
 
-/// Deflate (or store) one buffer with the same level-6 policy as [`ZipWriter`].
+/// Default deflate level for every part we write.
+///
+/// **5, not the more obvious 6** — chosen by measurement, not by taste. See the
+/// `coordinator_level_race` test below, which races every libdeflate level over
+/// three sheet shapes:
+///
+/// | corpus | level 5 time vs 6 | level 5 size vs 6 |
+/// |---|---:|---:|
+/// | mixed (1/3 strings, the typical export) | **0.80x** | **1.0000x — byte-identical** |
+/// | numeric only | **0.71x** | 1.0018x |
+/// | high-entropy strings (worst case) | **0.84x** | 1.0110x |
+///
+/// So level 5 is 1.19-1.4x faster for at most 1.1% more bytes, and on the most
+/// common shape it produces exactly the same output as 6. That is free CPU.
+///
+/// Going higher is worse than useless on this data: level 7 costs 1.49-1.89x
+/// the time and level 9 costs 5.55-9.03x, both for a size change of 1.6% or
+/// less — on the mixed corpus level 9 is 9.03x slower for 0.01% smaller.
+///
+/// We optimise for CPU-seconds/file (plans/northstar_metric.md), and output
+/// size is not the north star, but it is not free either — which is why this
+/// stops at 5 rather than dropping to level 1 (2.1-2.6x faster, but 11-15%
+/// larger, and those bytes cost storage and transfer on every file forever).
+const DEFAULT_DEFLATE_LEVEL: i32 = 5;
+
+/// Deflate (or store) one buffer with the same level policy as [`ZipWriter`].
 /// Thread-safe: uses thread-local compress scratch.
 pub fn compress_part(name: String, data: &[u8]) -> PrecompressedPart {
     let crc32 = crc32_ieee(data);
     let uncomp_size = data.len() as u64;
-    let level = CompressionLvl::new(6).unwrap_or_else(|_| CompressionLvl::default());
+    let level =
+        CompressionLvl::new(DEFAULT_DEFLATE_LEVEL).unwrap_or_else(|_| CompressionLvl::default());
     let (method, payload) = deflate_or_store_level(data, level);
     PrecompressedPart {
         name,
@@ -106,7 +132,8 @@ impl ZipWriter {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
-            level: CompressionLvl::new(6).unwrap_or_else(|_| CompressionLvl::default()),
+            level: CompressionLvl::new(DEFAULT_DEFLATE_LEVEL)
+                .unwrap_or_else(|_| CompressionLvl::default()),
         }
     }
 
@@ -323,13 +350,19 @@ pub struct StreamingZipWriter<W: Write + Seek> {
     level: CompressionLvl,
 }
 
+// `with_level` and `add_precompressed` mirror the in-memory `ZipWriter` API.
+// The streaming writer is used today only by the bounded-memory write path,
+// which needs neither — but an API where the two writers diverge is worse than
+// two unused methods.
+#[allow(dead_code)]
 impl<W: Write + Seek> StreamingZipWriter<W> {
     pub fn new(w: W) -> Self {
         Self {
             w,
             entries: Vec::new(),
             current: None,
-            level: CompressionLvl::new(6).unwrap_or_else(|_| CompressionLvl::default()),
+            level: CompressionLvl::new(DEFAULT_DEFLATE_LEVEL)
+                .unwrap_or_else(|_| CompressionLvl::default()),
         }
     }
 
@@ -771,9 +804,148 @@ mod tests {
                 .any(|w| w == SIG_ZIP64_LOCATOR.to_le_bytes())
         );
 
-        let map_res = crate::turbo::zipmin::ArchiveMap::parse(std::sync::Arc::new(zip_bytes));
-        assert!(map_res.is_err());
-        let err_msg = format!("{:?}", map_res.err().unwrap());
-        assert!(err_msg.contains("Zip64"));
+        // A Zip64 archive written by the turbo writer must round-trip through
+        // both read paths: find_entry/read_entry and ArchiveMap::parse.
+        let (m, c, u) = crate::turbo::zipmin::find_entry(&zip_bytes, "big.bin")
+            .unwrap()
+            .unwrap();
+        assert_eq!(m, METHOD_STORE);
+        assert_eq!(c, b"dummy data");
+        assert_eq!(u, 0xFFFF_FFFF);
+
+        let read = crate::turbo::zipmin::read_entry(&zip_bytes, "big.bin").unwrap();
+        assert_eq!(read, Some(b"dummy data".to_vec()));
+
+        let map = crate::turbo::zipmin::ArchiveMap::parse(std::sync::Arc::new(zip_bytes)).unwrap();
+        let entry = map.entries.get("big.bin").expect("entry present");
+        assert_eq!(entry.compression_method, METHOD_STORE);
+        assert_eq!(entry.compressed_size, 10);
+        assert_eq!(entry.uncompressed_size, 0xFFFF_FFFF);
+    }
+}
+
+#[cfg(test)]
+mod coordinator_level_race {
+    //! E6 — is the hardcoded level 6 the right default?
+    //!
+    //! The write path had never been profiled. It costs 447-641 ns/cell against
+    //! the eager read path's ~153, and `CompressionLvl::new(6)` was chosen
+    //! without measurement. This races every level libdeflate offers on
+    //! realistic sheet XML so the default can be argued from data.
+    //!
+    //!     cargo test --release --lib --features __arrow coordinator_race -- --nocapture
+    use super::*;
+    use std::time::Instant;
+
+    fn sheet_xml(rows: usize) -> Vec<u8> {
+        let mut s = String::with_capacity(rows * 8 * 44);
+        s.push_str("<worksheet><sheetData>");
+        for r in 1..=rows {
+            s.push_str(&format!("<row r=\"{r}\">"));
+            for c in 0..8usize {
+                let col = (b'A' + c as u8) as char;
+                if (r + c) % 3 == 0 {
+                    s.push_str(&format!(
+                        "<c r=\"{col}{r}\" t=\"inlineStr\"><is><t>w{r}_{c}</t></is></c>"
+                    ));
+                } else {
+                    s.push_str(&format!("<c r=\"{col}{r}\"><v>{}.{}</v></c>", r, c));
+                }
+            }
+            s.push_str("</row>");
+        }
+        s.push_str("</sheetData></worksheet>");
+        s.into_bytes()
+    }
+
+    fn numeric_xml(rows: usize) -> Vec<u8> {
+        let mut s = String::with_capacity(rows * 8 * 30);
+        s.push_str("<worksheet><sheetData>");
+        for r in 1..=rows {
+            s.push_str(&format!("<row r=\"{r}\">"));
+            for c in 0..8usize {
+                let col = (b'A' + c as u8) as char;
+                s.push_str(&format!("<c r=\"{col}{r}\"><v>{}.{}</v></c>", r * 7 + c, c));
+            }
+            s.push_str("</row>");
+        }
+        s.push_str("</sheetData></worksheet>");
+        s.into_bytes()
+    }
+
+    /// High-entropy strings: the WORST case for compression, and the case where
+    /// a lower level might genuinely cost size rather than being free.
+    fn random_str_xml(rows: usize) -> Vec<u8> {
+        let mut seed = 0x2545F491_4F6CDD1Du64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut s = String::with_capacity(rows * 8 * 40);
+        s.push_str("<worksheet><sheetData>");
+        for r in 1..=rows {
+            s.push_str(&format!("<row r=\"{r}\">"));
+            for c in 0..8usize {
+                let col = (b'A' + c as u8) as char;
+                s.push_str(&format!(
+                    "<c r=\"{col}{r}\" t=\"inlineStr\"><is><t>{:x}</t></is></c>",
+                    rnd()
+                ));
+            }
+            s.push_str("</row>");
+        }
+        s.push_str("</sheetData></worksheet>");
+        s.into_bytes()
+    }
+
+    #[test]
+    #[ignore = "measurement, not a gate: cargo test --release --lib --features __arrow coordinator_race -- --ignored --nocapture"]
+    fn coordinator_race_compression_levels() {
+        for (name, data) in [
+            ("mixed (1/3 strings)", sheet_xml(60_000)),
+            ("numeric only", numeric_xml(60_000)),
+            ("high-entropy strings", random_str_xml(60_000)),
+        ] {
+            let raw = data.len() as f64;
+            println!(
+                "
+=== {name}: {:.2} MB raw ===",
+                raw / 1e6
+            );
+            println!(
+                "{:>4} {:>9} {:>9} {:>8}  {}",
+                "lvl", "ms", "MB out", "ratio", "vs level 6"
+            );
+            let mut base_ms = 0f64;
+            let mut base_sz = 0f64;
+            let mut rows: Vec<(i32, f64, usize)> = Vec::new();
+            for lvl in [1i32, 3, 4, 5, 6, 7, 9] {
+                let mut best = f64::MAX;
+                let mut sz = 0usize;
+                for _ in 0..3 {
+                    let t = Instant::now();
+                    let mut z = ZipWriter::with_level(lvl);
+                    z.add("xl/worksheets/sheet1.xml", &data);
+                    sz = z.finish().unwrap().len();
+                    best = best.min(t.elapsed().as_secs_f64());
+                }
+                rows.push((lvl, best * 1000.0, sz));
+                if lvl == 6 {
+                    base_ms = best * 1000.0;
+                    base_sz = sz as f64;
+                }
+            }
+            for (lvl, ms, sz) in rows {
+                println!(
+                    "{lvl:>4} {ms:>9.1} {:>9.3} {:>8.4}  {:.2}x time, {:.4}x size",
+                    sz as f64 / 1e6,
+                    sz as f64 / raw,
+                    ms / base_ms,
+                    sz as f64 / base_sz
+                );
+            }
+        }
     }
 }

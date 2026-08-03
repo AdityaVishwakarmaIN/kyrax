@@ -17,11 +17,12 @@ use pyo3::{
 use super::{
     ActivePane, Alignment, AutoFilterMeta, Border, CKind, CellError, CellRange, CfRuleRec,
     ChartAnchor, ChartMeta, ColDim, Color, DataValidationRec, DefinedName, Features, Fill, Font,
-    FormulaColumn, HeaderFooterMeta, Hyperlink, LinkTarget, NameKind, NamedStyleRec,
+    FormulaColumn, HeaderFooterMeta, Hyperlink, ImageMeta, LinkTarget, NameKind, NamedStyleRec,
     PageMarginsMeta, PageSetupMeta, Pane, PaneState, Person, PivotTableMeta, PrintOptionsMeta,
-    Protection, RowDim, Scope, SheetComments, SheetFormat, SheetKind, SheetProtectionMeta,
-    SheetState, SheetViewMeta, Side, StyleTable, Table, ThreadedComment, TurboError, VbaProject,
-    WorkbookProps, a1, list_sheet_names, range_a1, read_workbook_turbo_sheet,
+    Protection, ReadImageAnchor, ReadImageMarker, RowDim, Scope, SheetComments, SheetFormat,
+    SheetKind, SheetProtectionMeta, SheetState, SheetViewMeta, Side, StyleTable, Table,
+    ThreadedComment, TurboError, VbaProject, WorkbookProps, a1, list_sheet_names_with_password,
+    range_a1, read_workbook_turbo_sheet_with_password,
 };
 use crate::error::{KyraxError, KyraxErrorKind, py_errors::IntoPyResult};
 
@@ -60,6 +61,7 @@ fn parse_features(features: Option<&Bound<'_, PyAny>>) -> PyResult<Features> {
                 "validations" => Features::VALIDATIONS,
                 "cond_format" => Features::COND_FORMAT,
                 "charts" => Features::CHARTS,
+                "images" => Features::IMAGES,
                 "pivots" => Features::PIVOTS,
                 "vba" => Features::VBA,
                 "all" => Features::ALL,
@@ -68,7 +70,7 @@ fn parse_features(features: Option<&Bound<'_, PyAny>>) -> PyResult<Features> {
                         "unknown feature {other:?}; expected one of \
                          styles|formulas|merges|defined_names|tables|hyperlinks|comments|\
                          sheet_meta|page_setup|workbook_meta|validations|cond_format|\
-                         charts|pivots|vba"
+                         charts|images|pivots|vba"
                     )));
                 }
             };
@@ -443,6 +445,7 @@ pub struct PyTurboSheet {
     comments: Option<SheetComments>,
     threaded_comments: Option<Vec<ThreadedComment>>,
     charts: Option<Vec<ChartMeta>>,
+    images: Option<Vec<ImageMeta>>,
     pivots: Option<Vec<PivotTableMeta>>,
     // Stream A
     sheet_state: SheetState,
@@ -483,6 +486,7 @@ impl PyTurboSheet {
             comments: sheet.comments,
             threaded_comments: sheet.threaded_comments,
             charts: sheet.charts,
+            images: sheet.images,
             pivots: sheet.pivots,
             sheet_state: sheet.sheet_state,
             sheet_kind: sheet.sheet_kind,
@@ -696,6 +700,20 @@ impl PyTurboSheet {
                 let mut items = Vec::with_capacity(cs.len());
                 for c in cs {
                     items.push(chart_to_dict(py, c)?);
+                }
+                Ok(Some(PyList::new(py, items)?))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Images on this sheet (bytes + anchor); None if images not requested.
+    fn images<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyList>>> {
+        match &self.images {
+            Some(imgs) => {
+                let mut items = Vec::with_capacity(imgs.len());
+                for im in imgs {
+                    items.push(image_to_dict(py, im)?);
                 }
                 Ok(Some(PyList::new(py, items)?))
             }
@@ -1222,6 +1240,8 @@ fn dxf_to_dict<'py>(py: Python<'py>, dxf: &super::Dxf) -> PyResult<Bound<'py, Py
 #[pyclass(name = "_TurboReader", module = "kyrax._kyrax")]
 pub struct PyTurboReader {
     path: String,
+    /// Password for an encrypted workbook (None = not supplied / not encrypted).
+    password: Option<String>,
     sheet_names: Vec<String>,
     defined_names: Option<Vec<DefinedName>>,
     tables: Option<Vec<Table>>,
@@ -1253,8 +1273,11 @@ impl PyTurboReader {
         // Resolve before I/O so the selective path inflates only this sheet.
         let sheet_idx = resolve_sheet_index(idx_or_name, &self.sheet_names)?;
         let path = self.path.clone();
+        let password = self.password.clone();
         let wb = py
-            .detach(|| read_workbook_turbo_sheet(&path, feat, sheet_idx))
+            .detach(|| {
+                read_workbook_turbo_sheet_with_password(&path, feat, sheet_idx, password.as_deref())
+            })
             .map_err(turbo_err_to_py)?;
 
         // Cache workbook-level sidecars when requested
@@ -1459,6 +1482,50 @@ fn chart_to_dict<'py>(py: Python<'py>, c: &ChartMeta) -> PyResult<Bound<'py, PyD
     Ok(d)
 }
 
+fn image_marker_to_dict<'py>(
+    py: Python<'py>,
+    m: &ReadImageMarker,
+    d: &Bound<'py, PyDict>,
+    key: &str,
+) -> PyResult<()> {
+    let md = PyDict::new(py);
+    md.set_item("col", m.col)?;
+    md.set_item("col_off", m.col_off)?;
+    md.set_item("row", m.row)?;
+    md.set_item("row_off", m.row_off)?;
+    d.set_item(key, md)?;
+    Ok(())
+}
+
+fn image_to_dict<'py>(py: Python<'py>, im: &ImageMeta) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("sheet", im.sheet)?;
+    d.set_item("part", &im.part)?;
+    d.set_item("data", pyo3::types::PyBytes::new(py, &im.bytes))?;
+    let anchor = PyDict::new(py);
+    anchor.set_item("kind", im.anchor.kind_str())?;
+    match &im.anchor {
+        ReadImageAnchor::Absolute { x, y, cx, cy } => {
+            anchor.set_item("x", x)?;
+            anchor.set_item("y", y)?;
+            anchor.set_item("cx", cx)?;
+            anchor.set_item("cy", cy)?;
+        }
+        ReadImageAnchor::OneCell { from, cx, cy } => {
+            image_marker_to_dict(py, from, &anchor, "from")?;
+            anchor.set_item("cx", cx)?;
+            anchor.set_item("cy", cy)?;
+        }
+        ReadImageAnchor::TwoCell { from, to, edit_as } => {
+            image_marker_to_dict(py, from, &anchor, "from")?;
+            image_marker_to_dict(py, to, &anchor, "to")?;
+            anchor.set_item("edit_as", edit_as.as_deref())?;
+        }
+    }
+    d.set_item("anchor", anchor)?;
+    Ok(d)
+}
+
 fn pivot_to_dict<'py>(py: Python<'py>, p: &PivotTableMeta) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("sheet", p.sheet)?;
@@ -1546,11 +1613,16 @@ fn resolve_sheet_index(idx_or_name: &Bound<'_, PyAny>, names: &[String]) -> PyRe
 // ---------------------------------------------------------------------------
 
 /// Open an XLSX file for turbo reading (sheet names only; data on `load_sheet`).
+///
+/// `password` opens an ECMA-376 encrypted workbook; a plain workbook ignores it.
 #[pyfunction(name = "read_excel_turbo")]
-pub fn py_read_excel_turbo(path: &str) -> PyResult<PyTurboReader> {
-    let sheet_names = list_sheet_names(path).map_err(turbo_err_to_py)?;
+#[pyo3(signature = (path, password = None))]
+pub fn py_read_excel_turbo(path: &str, password: Option<String>) -> PyResult<PyTurboReader> {
+    let sheet_names =
+        list_sheet_names_with_password(path, password.as_deref()).map_err(turbo_err_to_py)?;
     Ok(PyTurboReader {
         path: path.to_owned(),
+        password,
         sheet_names,
         defined_names: None,
         tables: None,
@@ -1559,4 +1631,37 @@ pub fn py_read_excel_turbo(path: &str) -> PyResult<PyTurboReader> {
         persons: None,
         vba: None,
     })
+}
+
+/// Detect an ECMA-376 encrypted workbook (OLE/CFB with an `EncryptionInfo`
+/// stream) without a password. Never raises for an unreadable file.
+#[pyfunction(name = "is_encrypted")]
+pub fn py_is_encrypted(path: &str) -> PyResult<bool> {
+    let data = std::fs::read(path).map_err(|e| turbo_err_to_py(TurboError::Io(e)))?;
+    Ok(crate::turbo::crypto::is_encrypted(&data))
+}
+
+/// Report an encrypted workbook's scheme, algorithm and spin count WITHOUT a
+/// password. Raises when the file is not an encrypted workbook.
+#[cfg(feature = "encryption")]
+#[pyfunction(name = "encryption_info")]
+pub fn py_encryption_info<'py>(py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyAny>> {
+    let data = py
+        .detach(|| std::fs::read(path))
+        .map_err(|e: std::io::Error| turbo_err_to_py(TurboError::Io(e)))?;
+    let meta = crate::turbo::crypto::encryption_info(&data)
+        .map_err(|e| turbo_err_to_py(TurboError::Format(e.to_string())))?;
+    let d = PyDict::new(py);
+    d.set_item("scheme", meta.scheme)?;
+    d.set_item("cipher_algorithm", &meta.cipher_algorithm)?;
+    d.set_item("hash_algorithm", &meta.hash_algorithm)?;
+    d.set_item("key_bits", meta.key_bits)?;
+    d.set_item("block_size", meta.block_size)?;
+    d.set_item("salt_size", meta.salt_size)?;
+    d.set_item("spin_count", meta.spin_count)?;
+    match &meta.message {
+        Some(m) => d.set_item("message", m)?,
+        None => d.set_item("message", py.None())?,
+    }
+    Ok(d.into_any())
 }

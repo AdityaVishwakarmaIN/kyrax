@@ -1,13 +1,20 @@
 //! Sparse overlay table for edit_excel / load_workbook (Plan 01).
 
 use ahash::{AHashMap, AHashSet};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use crate::turbo::error::{TurboError, TurboResult};
-use crate::turbo::write::model::{
-    CachedValue, Cell, CellValue, Row, Sheet, SstBuilder, Workbook, WriteOptions,
+use crate::turbo::fixup::{
+    fixup_pivot_cache_xml, fixup_pivot_table_xml, fixup_sheet_xml, fixup_table_part_xml,
+    fixup_workbook_xml, pivot_cache_source_ref, set_pivot_cache_refresh_on_load,
 };
+use crate::turbo::mutate::{delete_cols, delete_rows, insert_cols, insert_rows, move_range};
+use crate::turbo::refshift::Axis;
+use crate::turbo::structural::{
+    RelKind, parse_rels, parse_workbook_pivot_caches, resolve_zip_path,
+};
+use crate::turbo::write::model::{CachedValue, Cell, CellValue, Row, Sheet, SstBuilder};
 use crate::turbo::write::style_engine::{StyleDesc, StyleEngine};
 use crate::turbo::write::writer::write_worksheet;
 use crate::turbo::write::xml::{
@@ -21,7 +28,175 @@ use crate::turbo::zipmin::ArchiveMap;
 pub struct SheetOverlay {
     pub modified_cells: AHashMap<(u32, u32), CellValue>,
     pub modified_styles: AHashMap<(u32, u32), StyleDesc>,
+    /// Row/column insert-delete operations recorded in user order. Applied at
+    /// save time, each as mutate-splice then fixup, BEFORE cell edits.
+    pub ops: Vec<SheetOp>,
     pub is_dirty: bool,
+}
+
+impl SheetOverlay {
+    /// Insert `amount` blank rows at 1-based `at` (openpyxl semantics).
+    pub fn insert_rows(&mut self, at: u32, amount: u32) {
+        if amount == 0 {
+            return;
+        }
+        self.ops.push(SheetOp::InsertRows { at, amount });
+        self.is_dirty = true;
+    }
+
+    /// Delete `amount` rows starting at 1-based `at` (openpyxl semantics).
+    pub fn delete_rows(&mut self, at: u32, amount: u32) {
+        if amount == 0 {
+            return;
+        }
+        self.ops.push(SheetOp::DeleteRows { at, amount });
+        self.is_dirty = true;
+    }
+
+    /// Insert `amount` blank columns at 1-based `at` (openpyxl semantics).
+    pub fn insert_cols(&mut self, at: u32, amount: u32) {
+        if amount == 0 {
+            return;
+        }
+        self.ops.push(SheetOp::InsertCols { at, amount });
+        self.is_dirty = true;
+    }
+
+    /// Delete `amount` columns starting at 1-based `at` (openpyxl semantics).
+    pub fn delete_cols(&mut self, at: u32, amount: u32) {
+        if amount == 0 {
+            return;
+        }
+        self.ops.push(SheetOp::DeleteCols { at, amount });
+        self.is_dirty = true;
+    }
+
+    /// Relocate the rectangle `(r1,c1)..(r2,c2)` (1-based, inclusive) by `rows`,
+    /// `cols` (signed). Destination cells are overwritten and vacated source
+    /// cells become empty; nothing else on the sheet shifts. `translate` shifts
+    /// formula bodies inside the moved range (openpyxl `move_range` semantics).
+    #[allow(clippy::too_many_arguments)]
+    pub fn move_range(
+        &mut self,
+        r1: u32,
+        c1: u32,
+        r2: u32,
+        c2: u32,
+        rows: i64,
+        cols: i64,
+        translate: bool,
+    ) {
+        if rows == 0 && cols == 0 {
+            return;
+        }
+        self.ops.push(SheetOp::MoveRange {
+            r1,
+            c1,
+            r2,
+            c2,
+            rows,
+            cols,
+            translate,
+        });
+        self.is_dirty = true;
+    }
+}
+
+/// One recorded row/column operation on an editable sheet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SheetOp {
+    InsertRows {
+        at: u32,
+        amount: u32,
+    },
+    DeleteRows {
+        at: u32,
+        amount: u32,
+    },
+    InsertCols {
+        at: u32,
+        amount: u32,
+    },
+    DeleteCols {
+        at: u32,
+        amount: u32,
+    },
+    MoveRange {
+        r1: u32,
+        c1: u32,
+        r2: u32,
+        c2: u32,
+        rows: i64,
+        cols: i64,
+        translate: bool,
+    },
+}
+
+impl SheetOp {
+    /// The grid axis the operation shifts. Only grid mutations have a single
+    /// axis; `MoveRange` moves on both axes and its single-axis helpers are
+    /// never consulted (the save loop applies it directly).
+    pub fn axis(&self) -> Axis {
+        match self {
+            SheetOp::InsertRows { .. } | SheetOp::DeleteRows { .. } => Axis::Row,
+            SheetOp::InsertCols { .. } | SheetOp::DeleteCols { .. } => Axis::Col,
+            SheetOp::MoveRange { .. } => Axis::Row,
+        }
+    }
+
+    /// The 1-based first affected index. `MoveRange` returns 0; its single-axis
+    /// helpers are never consulted.
+    pub fn at(&self) -> u32 {
+        match self {
+            SheetOp::InsertRows { at, .. }
+            | SheetOp::DeleteRows { at, .. }
+            | SheetOp::InsertCols { at, .. }
+            | SheetOp::DeleteCols { at, .. } => *at,
+            SheetOp::MoveRange { .. } => 0,
+        }
+    }
+
+    /// Signed shift for the mutate / fixup passes (positive inserts, negative deletes).
+    pub fn delta(&self) -> i64 {
+        match self {
+            SheetOp::InsertRows { amount, .. } | SheetOp::InsertCols { amount, .. } => {
+                *amount as i64
+            }
+            SheetOp::DeleteRows { amount, .. } | SheetOp::DeleteCols { amount, .. } => {
+                -(*amount as i64)
+            }
+            SheetOp::MoveRange { .. } => 0,
+        }
+    }
+
+    /// Human-readable description for refusal errors.
+    pub fn human(&self) -> String {
+        match self {
+            SheetOp::InsertRows { at, amount } => {
+                format!("insert {amount} row(s) at row {at}")
+            }
+            SheetOp::DeleteRows { at, amount } => {
+                format!("delete {amount} row(s) starting at row {at}")
+            }
+            SheetOp::InsertCols { at, amount } => {
+                format!("insert {amount} column(s) at column {at}")
+            }
+            SheetOp::DeleteCols { at, amount } => {
+                format!("delete {amount} column(s) starting at column {at}")
+            }
+            SheetOp::MoveRange {
+                r1,
+                c1,
+                r2,
+                c2,
+                rows,
+                cols,
+                ..
+            } => {
+                format!("move range {r1}:{c1}-{r2}:{c2} by rows={rows} cols={cols}")
+            }
+        }
+    }
 }
 
 pub struct WorkbookOverlay {
@@ -59,10 +234,60 @@ impl WorkbookOverlay {
         overlay.is_dirty = true;
     }
 
-    pub fn save(&self) -> TurboResult<Vec<u8>> {
-        let mut zip = ZipWriter::new();
+    /// Record an insert of `amount` blank rows at 1-based `at` on `sheet_name`.
+    pub fn insert_rows(&mut self, sheet_name: &str, at: u32, amount: u32) {
+        self.sheet_overlays
+            .entry(sheet_name.to_string())
+            .or_default()
+            .insert_rows(at, amount);
+    }
 
-        // Build set of modified ZIP entry paths and resolve style descriptors
+    /// Record a delete of `amount` rows starting at 1-based `at` on `sheet_name`.
+    pub fn delete_rows(&mut self, sheet_name: &str, at: u32, amount: u32) {
+        self.sheet_overlays
+            .entry(sheet_name.to_string())
+            .or_default()
+            .delete_rows(at, amount);
+    }
+
+    /// Record an insert of `amount` blank columns at 1-based `at` on `sheet_name`.
+    pub fn insert_cols(&mut self, sheet_name: &str, at: u32, amount: u32) {
+        self.sheet_overlays
+            .entry(sheet_name.to_string())
+            .or_default()
+            .insert_cols(at, amount);
+    }
+
+    /// Record a delete of `amount` columns starting at 1-based `at` on `sheet_name`.
+    pub fn delete_cols(&mut self, sheet_name: &str, at: u32, amount: u32) {
+        self.sheet_overlays
+            .entry(sheet_name.to_string())
+            .or_default()
+            .delete_cols(at, amount);
+    }
+
+    /// Record a relocation of `(r1,c1)..(r2,c2)` (1-based, inclusive) by `rows`,
+    /// `cols` (signed) on `sheet_name` (openpyxl `move_range` semantics).
+    #[allow(clippy::too_many_arguments)]
+    pub fn move_range(
+        &mut self,
+        sheet_name: &str,
+        r1: u32,
+        c1: u32,
+        r2: u32,
+        c2: u32,
+        rows: i64,
+        cols: i64,
+        translate: bool,
+    ) {
+        self.sheet_overlays
+            .entry(sheet_name.to_string())
+            .or_default()
+            .move_range(r1, c1, r2, c2, rows, cols, translate);
+    }
+
+    pub fn save(&self) -> TurboResult<Vec<u8>> {
+        // Build set of modified ZIP entry paths and resolve style descriptors.
         let mut modified_entry_paths = AHashSet::default();
         let mut style_engine = StyleEngine::new();
         let mut sheet_resolved_styles: AHashMap<String, AHashMap<(u32, u32), u32>> =
@@ -95,30 +320,25 @@ impl WorkbookOverlay {
             modified_entry_paths.insert("xl/styles.xml".to_string());
         }
 
-        // Copy all untouched parts from ArchiveMap verbatim
-        for entry_name in &self.archive_map.entry_order {
-            if self.deleted_sheets.contains(entry_name) || modified_entry_paths.contains(entry_name)
-            {
-                continue;
-            }
+        // ------------------------------------------------------------------
+        // Phase 1 — render every dirty part IN MEMORY before anything is
+        // written. ALL-OR-NOTHING: a mutate/fixup refusal aborts the whole
+        // save with a clear reason before a single part reaches the zip.
+        //
+        // For each sheet, the original part is inflated once, then every
+        // recorded op is applied in user order as: mutate splice → table part
+        // fixups → workbook defined-name fixups → sheet metadata fixup. Cell
+        // edits are spliced LAST, because an edit coordinate is final while a
+        // shift moves the grid under it.
+        // ------------------------------------------------------------------
+        let mut rendered: AHashMap<String, Vec<u8>> = AHashMap::default();
+        let mut table_edit: AHashMap<String, Vec<u8>> = AHashMap::default();
+        let mut pivot_table_edit: AHashMap<String, Vec<u8>> = AHashMap::default();
+        let mut pivot_cache_edit: AHashMap<String, Vec<u8>> = AHashMap::default();
+        let mut pivot_cache_map: Option<std::collections::HashMap<u32, String>> = None;
+        let mut workbook_bytes: Option<Vec<u8>> = None;
+        let mut workbook_modified = false;
 
-            if let Some(entry) = self.archive_map.entries.get(entry_name) {
-                let start = entry.data_offset as usize;
-                let end = start + (entry.compressed_size as usize);
-                if end <= self.archive_map.source_bytes.len() {
-                    let payload = self.archive_map.source_bytes[start..end].to_vec();
-                    zip.add_precompressed(PrecompressedPart {
-                        name: entry.name.clone(),
-                        method: entry.compression_method, // CRITICAL: Preserves STORE (0) vs DEFLATE (8)
-                        crc32: entry.crc32,
-                        uncomp_size: entry.uncompressed_size,
-                        data: payload,
-                    });
-                }
-            }
-        }
-
-        // Render modified dirty sheets
         for (sheet_name, overlay) in &self.sheet_overlays {
             if !overlay.is_dirty {
                 continue;
@@ -135,30 +355,150 @@ impl WorkbookOverlay {
                 }
             };
 
-            // Preferred path: byte-preserving splice of the ORIGINAL sheet XML.
-            // Only <sheetData> is rewritten; every other top-level child of
-            // <worksheet> (cols, mergeCells, sheetViews/freeze panes, autoFilter,
-            // hyperlinks, dataValidations, conditionalFormatting, sheetPr,
-            // sheetFormatPr, pageMargins, pageSetup, tableParts, ...) and every
-            // row attribute (ht/customHeight/spans/s) survives byte-for-byte.
-            let original_xml = self.archive_map.entries.get(&entry_name).and_then(|entry| {
-                let start = entry.data_offset as usize;
-                let end = start + (entry.compressed_size as usize);
-                if end > self.archive_map.source_bytes.len() {
-                    return None;
-                }
-                crate::turbo::zipmin::inflate(
-                    entry.compression_method,
-                    &self.archive_map.source_bytes[start..end],
-                    entry.uncompressed_size as usize,
-                )
-                .ok()
-            });
+            let original_xml = inflate_entry(&self.archive_map, &entry_name)?;
 
+            // Pivot parts owned by this sheet (pivot table parts via the sheet
+            // rels, plus each one's cache definition part). Resolved once, like
+            // table parts: ops never add or remove pivot parts, so the rels are
+            // stable across the op sequence.
+            let pivot_parts =
+                sheet_pivot_parts(&self.archive_map, &entry_name, &mut pivot_cache_map)?;
+
+            let mut sheet_xml: Option<Vec<u8>> = original_xml;
+            if !overlay.ops.is_empty() {
+                // Mutating a sheet requires its source XML to splice.
+                let Some(mut buf) = sheet_xml.take() else {
+                    return Err(TurboError::Refused(format!(
+                        "cannot {} in sheet '{}': the sheet has no source XML to splice",
+                        overlay.ops[0].human(),
+                        sheet_name
+                    )));
+                };
+                // Table parts are resolved once against the original sheet tail
+                // (ops never add or remove table parts, so the rids are stable).
+                let table_parts = sheet_table_parts(&self.archive_map, &entry_name, &buf);
+
+                for op in &overlay.ops {
+                    // 1. mutate splice (grid + dimension + shared-formula refs).
+                    let mutated =
+                        apply_mutate(&buf, op).ok_or_else(|| refuse_sheet_op(sheet_name, op))?;
+                    buf = mutated.into_owned();
+
+                    // A move_range performs its OWN grid splice and its own
+                    // sheet-tail fixups (merges, hyperlinks, DV, CF). Tables and
+                    // workbook defined names do not follow moved cells — a
+                    // relocation leaves them in place by design.
+                    if matches!(op, SheetOp::MoveRange { .. }) {
+                        continue;
+                    }
+
+                    // 2. table parts (fixup refuses on a header-row delete /
+                    //    fully-emptied table). Sequential: op N sees op N-1's bytes.
+                    for tp in &table_parts {
+                        let cur: Cow<'_, [u8]> = match table_edit.get(tp) {
+                            Some(prev) => Cow::Borrowed(prev.as_slice()),
+                            None => match inflate_entry(&self.archive_map, tp)? {
+                                Some(tx) => Cow::Owned(tx),
+                                None => continue,
+                            },
+                        };
+                        match fixup_table_part_xml(cur.as_ref(), op.axis(), op.at(), op.delta()) {
+                            Some(Cow::Owned(o)) => {
+                                table_edit.insert(tp.clone(), o);
+                            }
+                            Some(Cow::Borrowed(_)) => {}
+                            None => return Err(refuse_table_op(sheet_name, tp, op)),
+                        }
+                    }
+
+                    // 2.5 pivot parts. The pivot table's own `<location>` shifts
+                    // when this sheet (the pivot's host) is mutated; the cache's
+                    // `<worksheetSource ref>` shifts when this sheet is the cache
+                    // SOURCE, and the cache is tagged refreshOnLoad because its
+                    // materialised records are now stale.
+                    for (pt_part, cache_part) in &pivot_parts {
+                        let cur: Cow<'_, [u8]> = match pivot_table_edit.get(pt_part) {
+                            Some(prev) => Cow::Borrowed(prev.as_slice()),
+                            None => match inflate_entry(&self.archive_map, pt_part)? {
+                                Some(px) => Cow::Owned(px),
+                                None => continue,
+                            },
+                        };
+                        if let Some(Cow::Owned(o)) =
+                            fixup_pivot_table_xml(cur.as_ref(), op.axis(), op.at(), op.delta())
+                        {
+                            pivot_table_edit.insert(pt_part.clone(), o);
+                        }
+                        if let Some(cp) = cache_part {
+                            let curc: Cow<'_, [u8]> = match pivot_cache_edit.get(cp) {
+                                Some(prev) => Cow::Borrowed(prev.as_slice()),
+                                None => match inflate_entry(&self.archive_map, cp)? {
+                                    Some(cx) => Cow::Owned(cx),
+                                    None => continue,
+                                },
+                            };
+                            if let Some(Cow::Owned(o)) = fixup_pivot_cache_xml(
+                                curc.as_ref(),
+                                sheet_name,
+                                op.axis(),
+                                op.at(),
+                                op.delta(),
+                            ) {
+                                pivot_cache_edit.insert(cp.clone(), o);
+                            }
+                        }
+                    }
+
+                    // 3. workbook defined names (inflated once; only shipped when
+                    //    actually modified, so no-op saves stay byte-identical).
+                    if workbook_bytes.is_none() {
+                        workbook_bytes = inflate_entry(&self.archive_map, "xl/workbook.xml")?;
+                    }
+                    if let Some(wx) = workbook_bytes.as_mut() {
+                        if let Cow::Owned(o) =
+                            fixup_workbook_xml(wx, sheet_name, op.axis(), op.at(), op.delta())
+                        {
+                            *wx = o;
+                            workbook_modified = true;
+                        }
+                    }
+
+                    // 4. sheet metadata fixup (merges, hyperlinks, autoFilter,
+                    //    DV/CF, breaks, panes/selections).
+                    let fixed = fixup_sheet_xml(&buf, op.axis(), op.at(), op.delta())
+                        .ok_or_else(|| refuse_sheet_op(sheet_name, op))?;
+                    buf = fixed.into_owned();
+                }
+                sheet_xml = Some(buf);
+            }
+
+            // Pivot-cache staleness (edit / move_range gaps): a cell edit or a
+            // moved range that touches a cache's source range makes its
+            // materialised records stale, so the cache is tagged refreshOnLoad
+            // and Excel rebuilds it on open. Insert/delete staleness is already
+            // handled inside `fixup_pivot_cache_xml` (which tags the cache only
+            // when the source range itself moved).
+            if !overlay.modified_cells.is_empty()
+                || overlay
+                    .ops
+                    .iter()
+                    .any(|o| matches!(o, SheetOp::MoveRange { .. }))
+            {
+                apply_pivot_staleness(
+                    &self.archive_map,
+                    sheet_name,
+                    &pivot_parts,
+                    &overlay.modified_cells,
+                    &overlay.ops,
+                    &mut pivot_cache_edit,
+                )?;
+            }
+
+            // Cell edits are applied AFTER shifts (final coordinates).
             let resolved = sheet_resolved_styles.get(sheet_name);
-            if let Some(xml) = original_xml {
+            if let Some(xml) = sheet_xml {
                 if let Some(spliced) = splice_sheet_xml(&xml, overlay, resolved) {
-                    zip.add(&entry_name, &spliced);
+                    rendered.insert(entry_name.clone(), spliced);
                     continue;
                 }
             }
@@ -185,7 +525,60 @@ impl WorkbookOverlay {
 
             let mut sst = SstBuilder::new();
             let xml = write_worksheet(&sheet, false, false, &mut sst);
-            zip.add(&entry_name, &xml);
+            rendered.insert(entry_name.clone(), xml);
+        }
+
+        // ------------------------------------------------------------------
+        // Phase 2 — write the zip. Nothing refuses here; every part is ready.
+        // ------------------------------------------------------------------
+        let mut zip = ZipWriter::new();
+
+        // Copy all untouched parts from ArchiveMap verbatim.
+        for entry_name in &self.archive_map.entry_order {
+            if self.deleted_sheets.contains(entry_name)
+                || modified_entry_paths.contains(entry_name)
+                || rendered.contains_key(entry_name)
+                || table_edit.contains_key(entry_name)
+                || pivot_table_edit.contains_key(entry_name)
+                || pivot_cache_edit.contains_key(entry_name)
+                || (entry_name == "xl/workbook.xml" && workbook_modified)
+            {
+                continue;
+            }
+
+            if let Some(entry) = self.archive_map.entries.get(entry_name) {
+                let start = entry.data_offset as usize;
+                let end = start + (entry.compressed_size as usize);
+                if end <= self.archive_map.source_bytes.len() {
+                    let payload = self.archive_map.source_bytes[start..end].to_vec();
+                    zip.add_precompressed(PrecompressedPart {
+                        name: entry.name.clone(),
+                        method: entry.compression_method, // CRITICAL: Preserves STORE (0) vs DEFLATE (8)
+                        crc32: entry.crc32,
+                        uncomp_size: entry.uncompressed_size,
+                        data: payload,
+                    });
+                }
+            }
+        }
+
+        // Add rendered sheets, then edited table parts, then the workbook.
+        for (name, bytes) in &rendered {
+            zip.add(name, bytes);
+        }
+        for (name, bytes) in &table_edit {
+            zip.add(name, bytes);
+        }
+        for (name, bytes) in &pivot_table_edit {
+            zip.add(name, bytes);
+        }
+        for (name, bytes) in &pivot_cache_edit {
+            zip.add(name, bytes);
+        }
+        if workbook_modified {
+            if let Some(wb) = &workbook_bytes {
+                zip.add("xl/workbook.xml", wb);
+            }
         }
 
         // Append-only splice of xl/styles.xml: insert new font/fill/border/xf
@@ -294,6 +687,256 @@ impl WorkbookOverlay {
 
         zip.finish().map_err(TurboError::Io)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Row/column mutation save-path helpers
+// ---------------------------------------------------------------------------
+
+/// Inflate one ZIP part by entry path. `Ok(None)` when the part is absent or
+/// cannot be inflated (the callers decide whether that is an error).
+fn inflate_entry(map: &ArchiveMap, name: &str) -> TurboResult<Option<Vec<u8>>> {
+    let Some(entry) = map.entries.get(name) else {
+        return Ok(None);
+    };
+    let start = entry.data_offset as usize;
+    let end = start + (entry.compressed_size as usize);
+    if end > map.source_bytes.len() {
+        return Ok(None);
+    }
+    crate::turbo::zipmin::inflate(
+        entry.compression_method,
+        &map.source_bytes[start..end],
+        entry.uncompressed_size as usize,
+    )
+    .map(Some)
+}
+
+/// Resolve the ZIP entry paths of every table part owned by `sheet_entry`,
+/// following the sheet's `tableParts` rids through its rels part.
+fn sheet_table_parts(map: &ArchiveMap, sheet_entry: &str, sheet_xml: &[u8]) -> Vec<String> {
+    let tail = match memchr::memmem::find(sheet_xml, b"</sheetData>") {
+        Some(p) => &sheet_xml[p + b"</sheetData>".len()..],
+        None => sheet_xml,
+    };
+    let rids = crate::turbo::structural::scan_table_part_rids(tail);
+    if rids.is_empty() {
+        return Vec::new();
+    }
+    let base = sheet_entry.rsplit('/').next().unwrap_or("sheet1.xml");
+    let rels_path = format!("xl/worksheets/_rels/{base}.rels");
+    let rels = match inflate_entry(map, &rels_path) {
+        Ok(Some(rx)) => crate::turbo::structural::parse_rels(&rx),
+        _ => Default::default(),
+    };
+    let mut out = Vec::with_capacity(rids.len());
+    for rid in &rids {
+        if let Some(rel) = rels.get(rid) {
+            out.push(crate::turbo::structural::resolve_zip_path(
+                "xl/worksheets/",
+                &rel.target,
+            ));
+        }
+    }
+    out
+}
+
+/// Resolve every pivot table part owned by `sheet_entry` (via the sheet's rels)
+/// and, for each, the cache definition part it references (its `cacheId` →
+/// workbook `<pivotCaches>` → workbook rels → part path). The workbook cache
+/// map is built once and cached. `Ok(())` with an empty vec when the sheet has
+/// no pivots or the workbook has no resolvable caches.
+fn sheet_pivot_parts(
+    map: &ArchiveMap,
+    sheet_entry: &str,
+    wb_cache_map: &mut Option<std::collections::HashMap<u32, String>>,
+) -> TurboResult<Vec<(String, Option<String>)>> {
+    let base = sheet_entry.rsplit('/').next().unwrap_or("sheet1.xml");
+    let rels_path = format!("xl/worksheets/_rels/{base}.rels");
+    let rels = match inflate_entry(map, &rels_path)? {
+        Some(rx) => parse_rels(&rx),
+        None => Default::default(),
+    };
+    let tables: Vec<String> = rels
+        .values()
+        .filter(|r| r.kind == RelKind::PivotTable)
+        .map(|r| resolve_zip_path("xl/worksheets/", &r.target))
+        .collect();
+    if tables.is_empty() {
+        return Ok(Vec::new());
+    }
+    if wb_cache_map.is_none() {
+        *wb_cache_map = workbook_pivot_caches(map)?;
+    }
+    let mut out = Vec::with_capacity(tables.len());
+    for pt in tables {
+        let cache = match inflate_entry(map, &pt)? {
+            Some(px) => peek_pivot_cache_id(&px)
+                .and_then(|cid| wb_cache_map.as_ref().and_then(|m| m.get(&cid)).cloned()),
+            None => None,
+        };
+        out.push((pt, cache));
+    }
+    Ok(out)
+}
+
+/// Workbook-level `cacheId → cache definition part path`, from workbook.xml's
+/// `<pivotCaches>` + the workbook rels. `Ok(None)` when the workbook has no
+/// pivot caches (or no workbook to read).
+fn workbook_pivot_caches(
+    map: &ArchiveMap,
+) -> TurboResult<Option<std::collections::HashMap<u32, String>>> {
+    let wb_xml = match inflate_entry(map, "xl/workbook.xml")? {
+        Some(x) => x,
+        None => return Ok(None),
+    };
+    let wb_rels = match inflate_entry(map, "xl/_rels/workbook.xml.rels")? {
+        Some(rx) => parse_rels(&rx),
+        None => Default::default(),
+    };
+    Ok(Some(parse_workbook_pivot_caches(&wb_xml, &wb_rels)))
+}
+
+/// The `cacheId` a pivot table part declares.
+fn peek_pivot_cache_id(xml: &[u8]) -> Option<u32> {
+    let start = memchr::memmem::find(xml, b"cacheId=\"")?;
+    let vs = start + 9;
+    let ve = vs + memchr::memchr(b'"', &xml[vs..])?;
+    std::str::from_utf8(&xml[vs..ve]).ok()?.parse().ok()
+}
+
+/// Tag every pivot cache that sources from `sheet_name` and whose source range
+/// a cell edit or a moved range touches, so Excel refreshes the materialised
+/// records on open. Insert/delete staleness is handled inside
+/// `fixup_pivot_cache_xml`; this closes the edit + move_range gaps.
+fn apply_pivot_staleness(
+    map: &ArchiveMap,
+    sheet_name: &str,
+    pivot_parts: &[(String, Option<String>)],
+    edited_cells: &AHashMap<(u32, u32), CellValue>,
+    ops: &[SheetOp],
+    pivot_cache_edit: &mut AHashMap<String, Vec<u8>>,
+) -> TurboResult<()> {
+    for (_, cache_part) in pivot_parts {
+        let Some(cp) = cache_part else {
+            continue;
+        };
+        let cur: Cow<'_, [u8]> = match pivot_cache_edit.get(cp) {
+            Some(prev) => Cow::Borrowed(prev.as_slice()),
+            None => match inflate_entry(map, cp)? {
+                Some(cx) => Cow::Owned(cx),
+                None => continue,
+            },
+        };
+        let Some((src_sheet, (r0, c0, r1, c1))) = pivot_cache_source_ref(cur.as_ref()) else {
+            continue;
+        };
+        if !src_sheet.eq_ignore_ascii_case(sheet_name) {
+            continue;
+        }
+        // A cell edit inside the source range.
+        let mut stale = edited_cells
+            .keys()
+            .any(|&(r, c)| r >= r0 && r <= r1 && c >= c0 && c <= c1);
+        // A moved range whose source or destination intersects the source range.
+        if !stale {
+            for op in ops {
+                if let SheetOp::MoveRange {
+                    r1: a,
+                    c1: b,
+                    r2: d,
+                    c2: e,
+                    rows,
+                    cols,
+                    ..
+                } = op
+                {
+                    let src = (*a.min(d), *b.min(e), *a.max(d), *b.max(e));
+                    let dr1 = *a as i64 + *rows;
+                    let dc1 = *b as i64 + *cols;
+                    let dr2 = *d as i64 + *rows;
+                    let dc2 = *e as i64 + *cols;
+                    let dst = (
+                        dr1.min(dr2) as u32,
+                        dc1.min(dc2) as u32,
+                        dr1.max(dr2) as u32,
+                        dc1.max(dc2) as u32,
+                    );
+                    if rects_intersect((r0, c0, r1, c1), src)
+                        || rects_intersect((r0, c0, r1, c1), dst)
+                    {
+                        stale = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if stale {
+            if let Some(nb) = set_pivot_cache_refresh_on_load(cur.as_ref()) {
+                pivot_cache_edit.insert(cp.clone(), nb);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Do two 1-based inclusive rectangles overlap?
+fn rects_intersect(a: (u32, u32, u32, u32), b: (u32, u32, u32, u32)) -> bool {
+    a.0 <= b.2 && b.0 <= a.2 && a.1 <= b.3 && b.1 <= a.3
+}
+
+/// Apply the mutate splice for one recorded op. `None` means the splice
+/// refused (would corrupt the sheet rather than shift it).
+fn apply_mutate<'a>(xml: &'a [u8], op: &SheetOp) -> Option<Cow<'a, [u8]>> {
+    match op {
+        SheetOp::InsertRows { at, amount } => insert_rows(xml, *at, *amount),
+        SheetOp::DeleteRows { at, amount } => delete_rows(xml, *at, *amount),
+        SheetOp::InsertCols { at, amount } => insert_cols(xml, *at, *amount),
+        SheetOp::DeleteCols { at, amount } => delete_cols(xml, *at, *amount),
+        SheetOp::MoveRange {
+            r1,
+            c1,
+            r2,
+            c2,
+            rows,
+            cols,
+            translate,
+        } => move_range(xml, *r1, *c1, *r2, *c2, *rows, *cols, *translate),
+    }
+}
+
+/// Refusal reason for the sheet splice / sheet fixup pass. `mutate.rs` refuses
+/// without saying which constraint tripped, so the message names the class of
+/// causes; the operation-specific situations are documented on the Python API.
+fn refuse_sheet_op(sheet_name: &str, op: &SheetOp) -> TurboError {
+    match op {
+        SheetOp::MoveRange { .. } => TurboError::Refused(format!(
+            "cannot {} in sheet '{}': refused because it would corrupt the worksheet — \
+             a destination corner would leave the grid (rows 1..=1,048,576, columns 1..=16,384), \
+             an implicit-numbered row/cell lies inside the moved region, or a shared-formula ref= \
+             would leave the grid",
+            op.human(),
+            sheet_name
+        )),
+        _ => TurboError::Refused(format!(
+            "cannot {} in sheet '{}': refused because it would corrupt the worksheet — an \
+             implicit-numbered row/cell at or below the shift point, a grid limit (1,048,576 rows \
+             / 16,384 columns) would be exceeded, or a shared-formula master would be orphaned",
+            op.human(),
+            sheet_name
+        )),
+    }
+}
+
+/// Refusal reason for a table-part fixup (header-row delete / emptied table).
+fn refuse_table_op(sheet_name: &str, table_part: &str, op: &SheetOp) -> TurboError {
+    TurboError::Refused(format!(
+        "cannot {} in sheet '{}': refused because it would corrupt table part '{}' — it would \
+         delete the table's header row or delete every column of the table",
+        op.human(),
+        sheet_name,
+        table_part
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -591,6 +1234,15 @@ fn emit_cell(out: &mut Vec<u8>, row: u32, col: u32, val: &CellValue, s_attr: Opt
             push(out, b"</c>");
         }
         CellValue::Formula { text, cached, .. } => {
+            // Declare the cached result's type before closing the cell tag, or
+            // Excel reads a non-numeric `<v>` as a number. A numeric cache uses
+            // the implicit default and emits no `t=`.
+            match cached {
+                Some(CachedValue::Bool(_)) => push(out, br#" t="b""#),
+                Some(CachedValue::Error(_)) => push(out, br#" t="e""#),
+                Some(CachedValue::Str(_)) => push(out, br#" t="str""#),
+                Some(CachedValue::Number(_)) | None => {}
+            }
             push(out, b"><f>");
             let bodytxt = text.strip_prefix('=').unwrap_or(text.as_str());
             write_escaped_text(out, bodytxt);
@@ -619,7 +1271,7 @@ fn emit_cell(out: &mut Vec<u8>, row: u32, col: u32, val: &CellValue, s_attr: Opt
 }
 
 /// Find `<name` at an element boundary (next byte is space / `>` / `/`).
-fn find_element(hay: &[u8], name: &[u8], from: usize) -> Option<usize> {
+pub(crate) fn find_element(hay: &[u8], name: &[u8], from: usize) -> Option<usize> {
     if from >= hay.len() {
         return None;
     }
@@ -899,7 +1551,7 @@ fn extract_tag_value(xml: &[u8], open_tag: &[u8], close_tag: &[u8]) -> Option<St
     }
 }
 
-fn extract_xml_attr(tag: &[u8], attr: &[u8]) -> Option<String> {
+pub(crate) fn extract_xml_attr(tag: &[u8], attr: &[u8]) -> Option<String> {
     let mut search = Vec::with_capacity(attr.len() + 2);
     search.extend_from_slice(attr);
     search.extend_from_slice(b"=\"");
@@ -1049,4 +1701,73 @@ fn splice_styles_xml_pools(
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // Test-only: the fixtures build a Workbook and wrap bytes in an Arc; the
+    // non-test path takes both from its caller.
+    use crate::turbo::write::model::StringMode;
+    use crate::turbo::write::model::Workbook;
+    use crate::turbo::write::writer::write_workbook_bytes;
+    use std::sync::Arc;
+
+    /// A single-sheet workbook with `A1="a"`, `A2="b"` (inline strings).
+    fn source_bytes() -> Vec<u8> {
+        let mut wb = Workbook::new();
+        wb.options.string_mode = StringMode::InlineStr;
+        let sh = &mut wb.sheets[0];
+        sh.rows
+            .push(Row::new(1).with_cell(1, CellValue::Str("a".into())));
+        sh.rows
+            .push(Row::new(2).with_cell(1, CellValue::Str("b".into())));
+        write_workbook_bytes(&wb).unwrap()
+    }
+
+    /// Hydrate the `"Sheet"` sheet from a saved workbook and return the string
+    /// value at (row, col) or `None` when the cell is absent/empty.
+    fn cell_str(saved: &[u8], row: u32, col: u32) -> Option<String> {
+        let map = ArchiveMap::parse(Arc::new(saved.to_vec())).unwrap();
+        let path = map.sheet_name_map.get("Sheet").cloned()?;
+        let xml = inflate_entry(&map, &path).ok()??;
+        let sheet = hydrate_sheet_from_xml(&xml, &map.shared_strings).ok()?;
+        let r = sheet.rows.iter().find(|r| r.row == row)?;
+        let c = r.cells.iter().find(|c| c.col == col)?;
+        match &c.value {
+            CellValue::Str(s) => Some(s.clone()),
+            _ => None,
+        }
+    }
+
+    /// The op order in the save path must be shift-then-edit: a recorded
+    /// `insert_rows` moves the grid, and a cell edit's coordinate is final.
+    ///
+    /// Start: A1="a", A2="b". Record insert at 1, then edit (2,1)="edited".
+    /// Correct (shift first): A1=blank, A2="edited", A3="b".
+    /// Wrong (edit first):   A1=blank, A2="a",     A3="edited".
+    #[test]
+    fn save_applies_shifts_before_cell_edits() {
+        let map = ArchiveMap::parse(Arc::new(source_bytes())).unwrap();
+        let mut ov = WorkbookOverlay::new(map);
+        ov.insert_rows("Sheet", 1, 1);
+        ov.set_cell("Sheet", 2, 1, CellValue::Str("edited".into()));
+        let saved = ov.save().expect("save must succeed");
+
+        assert_eq!(
+            cell_str(&saved, 1, 1),
+            None,
+            "row 1 must be the new blank row"
+        );
+        assert_eq!(
+            cell_str(&saved, 2, 1).as_deref(),
+            Some("edited"),
+            "the edit must land on the shifted grid (row 2), not be pushed down"
+        );
+        assert_eq!(
+            cell_str(&saved, 3, 1).as_deref(),
+            Some("b"),
+            "the original row-2 value must shift down to row 3"
+        );
+    }
 }

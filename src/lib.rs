@@ -14,7 +14,7 @@ use std::fmt::Display;
 /// fragmentation, and pulling mimalloc into the Linux aarch64 cross-build
 /// breaks on the manylinux2014 toolchain (mimalloc's C build rejects an
 /// unknown `-Wdate-time` flag under its ancient GCC).
-#[cfg(windows)]
+#[cfg(all(windows, not(feature = "count_alloc")))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -95,10 +95,20 @@ fn _kyrax(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // turbo fast-path (read)
     {
-        use crate::turbo::python::{PyTurboReader, PyTurboSheet, py_read_excel_turbo};
+        use crate::turbo::python::{
+            PyTurboReader, PyTurboSheet, py_is_encrypted, py_read_excel_turbo,
+        };
         m.add_function(wrap_pyfunction!(py_read_excel_turbo, m)?)?;
+        m.add_function(wrap_pyfunction!(py_is_encrypted, m)?)?;
         m.add_class::<PyTurboReader>()?;
         m.add_class::<PyTurboSheet>()?;
+    }
+
+    // C1c encrypted-workbook metadata (requires the `encryption` feature)
+    #[cfg(feature = "encryption")]
+    {
+        use crate::turbo::python::py_encryption_info;
+        m.add_function(wrap_pyfunction!(py_encryption_info, m)?)?;
     }
 
     // turbo write path (W1 silo A core)
@@ -113,6 +123,46 @@ fn _kyrax(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(py_edit_excel, m)?)?;
         m.add_class::<PyEditableWorkbook>()?;
         m.add_class::<PyEditableSheet>()?;
+    }
+
+    // C2 validate & repair
+    {
+        use crate::turbo::validate::python::{py_repair_excel, py_validate_excel};
+        m.add_function(wrap_pyfunction!(py_validate_excel, m)?)?;
+        m.add_function(wrap_pyfunction!(py_repair_excel, m)?)?;
+    }
+
+    // Phase 3 features: the Tier 3 MEDIUM/LOW capabilities neither kyrax nor
+    // openpyxl held before. Reachable from Python because an engine capability
+    // nobody can call does not count as shipped.
+    {
+        use crate::turbo::features::python_inventory::{
+            py_control_parts, py_external_links, py_feature_parts, py_is_signed,
+            py_power_query_inventory, py_rich_data_parts, py_signature_info, py_slicer_inventory,
+        };
+        m.add_function(wrap_pyfunction!(py_slicer_inventory, m)?)?;
+        m.add_function(wrap_pyfunction!(py_rich_data_parts, m)?)?;
+        m.add_function(wrap_pyfunction!(py_power_query_inventory, m)?)?;
+        m.add_function(wrap_pyfunction!(py_is_signed, m)?)?;
+        m.add_function(wrap_pyfunction!(py_signature_info, m)?)?;
+        m.add_function(wrap_pyfunction!(py_control_parts, m)?)?;
+        m.add_function(wrap_pyfunction!(py_external_links, m)?)?;
+        m.add_function(wrap_pyfunction!(py_feature_parts, m)?)?;
+
+        use crate::turbo::features::python_query::{
+            py_diff_parts, py_diff_workbooks, py_read_threaded_comments, py_write_threaded_comments,
+        };
+        m.add_function(wrap_pyfunction!(py_diff_parts, m)?)?;
+        m.add_function(wrap_pyfunction!(py_diff_workbooks, m)?)?;
+        m.add_function(wrap_pyfunction!(py_read_threaded_comments, m)?)?;
+        m.add_function(wrap_pyfunction!(py_write_threaded_comments, m)?)?;
+
+        use crate::turbo::features::python_sparkline::{
+            py_dependency_query, py_read_sparklines, py_splice_sparklines,
+        };
+        m.add_function(wrap_pyfunction!(py_read_sparklines, m)?)?;
+        m.add_function(wrap_pyfunction!(py_splice_sparklines, m)?)?;
+        m.add_function(wrap_pyfunction!(py_dependency_query, m)?)?;
     }
 
     m.add("__version__", get_python_version())?;

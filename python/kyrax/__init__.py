@@ -47,6 +47,13 @@ from ._kyrax import read_excel_turbo as _read_excel_turbo
 from ._kyrax import write_excel_turbo as _write_excel_turbo
 from ._kyrax import write_excel_turbo_bytes as _write_excel_turbo_bytes
 from ._kyrax import write_excel_turbo_stream as _write_excel_turbo_stream
+from ._kyrax import validate_excel as _validate_excel
+from ._kyrax import repair_excel as _repair_excel
+from ._kyrax import is_encrypted as _is_encrypted
+try:
+    from ._kyrax import encryption_info as _encryption_info
+except ImportError:
+    _encryption_info = None
 try:
     from ._kyrax import edit_excel, EditableWorkbook, EditableSheet
 except ImportError:
@@ -54,8 +61,70 @@ except ImportError:
     EditableWorkbook = None
     EditableSheet = None
 
+
+def validate_excel(path: Path | str) -> dict:
+    """Validate a workbook and return a structured report — never raises for a
+    bad input.
+
+    :param path: Path to an ``.xlsx``/``.xlsm`` file (or anything else).
+    :return: ``{"valid", "errors", "warnings", "infos", "findings"}`` where each
+        finding is ``{"code", "severity", "part", "location", "message",
+        "repairable"}``. The ``code`` is a stable string (``"encrypted_workbook"``,
+        ``"legacy_biff"``, ``"not_ooxml_package"``, ``"corrupt_zip"``,
+        ``"dangling_rel"``, ``"overlapping_merge"``, ...) so callers can branch
+        on it without string matching the message.
+    """
+    if isinstance(path, Path):
+        path = expanduser(str(path))
+    return _validate_excel(str(path))
+
+
+def repair_excel(
+    path: Path | str,
+    out_path: Path | str,
+    *,
+    severity: Literal["error", "warning", "info"] = "warning",
+) -> dict:
+    """Repair a workbook conservatively into ``out_path``.
+
+    Only repairable findings at ``severity`` or above are fixed, and every
+    change is reported. The source file is never modified. Encrypted / legacy /
+    non-spreadsheet / unreadable inputs write nothing.
+
+    :return: ``{"wrote_output", "report", "actions"}`` where each action is
+        ``{"code", "severity", "part", "description", "before", "after"}``.
+    """
+    if isinstance(path, Path):
+        path = expanduser(str(path))
+    if isinstance(out_path, Path):
+        out_path = expanduser(str(out_path))
+    return _repair_excel(str(path), str(out_path), severity=severity)
+
 def load_workbook(filename: str | Path, edit_mode: bool = False):
-    """Load an Excel workbook. If edit_mode=True, returns an EditableWorkbook for byte-preserving edits."""
+    """Load an Excel workbook.
+
+    With ``edit_mode=False`` (default) this returns an :class:`ExcelReader` for
+    reading. With ``edit_mode=True`` it returns an :class:`EditableWorkbook`
+    (backed by :func:`edit_excel`) that records byte-preserving edits and
+    applies them on :meth:`EditableWorkbook.save`:
+
+    - ``wb[sheet].set_cell(row, col, value)`` — 1-based cell edit
+    - ``wb[sheet].set_cell_style(row, col, ...)`` — 1-based cell style
+    - ``wb[sheet].insert_rows(idx, amount=1)`` / ``insert_cols(...)`` — insert
+      blank rows/columns at 1-based ``idx``, shifting the grid down/right
+    - ``wb[sheet].delete_rows(idx, amount=1)`` / ``delete_cols(...)`` — delete
+      rows/columns starting at 1-based ``idx``, shifting the grid up/left
+    - ``wb[sheet].move_range(range_string, rows=0, cols=0, translate=False)`` —
+      relocate a rectangular block by ``rows``/``cols`` without shifting the
+      rest of the sheet; ``translate=True`` also shifts formula references
+      inside the moved range
+
+    Shifts are applied before cell edits (an edit coordinate is final while a
+    shift moves the grid under it). ``save`` is all-or-nothing: a refusal
+    (implicit-numbered row/cell at or below the shift point, a grid limit
+    exceeded, a shared-formula master orphaned, or a table header row deleted)
+    raises ``InvalidParametersError`` and leaves the destination untouched.
+    """
     if edit_mode:
         if edit_excel is None:
             raise NotImplementedError("edit_excel is not available in this build")
@@ -851,6 +920,13 @@ class TurboSheet:
         """Chart structured metadata on this sheet. None if charts not requested."""
         return self._sheet.charts()
 
+    def images(self) -> list[dict] | None:
+        """Images on this sheet (``data`` bytes + ``anchor`` dict).
+
+        None if ``images`` was not requested.
+        """
+        return self._sheet.images()
+
     def pivots(self) -> list[dict] | None:
         """Pivot table metadata on this sheet. None if pivots not requested."""
         return self._sheet.pivots()
@@ -965,7 +1041,7 @@ class TurboReader:
         :param features: ``\"values\"`` (default), ``\"all\"``, or a list from
             {styles, formulas, merges, defined_names, tables, hyperlinks, comments,
             sheet_meta, page_setup, workbook_meta, validations, cond_format,
-            charts, pivots, vba}.
+            charts, images, pivots, vba}.
             Values are always included; unrequested features are not computed.
             ``comments`` also loads threaded comments + persons.
         """
@@ -1005,18 +1081,44 @@ class TurboReader:
         return self._reader.__repr__()
 
 
-def read_excel_turbo(path: Path | str) -> TurboReader:
+def read_excel_turbo(path: Path | str, password: str | None = None) -> TurboReader:
     """Open an XLSX file for turbo reading.
 
     Only sheet names are read up front; call :meth:`TurboReader.load_sheet` for data.
 
     :param path: Path to an ``.xlsx`` file.
+    :param password: Password for an ECMA-376 encrypted workbook; a plain
+        workbook ignores it. ``None`` (the default) fails an encrypted workbook
+        with a clear "password required" error.
     """
     if isinstance(path, Path):
         path = expanduser(str(path))
     elif isinstance(path, str):
         path = expanduser(path)
-    return TurboReader(_read_excel_turbo(path))
+    return TurboReader(_read_excel_turbo(path, password))
+
+
+def is_encrypted(path: Path | str) -> bool:
+    """True if the file is an ECMA-376 encrypted workbook (OLE/CFB with an
+    ``EncryptionInfo`` stream). Needs no password and never raises."""
+    if isinstance(path, Path):
+        path = expanduser(str(path))
+    return _is_encrypted(str(path))
+
+
+def encryption_info(path: Path | str) -> dict:
+    """Report an encrypted workbook's scheme, algorithm and spin count WITHOUT
+    a password: ``{"scheme", "cipher_algorithm", "hash_algorithm", "key_bits",
+    "block_size", "salt_size", "spin_count", "message"}``.
+
+    Raises ``KyraxError`` when the file is not an encrypted workbook. Requires
+    a build with the ``encryption`` feature.
+    """
+    if isinstance(path, Path):
+        path = expanduser(str(path))
+    if _encryption_info is None:
+        raise KyraxError("encryption_info requires a kyrax build with the `encryption` feature")
+    return _encryption_info(str(path))
 
 
 def _validate_sheets(sheets: list[dict]) -> None:
@@ -1051,6 +1153,7 @@ def write_excel_turbo(
     external_links: list | None = None,
     creator: str | None = None,
     macro_enabled: bool = False,
+    recalculate: bool = False,
 ) -> None:
     """Write an XLSX workbook via the turbo write path (silo A+B+C).
 
@@ -1065,6 +1168,12 @@ def write_excel_turbo(
     :param features: ``core`` | ``all`` | ``styles`` or list of feature names
         (``merges``, ``hyperlinks``, ``comments``, ``tables``, ``charts``,
         ``defined_names``, ``props``, …). Content auto-enables flags.
+    :param recalculate: compute every formula cell in Rust and write the result
+        as its cached value, so the saved file carries formula **and** value.
+        Formulas kyrax cannot compute exactly (unsupported function, external
+        reference, circular reference) are left uncomputed and the workbook
+        keeps ``calcPr fullCalcOnLoad="1"`` so Excel fills them on open — a
+        wrong number is never written.
     """
     if isinstance(path, Path):
         path = expanduser(str(path))
@@ -1086,6 +1195,7 @@ def write_excel_turbo(
         external_links=external_links,
         creator=creator,
         macro_enabled=macro_enabled,
+        recalculate=recalculate,
     )
 
 
@@ -1106,6 +1216,7 @@ def write_excel_turbo_stream(
     external_links: list | None = None,
     creator: str | None = None,
     macro_enabled: bool = False,
+    recalculate: bool = False,
 ) -> None:
     """Stream an XLSX workbook straight to disk (openpyxl ``write_only`` analogue).
 
@@ -1137,6 +1248,7 @@ def write_excel_turbo_stream(
         external_links=external_links,
         creator=creator,
         macro_enabled=macro_enabled,
+        recalculate=recalculate,
     )
 
 
@@ -1156,6 +1268,7 @@ def write_excel_turbo_bytes(
     external_links: list | None = None,
     creator: str | None = None,
     macro_enabled: bool = False,
+    recalculate: bool = False,
 ) -> bytes:
     """Write an XLSX workbook and return bytes (same options as write_excel_turbo)."""
     return _write_excel_turbo_bytes(
@@ -1173,6 +1286,7 @@ def write_excel_turbo_bytes(
         external_links=external_links,
         creator=creator,
         macro_enabled=macro_enabled,
+        recalculate=recalculate,
     )
 
 
@@ -1185,6 +1299,17 @@ __all__ = (
     "write_excel_turbo",
     "write_excel_turbo_bytes",
     "write_excel_turbo_stream",
+    # validate & repair
+    "validate_excel",
+    "repair_excel",
+    # encrypted-workbook support
+    "is_encrypted",
+    "encryption_info",
+    # editable round-trip API
+    "load_workbook",
+    "edit_excel",
+    "EditableWorkbook",
+    "EditableSheet",
     # Python types
     "DType",
     "DTypeMap",

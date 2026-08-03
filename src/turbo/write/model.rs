@@ -3,8 +3,11 @@
 use ahash::AHashMap;
 use std::sync::Arc;
 
+use crate::turbo::meta::AutoFilterMeta;
+
 use super::cf_dv::{ConditionalFormatting, DataValidation};
-use super::charts::{Chart, ChartsheetSpec};
+use super::charts::{Anchor, Chart, ChartsheetSpec};
+use super::pivot::{PivotAgg, PivotDataField, PivotField, PivotTableSpec};
 use super::rich_text::RichText;
 use super::style_engine::StyleDesc;
 
@@ -67,7 +70,7 @@ pub enum FormulaKind {
 }
 
 /// Cached formula result (enhancement over openpyxl write path).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CachedValue {
     Number(f64),
     Bool(bool),
@@ -185,7 +188,7 @@ pub struct DocProps {
     pub custom: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DefinedName {
     pub name: String,
     pub value: String,
@@ -300,6 +303,58 @@ impl Default for Comment {
     }
 }
 
+/// Image file format, detected from magic bytes (never from a file extension).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageFormat {
+    Png,
+    Jpeg,
+    Gif,
+}
+
+impl ImageFormat {
+    /// ZIP part extension for the media file (`xl/media/imageN.{ext}`).
+    pub fn extension(self) -> &'static str {
+        match self {
+            ImageFormat::Png => "png",
+            ImageFormat::Jpeg => "jpeg",
+            ImageFormat::Gif => "gif",
+        }
+    }
+
+    /// `[Content_Types].xml` Default content type for the extension.
+    pub fn content_type(self) -> &'static str {
+        match self {
+            ImageFormat::Png => "image/png",
+            ImageFormat::Jpeg => "image/jpeg",
+            ImageFormat::Gif => "image/gif",
+        }
+    }
+}
+
+/// Detect the image format from leading magic bytes. The extension is never
+/// trusted; PNG/JPEG/GIF signatures are definitive.
+pub fn detect_image_format(bytes: &[u8]) -> Option<ImageFormat> {
+    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some(ImageFormat::Png)
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some(ImageFormat::Jpeg)
+    } else if bytes.starts_with(b"GIF8") {
+        Some(ImageFormat::Gif)
+    } else {
+        None
+    }
+}
+
+/// An image placed on a worksheet. `bytes` are shared via `Arc` so dedup
+/// across sheets is cheap; the media part index is resolved by the
+/// [`super::media::MediaInterner`] at write time.
+#[derive(Debug, Clone)]
+pub struct Image {
+    pub bytes: Arc<[u8]>,
+    pub format: ImageFormat,
+    pub anchor: Anchor,
+}
+
 #[derive(Debug, Clone)]
 pub struct Sheet {
     pub name: String,
@@ -327,7 +382,13 @@ pub struct Sheet {
     pub tab_color_rgb: Option<String>,
     pub protection: Option<SheetProtection>,
     pub scenarios: Vec<Scenario>,
-    pub auto_filter: Option<String>,
+    /// AutoFilter ref + filter columns. Reuses the read-side structure
+    /// (`crate::turbo::meta::AutoFilterMeta`) so a read-modify-write round trip
+    /// moves the exact model the reader parsed, nothing invented on the write side.
+    /// The reader only parses value filters today (`<filters>` + `<filter val>`);
+    /// customFilters / top10 / dynamicFilter / colorFilter / iconFilter / sortState
+    /// have no read model yet, so they are a known remaining read/write gap.
+    pub auto_filter: Option<AutoFilterMeta>,
     pub merges: Vec<String>,
     pub hyperlinks: Vec<Hyperlink>,
     pub print_options: Option<PrintOptions>,
@@ -339,8 +400,11 @@ pub struct Sheet {
     pub tables: Vec<TableDef>,
     pub comments: Vec<Comment>,
     pub charts: Vec<Chart>,
+    pub images: Vec<Image>,
     pub print_area: Option<String>,
     pub print_titles: Option<String>,
+    /// Pivot tables authored on this sheet (Task B5b).
+    pub pivots: Vec<PivotTableSpec>,
 }
 
 impl Sheet {
@@ -376,8 +440,10 @@ impl Sheet {
             tables: Vec::new(),
             comments: Vec::new(),
             charts: Vec::new(),
+            images: Vec::new(),
             print_area: None,
             print_titles: None,
+            pivots: Vec::new(),
         }
     }
 
@@ -444,6 +510,10 @@ impl WriteFeatures {
     pub const CHARTS: WriteFeatures = WriteFeatures(1 << 10);
     /// Full core/app/custom props + workbook protection.
     pub const PROPS: WriteFeatures = WriteFeatures(1 << 11);
+    /// Images (media parts + drawing pic rels).
+    pub const IMAGES: WriteFeatures = WriteFeatures(1 << 12);
+    /// Pivot tables (cache definition, records, table part + rels, workbook wiring).
+    pub const PIVOTS: WriteFeatures = WriteFeatures(1 << 13);
 
     pub const CORE: WriteFeatures = WriteFeatures(Self::VALUES.0 | Self::FORMULAS.0 | Self::DIMS.0);
 
@@ -462,7 +532,9 @@ impl WriteFeatures {
             | Self::TABLES.0
             | Self::DEFINED_NAMES.0
             | Self::CHARTS.0
-            | Self::PROPS.0,
+            | Self::PROPS.0
+            | Self::IMAGES.0
+            | Self::PIVOTS.0,
     );
 
     #[inline]
@@ -633,6 +705,12 @@ impl Workbook {
             if !sh.charts.is_empty() {
                 f = f.union(WriteFeatures::CHARTS);
             }
+            if !sh.images.is_empty() {
+                f = f.union(WriteFeatures::IMAGES);
+            }
+            if !sh.pivots.is_empty() {
+                f = f.union(WriteFeatures::PIVOTS);
+            }
         }
         self.options.features = f;
     }
@@ -675,6 +753,45 @@ impl Workbook {
             }
             other => other,
         }
+    }
+
+    /// Author a pivot table on `sheet` sourcing `source_range`, with the given
+    /// row/column axis fields and data fields aggregated onto `target_cell`.
+    ///
+    /// This is the Rust entry point for the write half of the pivot engine; it
+    /// validates the layout against the sheet's header row before anything is
+    /// stored, so a typo fails fast instead of producing a silently skipped
+    /// part at save time.
+    pub fn add_pivot_table(
+        &mut self,
+        sheet: usize,
+        source_range: &str,
+        rows: &[PivotField],
+        cols: &[PivotField],
+        data: &[(PivotField, PivotAgg)],
+        target_cell: &str,
+    ) -> Result<(), String> {
+        let n = self.sheets.len();
+        let sh = self.sheets.get_mut(sheet).ok_or_else(|| {
+            format!("add_pivot_table: sheet index {sheet} out of range ({n} sheets)")
+        })?;
+        let spec = PivotTableSpec {
+            name: String::new(),
+            source_range: source_range.to_string(),
+            rows: rows.to_vec(),
+            cols: cols.to_vec(),
+            data: data
+                .iter()
+                .map(|(f, a)| PivotDataField {
+                    field: f.clone(),
+                    agg: *a,
+                })
+                .collect(),
+            target_cell: target_cell.to_string(),
+        };
+        spec.validate(sh)?;
+        sh.pivots.push(spec);
+        Ok(())
     }
 }
 

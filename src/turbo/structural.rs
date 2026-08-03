@@ -10,6 +10,7 @@
 // table.py, workbook/defined_name.py, comments/comment_sheet.py, cell/text.py.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 // ----------------------------------------------------------------------------
 // Data model (DESIGN sections 1-5).
@@ -202,6 +203,62 @@ pub struct ChartMeta {
     pub anchor: ChartAnchor,
 }
 
+// ----------------------------------------------------------------------------
+// Images: read-back of `xl/drawings/drawingN.xml` pic anchors + media bytes.
+// ----------------------------------------------------------------------------
+
+/// A cell-anchor marker as stored in the drawing part: `col`/`row` are 0-based,
+/// offsets are EMU. Values are kept verbatim from the file (matching how chart
+/// anchors keep raw 0-based cells).
+#[derive(Clone, Debug)]
+pub struct ReadImageMarker {
+    pub col: u32,
+    pub col_off: i64,
+    pub row: u32,
+    pub row_off: i64,
+}
+
+/// Placement anchor for a read-back image.
+#[derive(Clone, Debug)]
+pub enum ReadImageAnchor {
+    Absolute {
+        x: i64,
+        y: i64,
+        cx: i64,
+        cy: i64,
+    },
+    OneCell {
+        from: ReadImageMarker,
+        cx: i64,
+        cy: i64,
+    },
+    TwoCell {
+        from: ReadImageMarker,
+        to: ReadImageMarker,
+        edit_as: Option<String>,
+    },
+}
+
+impl ReadImageAnchor {
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            ReadImageAnchor::TwoCell { .. } => "twoCell",
+            ReadImageAnchor::OneCell { .. } => "oneCell",
+            ReadImageAnchor::Absolute { .. } => "absolute",
+        }
+    }
+}
+
+/// One image read back from a worksheet drawing, gated by `Features::IMAGES`.
+/// `bytes` are the raw media part contents (never decoded; STORE in the zip).
+#[derive(Clone, Debug)]
+pub struct ImageMeta {
+    pub sheet: u32,
+    pub part: String,
+    pub anchor: ReadImageAnchor,
+    pub bytes: Arc<Vec<u8>>,
+}
+
 #[derive(Clone, Debug)]
 pub struct PivotDataField {
     pub name: String,
@@ -362,6 +419,7 @@ pub enum RelKind {
     Chartsheet,
     Drawing,
     Chart,
+    Image,
     PivotTable,
     PivotCacheDef,
     VbaProject,
@@ -388,6 +446,7 @@ fn rel_kind(tag: &[u8]) -> RelKind {
         Some(t) if t.ends_with(b"/chartsheet") => RelKind::Chartsheet,
         Some(t) if t.ends_with(b"/drawing") => RelKind::Drawing,
         Some(t) if t.ends_with(b"/chart") => RelKind::Chart,
+        Some(t) if t.ends_with(b"/image") => RelKind::Image,
         Some(t) if t.ends_with(b"/pivotTable") => RelKind::PivotTable,
         Some(t) if t.ends_with(b"/pivotCacheDefinition") => RelKind::PivotCacheDef,
         Some(t) if t.ends_with(b"/vbaProject") => RelKind::VbaProject,
@@ -1035,6 +1094,160 @@ pub fn parse_drawing_chart_anchors(xml: &[u8]) -> Vec<(String, ChartAnchor)> {
             }
             j = cp + 1;
         }
+        i = end;
+    }
+    out
+}
+
+/// Parse `<from>`/`<to>` marker text into a [`ReadImageMarker`]. Missing or
+/// unparseable fields degrade to 0; never fails.
+fn parse_image_marker(region: &[u8]) -> ReadImageMarker {
+    let mut scratch = Vec::new();
+    ReadImageMarker {
+        col: first_elem_text(region, b"col", &mut scratch)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0),
+        row: first_elem_text(region, b"row", &mut scratch)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0),
+        col_off: first_elem_text(region, b"colOff", &mut scratch)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0),
+        row_off: first_elem_text(region, b"rowOff", &mut scratch)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0),
+    }
+}
+
+/// Read an int attribute (`x`/`y`/`cx`/`cy`) off a small element region like
+/// `<pos x="1" y="2"/>`. `find_attr` scans the whole region; pos/ext have no
+/// nested children, so matching on the full region is safe.
+fn elem_attr_i64(region: &[u8], attr: &[u8]) -> Option<i64> {
+    let raw = find_attr(region, attr)?;
+    std::str::from_utf8(raw).ok()?.trim().parse().ok()
+}
+
+/// Image anchors in a drawing part: `(blip r:embed rel-id, anchor)`, one entry
+/// per `<pic>` that carries an `<a:blip r:embed>`. Anchors without a blip
+/// (charts, shapes, or pics missing a blip) are skipped, as are unparseable
+/// or truncated drawing parts — the scan is the same tolerant memchr walk as
+/// [`parse_drawing_chart_anchors`] and never panics.
+pub fn parse_drawing_image_anchors(xml: &[u8]) -> Vec<(String, ReadImageAnchor)> {
+    let mut out = Vec::new();
+    let n = xml.len();
+    let mut i = 0usize;
+    while let Some(o) = memchr::memchr(b'<', &xml[i..]) {
+        let pos = i + o;
+        let local = match open_tag_local(xml, pos) {
+            Some(l) => l,
+            None => {
+                i = pos + 1;
+                continue;
+            }
+        };
+        let anchor_kind = if local == b"twoCellAnchor" {
+            "two"
+        } else if local == b"oneCellAnchor" {
+            "one"
+        } else if local == b"absoluteAnchor" {
+            "abs"
+        } else {
+            i = pos + 1;
+            continue;
+        };
+        let te = pos + memchr::memchr(b'>', &xml[pos..n]).unwrap_or(n - pos);
+        let open_tag = &xml[pos..te];
+        let close_name = match anchor_kind {
+            "two" => b"twoCellAnchor".as_ref(),
+            "one" => b"oneCellAnchor".as_ref(),
+            _ => b"absoluteAnchor".as_ref(),
+        };
+        let end = if te > 0 && xml.get(te - 1) == Some(&b'/') {
+            (te + 1).min(n)
+        } else {
+            find_close_local(xml, te.saturating_add(1), close_name)
+                .and_then(|c| memchr::memchr(b'>', &xml[c..]).map(|o| c + o + 1))
+                .unwrap_or(n)
+                .min(n)
+        };
+        if pos >= end || end > n {
+            i = pos.saturating_add(1);
+            continue;
+        }
+        let block = &xml[pos..end];
+
+        // A blip's r:embed anywhere in this anchor marks it as an image.
+        let mut embed: Option<String> = None;
+        let mut j = 0usize;
+        while let Some(co) = memchr::memmem::find(&block[j..], b"<") {
+            let cp = j + co;
+            if let Some(l) = open_tag_local(block, cp) {
+                if l == b"blip" {
+                    let bte = cp + memchr::memchr(b'>', &block[cp..]).unwrap_or(block.len() - cp);
+                    if let Some(r) = find_attr(&block[cp..bte], b"r:embed") {
+                        embed = Some(String::from_utf8_lossy(r).into_owned());
+                    }
+                }
+            }
+            j = cp + 1;
+        }
+        let Some(embed) = embed else {
+            i = end;
+            continue;
+        };
+
+        let anchor = match anchor_kind {
+            "abs" => ReadImageAnchor::Absolute {
+                x: child_elem_region(block, b"pos")
+                    .and_then(|r| elem_attr_i64(r, b"x"))
+                    .unwrap_or(0),
+                y: child_elem_region(block, b"pos")
+                    .and_then(|r| elem_attr_i64(r, b"y"))
+                    .unwrap_or(0),
+                cx: child_elem_region(block, b"ext")
+                    .and_then(|r| elem_attr_i64(r, b"cx"))
+                    .unwrap_or(0),
+                cy: child_elem_region(block, b"ext")
+                    .and_then(|r| elem_attr_i64(r, b"cy"))
+                    .unwrap_or(0),
+            },
+            "one" => ReadImageAnchor::OneCell {
+                from: child_elem_region(block, b"from")
+                    .map(parse_image_marker)
+                    .unwrap_or(ReadImageMarker {
+                        col: 0,
+                        col_off: 0,
+                        row: 0,
+                        row_off: 0,
+                    }),
+                cx: child_elem_region(block, b"ext")
+                    .and_then(|r| elem_attr_i64(r, b"cx"))
+                    .unwrap_or(0),
+                cy: child_elem_region(block, b"ext")
+                    .and_then(|r| elem_attr_i64(r, b"cy"))
+                    .unwrap_or(0),
+            },
+            _ => {
+                let from = child_elem_region(block, b"from")
+                    .map(parse_image_marker)
+                    .unwrap_or(ReadImageMarker {
+                        col: 0,
+                        col_off: 0,
+                        row: 0,
+                        row_off: 0,
+                    });
+                let to = child_elem_region(block, b"to")
+                    .map(parse_image_marker)
+                    .unwrap_or_else(|| from.clone());
+                ReadImageAnchor::TwoCell {
+                    from,
+                    to,
+                    edit_as: find_attr(open_tag, b"editAs")
+                        .map(|v| String::from_utf8_lossy(v).into_owned()),
+                }
+            }
+        };
+        out.push((embed, anchor));
         i = end;
     }
     out

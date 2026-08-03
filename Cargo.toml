@@ -46,6 +46,19 @@ pyo3-arrow = { version = "^0.18", default-features = false, optional = true }
 pyo3-log = { version = "^0.13.3", optional = true }
 # turbo fast-path (src/turbo/)
 libdeflater = "1.24"
+# Streaming READ path (src/turbo/stream.rs). The zip crate is already compiled
+# into every build as calamine's dependency; promoting it to a direct dep
+# (same version, same feature set calamine uses) is how we get a bounded-memory
+# streaming inflate. libdeflate cannot stream: its `_ex` entry point does not
+# report input consumed on partial output and does not persist the bitstream,
+# so it cannot resume after an output window fills. We keep libdeflate for the
+# eager path (unchanged) and use `zip`'s streaming ZipFile reader for the new
+# streaming path.
+zip = { version = "7.0", default-features = false, features = ["deflate"] }
+# Streaming inflate for the bounded-memory read path (see src/turbo/stream.rs
+# for why libdeflate cannot stream). Already compiled into every build as
+# zip→flate2's inflater; promoted to a direct dep unchanged.
+miniz_oxide = "0.8"
 memchr = "2.7"
 rayon = "1.10"
 fast-float2 = "0.2"
@@ -53,6 +66,12 @@ fast-float2 = "0.2"
 itoa = "1.0"
 ryu = "1.0"
 ahash = "0.8"
+# ECMA-376 encrypted-workbook key derivation (src/turbo/crypto/) — optional.
+# Only these RustCrypto crates are permitted for the encryption feature.
+aes = { version = "0.8", optional = true }
+cbc = { version = "0.1", optional = true }
+sha2 = { version = "0.10", optional = true }
+hmac = { version = "0.12", optional = true }
 
 # Windows heap fragmentation on repeated large write alloc/free cycles.
 # Windows-only: avoids breaking the Linux aarch64 manylinux2014 cross-build,
@@ -64,6 +83,11 @@ mimalloc = "0.1"
 anyhow = "1.0.102"
 pretty_assertions = { version = "^1.4.1", features = ["unstable"] }
 rstest = { version = "^0.26.1", default-features = false }
+# The bounded-memory measurement (tests/streaming_memory.rs) installs its own
+# counting global allocator. A binary may only have ONE global allocator, and
+# the lib declares mimalloc on Windows, so that test builds the lib with
+# `count_alloc` to gate the mimalloc declaration off and install its own.
+kyrax = { path = ".", default-features = false, features = ["count_alloc", "__arrow"] }
 
 # NOTE: This is a hack to bypass pyo3 limitations when testing:
 # https://pyo3.rs/v0.22.3/faq.html#i-cant-run-cargo-test-or-i-cant-build-in-a-cargo-workspace-im-having-linker-issues-like-symbol-not-found-or-undefined-reference-to-_pyexc_systemerror
@@ -74,6 +98,9 @@ python = ["__arrow", "dep:pyo3", "dep:pyo3-log", "dep:pyo3-arrow"]
 extension-module = ["pyo3/extension-module"]
 polars = ["dep:polars-core"]
 pyarrow = ["dep:arrow-pyarrow", "python"]
+# ECMA-376 encrypted-workbook support (src/turbo/crypto/keys.rs). Off by default
+# so the base build's dependency surface is unchanged.
+encryption = ["dep:aes", "dep:cbc", "dep:sha2", "dep:hmac"]
 # Private features for internal usage, should not be used directly as they may
 # change without notice
 __pyo3-tests = [
@@ -85,5 +112,9 @@ __pyo3-tests = [
 ]
 __rust-tests-standalone = ["__arrow"]
 __rust-tests-polars = ["polars"]
+# Private feature: used by tests/streaming_memory.rs to install a counting
+# global allocator (gates the Windows-only mimalloc `#[global_allocator]` off
+# so the measurement binary can declare its own).
+count_alloc = []
 # Private feature for maturin usage, should not be used directly
 __maturin = ["extension-module", "pyarrow"]

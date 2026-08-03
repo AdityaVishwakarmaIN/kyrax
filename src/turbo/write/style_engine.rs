@@ -19,14 +19,26 @@ fn esc_text(s: &str, out: &mut Vec<u8>) {
     write_escaped_text(out, s);
 }
 
+/// Emit an f64 as Excel would for integral values (90 not 90.0); non-integral
+/// values keep the shortest round-trip decimal (ryu).
+#[inline]
+fn push_f64_trim(out: &mut Vec<u8>, v: f64) {
+    if v == v.trunc() && (-9_007_199_254_740_992.0..=9_007_199_254_740_992.0).contains(&v) {
+        let mut buf = itoa::Buffer::new();
+        out.extend_from_slice(buf.format(v as i64).as_bytes());
+    } else {
+        push_f64(out, v);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Colors
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ColorSpec {
-    Rgb(u32),   // aRGB 0xAARRGGBB (openpyxl often stores AA=00 for 6-digit input)
-    Theme(u32), // theme index
+    Rgb(u32),        // aRGB 0xAARRGGBB (openpyxl often stores AA=00 for 6-digit input)
+    Theme(u32, u64), // theme index, tint as f64 IEEE bits (Eq/Hash-stable, like sz_bits)
     Indexed(u32),
     Auto,
 }
@@ -44,6 +56,24 @@ impl ColorSpec {
             0
         };
         ColorSpec::Rgb(v)
+    }
+
+    /// Theme color with no tint (common case — emits `<color theme="N" />`).
+    pub fn theme(index: u32) -> Self {
+        ColorSpec::Theme(index, 0.0f64.to_bits())
+    }
+
+    /// Theme color with a tint in -1.0..=1.0.
+    pub fn theme_tinted(index: u32, tint: f64) -> Self {
+        ColorSpec::Theme(index, tint.to_bits())
+    }
+
+    /// The tint of this color (0.0 unless it is a themed color).
+    pub fn tint(&self) -> f64 {
+        match self {
+            ColorSpec::Theme(_, bits) => f64::from_bits(*bits),
+            _ => 0.0,
+        }
     }
 }
 
@@ -65,10 +95,17 @@ impl ColorSpec {
                 push_hex8(out, *v);
                 out.push(b'"');
             }
-            ColorSpec::Theme(t) => {
+            ColorSpec::Theme(t, tint_bits) => {
                 push_str(out, " theme=\"");
                 push_u32(out, *t);
                 out.push(b'"');
+                // Tint emitted only when non-zero so the common case stays byte-stable.
+                let tint = f64::from_bits(*tint_bits);
+                if tint != 0.0 {
+                    push_str(out, " tint=\"");
+                    push_f64(out, tint);
+                    out.push(b'"');
+                }
             }
             ColorSpec::Indexed(i) => {
                 push_str(out, " indexed=\"");
@@ -96,6 +133,11 @@ pub struct FontDesc {
     pub italic: Option<bool>,
     pub underline: Option<String>,
     pub strike: Option<bool>,
+    /// Font effects: valueless empty elements (`<outline/>` etc.) in OOXML.
+    pub outline: Option<bool>,
+    pub shadow: Option<bool>,
+    pub condense: Option<bool>,
+    pub extend: Option<bool>,
     pub color: Option<ColorSpec>,
     pub family: Option<i32>,
     pub scheme: Option<String>,
@@ -121,7 +163,11 @@ impl FontDesc {
             italic: Some(false),
             underline: None,
             strike: None,
-            color: Some(ColorSpec::Theme(1)),
+            outline: None,
+            shadow: None,
+            condense: None,
+            extend: None,
+            color: Some(ColorSpec::theme(1)),
             family: Some(2),
             scheme: Some("minor".into()),
             vert_align: None,
@@ -137,6 +183,10 @@ impl FontDesc {
             italic: None,
             underline: None,
             strike: None,
+            outline: None,
+            shadow: None,
+            condense: None,
+            extend: None,
             color: color_hex.map(ColorSpec::from_rgb_hex),
             family: None,
             scheme: None,
@@ -174,6 +224,19 @@ impl FontDesc {
         } else if self.strike == Some(false) {
             push_str(out, "<strike val=\"0\" />");
         }
+        // Font effects: valueless empty elements, OOXML order after <strike/>.
+        if self.outline == Some(true) {
+            push_str(out, "<outline/>");
+        }
+        if self.shadow == Some(true) {
+            push_str(out, "<shadow/>");
+        }
+        if self.condense == Some(true) {
+            push_str(out, "<condense/>");
+        }
+        if self.extend == Some(true) {
+            push_str(out, "<extend/>");
+        }
         if let Some(c) = self.color.as_ref() {
             c.emit("color", out);
         }
@@ -210,10 +273,59 @@ pub enum FillDesc {
         bg: Option<ColorSpec>,
     },
     Gradient {
-        kind: String, // linear | path
-        degree: u32,
-        stops: Vec<(ColorSpec, u32)>, // color, position*1000 for hash stability
+        kind: GradientKind,
+        stops: Vec<GradientStop>,
     },
+}
+
+/// One `position` (0.0..=1.0) + color of a gradient stop.
+/// The position is stored as f64 IEEE bits for Eq/Hash stability.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct GradientStop {
+    pub position: u64, // f64 IEEE bits
+    pub color: ColorSpec,
+}
+
+impl GradientStop {
+    pub fn new(position: f64, color: ColorSpec) -> Self {
+        GradientStop {
+            position: position.to_bits(),
+            color,
+        }
+    }
+    #[inline]
+    pub fn pos(&self) -> f64 {
+        f64::from_bits(self.position)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum GradientKind {
+    /// linear: degree is an f64 angle (stored as IEEE bits).
+    Linear { degree: u64 },
+    /// path: extent from each edge, f64 in 0.0..=1.0 (stored as IEEE bits).
+    Path {
+        left: u64,
+        right: u64,
+        top: u64,
+        bottom: u64,
+    },
+}
+
+impl GradientKind {
+    pub fn linear(degree: f64) -> Self {
+        GradientKind::Linear {
+            degree: degree.to_bits(),
+        }
+    }
+    pub fn path(left: f64, right: f64, top: f64, bottom: f64) -> Self {
+        GradientKind::Path {
+            left: left.to_bits(),
+            right: right.to_bits(),
+            top: top.to_bits(),
+            bottom: bottom.to_bits(),
+        }
+    }
 }
 
 impl FillDesc {
@@ -266,24 +378,50 @@ impl FillDesc {
                     push_str(out, "</patternFill>");
                 }
             }
-            FillDesc::Gradient {
-                kind,
-                degree,
-                stops,
-            } => {
+            FillDesc::Gradient { kind, stops } => {
                 push_str(out, "<gradientFill type=\"");
-                esc_attr(kind, out);
-                push_str(out, "\" degree=\"");
-                push_u32(out, *degree);
-                push_str(out, "\">");
-                for (i, (c, pos_milli)) in stops.iter().enumerate() {
-                    let _ = i;
+                match kind {
+                    GradientKind::Linear { degree } => {
+                        push_str(out, "linear\"");
+                        let d = f64::from_bits(*degree);
+                        // degree emitted only when non-zero (matches openpyxl).
+                        if d != 0.0 {
+                            push_str(out, " degree=\"");
+                            push_f64_trim(out, d);
+                            out.push(b'"');
+                        }
+                    }
+                    GradientKind::Path {
+                        left,
+                        right,
+                        top,
+                        bottom,
+                    } => {
+                        push_str(out, "path\"");
+                        // path emits extent attrs instead of degree
+                        for (name, bits) in [
+                            ("left", *left),
+                            ("right", *right),
+                            ("top", *top),
+                            ("bottom", *bottom),
+                        ] {
+                            let v = f64::from_bits(bits);
+                            if v != 0.0 {
+                                push_str(out, " ");
+                                push_str(out, name);
+                                push_str(out, "=\"");
+                                push_f64_trim(out, v);
+                                out.push(b'"');
+                            }
+                        }
+                    }
+                }
+                push_str(out, ">");
+                for stop in stops {
                     push_str(out, "<stop position=\"");
-                    // position as decimal
-                    let pos = (*pos_milli as f64) / 1000.0;
-                    push_f64(out, pos);
+                    push_f64_trim(out, stop.pos());
                     push_str(out, "\">");
-                    c.emit("color", out);
+                    stop.color.emit("color", out);
                     push_str(out, "</stop>");
                 }
                 push_str(out, "</gradientFill>");
@@ -619,6 +757,9 @@ pub fn builtin_id(code: &str) -> Option<i32> {
     None
 }
 
+// Kept: the builtin number-format table is authoritative here even though
+// the writer currently emits every format explicitly.
+#[allow(dead_code)]
 pub fn is_builtin_format(code: &str) -> bool {
     builtin_id(code).is_some()
 }
@@ -1077,6 +1218,12 @@ impl StyleEngine {
         push_u32(&mut out, self.cell_styles.len() as u32);
         push_str(&mut out, "\">");
         for st in &self.cell_styles.items {
+            // Inherited named style (cellStyleXf) this xf builds on. xf_id is the
+            // index into named_styles (== cellStyleXfs order).
+            let ns = self
+                .named_styles
+                .get(st.xf_id as usize)
+                .unwrap_or(&self.named_styles[0]);
             push_str(&mut out, "<xf numFmtId=\"");
             push_i32(&mut out, st.num_fmt_id);
             push_str(&mut out, "\" fontId=\"");
@@ -1086,6 +1233,22 @@ impl StyleEngine {
             push_str(&mut out, "\" borderId=\"");
             push_i32(&mut out, st.border_id);
             out.push(b'"');
+            // Apply flags: emitted ="1" only when the component differs from the
+            // named style this xf inherits from — never unconditionally, or
+            // inherited components would be re-applied by Excel. applyAlignment /
+            // applyProtection stay gated on presence (openpyxl behaviour).
+            if st.num_fmt_id != ns.style.num_fmt_id {
+                push_str(&mut out, " applyNumberFormat=\"1\"");
+            }
+            if st.font_id != ns.style.font_id {
+                push_str(&mut out, " applyFont=\"1\"");
+            }
+            if st.fill_id != ns.style.fill_id {
+                push_str(&mut out, " applyFill=\"1\"");
+            }
+            if st.border_id != ns.style.border_id {
+                push_str(&mut out, " applyBorder=\"1\"");
+            }
             if st.alignment_id != 0 {
                 push_str(&mut out, " applyAlignment=\"1\"");
             }
@@ -1289,5 +1452,161 @@ mod tests {
         let mut eng = StyleEngine::new();
         let z = eng.resolve(&StyleDesc::default());
         assert_eq!(z, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // T1-5: theme tint, font effects, gradient stops, apply flags
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn theme_tint_emitted() {
+        let mut eng = StyleEngine::new();
+        let mut font = FontDesc::default_calibri();
+        font.color = Some(ColorSpec::theme_tinted(4, -0.5));
+        eng.resolve(&StyleDesc {
+            font: Some(font),
+            ..Default::default()
+        });
+        let xml = String::from_utf8(eng.emit_styles_xml()).unwrap();
+        // tint emitted on theme colors only when non-zero
+        assert!(xml.contains(r#"<color theme="4" tint="-0.5" />"#));
+        assert!(xml.contains(r#"<color theme="1" />"#));
+        assert!(!xml.contains(r#"<color theme="1" tint="0" />"#));
+    }
+
+    #[test]
+    fn font_effects_emitted() {
+        let mut eng = StyleEngine::new();
+        let mut font = FontDesc::default_calibri();
+        font.outline = Some(true);
+        font.shadow = Some(true);
+        font.condense = Some(true);
+        font.extend = Some(true);
+        eng.resolve(&StyleDesc {
+            font: Some(font),
+            ..Default::default()
+        });
+        let xml = String::from_utf8(eng.emit_styles_xml()).unwrap();
+        // valueless empty elements in OOXML order after <strike/>
+        assert!(xml.contains("<outline/><shadow/><condense/><extend/>"));
+    }
+
+    #[test]
+    fn gradient_fill_emitted() {
+        let mut eng = StyleEngine::new();
+        eng.resolve(&StyleDesc {
+            fill: Some(FillDesc::Gradient {
+                kind: GradientKind::linear(90.0),
+                stops: vec![
+                    GradientStop::new(0.0, ColorSpec::from_rgb_hex("FFFF0000")),
+                    GradientStop::new(1.0, ColorSpec::from_rgb_hex("00FF0000")),
+                ],
+            }),
+            ..Default::default()
+        });
+        eng.resolve(&StyleDesc {
+            fill: Some(FillDesc::Gradient {
+                kind: GradientKind::path(0.0, 1.0, 0.0, 0.5),
+                stops: vec![GradientStop::new(0.5, ColorSpec::from_rgb_hex("FF0000"))],
+            }),
+            ..Default::default()
+        });
+        let xml = String::from_utf8(eng.emit_styles_xml()).unwrap();
+        assert!(xml.contains(
+            r#"<gradientFill type="linear" degree="90"><stop position="0"><color rgb="FFFF0000" /></stop><stop position="1"><color rgb="00FF0000" /></stop></gradientFill>"#
+        ));
+        // path emits extents instead of degree
+        assert!(xml.contains(r#"<gradientFill type="path" right="1" bottom="0.5">"#));
+        assert!(xml.contains(r#"<stop position="0.5"><color rgb="00FF0000" /></stop>"#));
+    }
+
+    #[test]
+    fn apply_flags_emitted() {
+        let mut eng = StyleEngine::new();
+        eng.resolve(&StyleDesc {
+            font: Some(FontDesc::simple("Arial", 12.0, true, Some("FF0000"))),
+            fill: Some(FillDesc::solid("FFFF00")),
+            border: Some(BorderDesc::thin_all("FF0000")),
+            num_fmt: Some("0.00".into()),
+            alignment: Some(AlignDesc {
+                horizontal: Some("center".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let xml = String::from_utf8(eng.emit_styles_xml()).unwrap();
+        assert!(xml.contains("applyNumberFormat=\"1\""));
+        assert!(xml.contains("applyFont=\"1\""));
+        assert!(xml.contains("applyFill=\"1\""));
+        assert!(xml.contains("applyBorder=\"1\""));
+        assert!(xml.contains("applyAlignment=\"1\""));
+    }
+
+    #[test]
+    fn tint_dedup_collision() {
+        // Two styles differing ONLY in the tint must produce two distinct xf
+        // records — the pool hash must include the tint.
+        let mut eng = StyleEngine::new();
+        let mk = |tint: f64| {
+            let mut font = FontDesc::default_calibri();
+            font.color = Some(ColorSpec::theme_tinted(4, tint));
+            StyleDesc {
+                font: Some(font),
+                ..Default::default()
+            }
+        };
+        let a = eng.resolve(&mk(-0.5));
+        let b = eng.resolve(&mk(0.5));
+        assert_ne!(a, b);
+        // identical tinted color still dedups
+        let c = eng.resolve(&mk(-0.5));
+        assert_eq!(a, c);
+        assert_eq!(eng.cell_xf_count(), 3); // xf0 + two distinct
+    }
+
+    #[test]
+    fn byte_stability_untouched_features() {
+        // A workbook that uses none of the four new capabilities must emit the
+        // exact bytes it produces today: no tint, no effects, no gradient, and
+        // no apply-flag divergence from the inherited named style.
+        let mut eng = StyleEngine::new();
+        eng.register_named_style(
+            "Foo",
+            &StyleDesc {
+                fill: Some(FillDesc::solid("FF0000")),
+                ..Default::default()
+            },
+            None,
+        );
+        let idx = eng.resolve(&StyleDesc {
+            named_style: Some("Foo".into()),
+            ..Default::default()
+        });
+        assert_eq!(idx, 1);
+        let xml = String::from_utf8(eng.emit_styles_xml()).unwrap();
+
+        // xf records carry no apply* attributes when nothing diverges
+        assert!(xml.contains(r#"<xf numFmtId="0" fontId="0" fillId="0" borderId="0" pivotButton="0" quotePrefix="0" xfId="0" />"#));
+        assert!(xml.contains(r#"<xf numFmtId="0" fontId="0" fillId="2" borderId="1" pivotButton="0" quotePrefix="0" xfId="1" />"#));
+
+        // none of the four new capabilities may leak into the output
+        assert!(!xml.contains("applyNumberFormat="));
+        assert!(!xml.contains("applyFont="));
+        assert!(!xml.contains("applyFill="));
+        assert!(!xml.contains("applyBorder="));
+        assert!(!xml.contains("tint="));
+        assert!(!xml.contains("<outline"));
+        assert!(!xml.contains("<shadow"));
+        assert!(!xml.contains("<condense"));
+        assert!(!xml.contains("<extend"));
+        assert!(!xml.contains("gradientFill"));
+
+        // bootstrap component records unchanged
+        assert!(xml.contains(
+            r#"<font><name val="Calibri" /><family val="2" /><color theme="1" /><sz val="11.0" /><scheme val="minor" /></font>"#
+        ));
+        assert!(xml.contains(r#"<fill><patternFill /></fill>"#));
+        assert!(xml.contains(r#"<fill><patternFill patternType="gray125" /></fill>"#));
+        assert!(xml.contains(r#"<border><left /><right /><top /><bottom /><diagonal /></border>"#));
     }
 }

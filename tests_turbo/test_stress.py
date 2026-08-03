@@ -522,37 +522,27 @@ def test_stress_nostyles():
 
 
 # ---------------------------------------------------------------------------
-# Documented LIMITATION: sticky columnar types drop cross-type values
+# Mixed-type columns preserve later values through safe string coercion
 # ---------------------------------------------------------------------------
 
 
-def test_limitation_mixed_type_column_drops_later_type():
-    """LIMITATION (not fixed — architectural): a column's first non-null type wins.
-
-    If col D sees a string first, a later numeric in D becomes null (and vice
-    versa). Fixing this would require multi-type / union columns or late
-    retyping — out of scope for a minimal scanner fix. Encoded here so the
-    deviation is loud and asserted, not silent.
-    """
+def test_mixed_type_column_preserves_later_numeric_as_string(tmp_path):
+    """A string-first column must preserve a later numeric through coercion."""
     from openpyxl import Workbook
 
-    path = TESTDATA / "stress_mixedtype_probe.xlsx"
+    path = tmp_path / "stress_mixedtype_probe.xlsx"
     wb = Workbook()
     ws = wb.active
     ws["A1"] = "h"
     ws["A2"] = "hello"  # string first → Str column
-    ws["A3"] = 99.0  # number later → dropped to null on Str column
+    ws["A3"] = 99.0  # number later is safely represented in the string column
     wb.save(path)
     wb.close()
 
     sheet = read_excel_turbo(str(path)).load_sheet(0, features="values")
     rb = sheet.to_arrow()
     assert cell_value(rb, 0, 0) == "hello"
-    # LIMITATION: numeric after string is null, not 99.0
-    assert cell_value(rb, 1, 0) is None, (
-        "LIMITATION expected: mixed-type column drops later numeric; "
-        f"got {cell_value(rb, 1, 0)!r}"
-    )
+    assert cell_value(rb, 1, 0) == "99.0"
 
 
 # ---------------------------------------------------------------------------

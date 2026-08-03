@@ -442,6 +442,66 @@ def test_merges_only_feature_flag(tmp_path: Path):
     assert "A1:B1" in {str(r) for r in wb.active.merged_cells.ranges}
 
 
+def test_auto_filter_value_filters_surface(tmp_path: Path):
+    path = tmp_path / "autofilter_filters.xlsx"
+    write_excel_turbo(
+        str(path),
+        [
+            {
+                "name": "Data",
+                "columns": [["Category", "Alice", "Bob", "Carol"]],
+                "auto_filter": {
+                    "ref": "A1:A4",
+                    "columns": [
+                        {
+                            "col_id": 0,
+                            "hidden_button": False,
+                            "show_button": True,
+                            "values": ["Alice", "Carol"],
+                            "blank": False,
+                        }
+                    ],
+                },
+            }
+        ],
+        features="all",
+    )
+
+    wb = load_workbook(path)
+    ws = wb.active
+    assert ws.auto_filter.ref == "A1:A4"
+    assert len(ws.auto_filter.filterColumn) == 1
+    fc = ws.auto_filter.filterColumn[0]
+    assert fc.colId == 0
+    assert [str(f) for f in fc.filters.filter] == ["Alice", "Carol"]
+    assert fc.filters.blank is False
+
+    # read-back via kyrax sees the same value filters
+    from kyrax import read_excel_turbo
+
+    reader = read_excel_turbo(str(path))
+    sh = reader.load_sheet("Data", features=["sheet_meta"])
+    af = sh.auto_filter()
+    assert af is not None
+    assert af["ref"] == "A1:A4"
+    assert af["columns"][0]["values"] == ["Alice", "Carol"]
+    assert af["columns"][0]["blank"] is False
+
+
+def test_auto_filter_values_only_workload_emits_nothing(tmp_path: Path):
+    # No auto_filter in the model: a values-only workload must not emit any
+    # autoFilter XML (the MERGES feature flag stays off).
+    path = tmp_path / "autofilter_off.xlsx"
+    write_excel_turbo(
+        str(path),
+        [{"name": "Data", "columns": [["Category", "Alice", "Bob"]]}],
+    )
+    with zipfile.ZipFile(path) as z:
+        xml = z.read("xl/worksheets/sheet1.xml").decode("utf-8")
+    assert "<autoFilter" not in xml
+    assert "<filterColumn" not in xml
+
+
 def test_defined_names_print_forms(tmp_path: Path):
     path = tmp_path / "names.xlsx"
     write_excel_turbo(
