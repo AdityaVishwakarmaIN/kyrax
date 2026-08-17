@@ -396,10 +396,45 @@ class EditableSheet:
     All indices are 1-BASED, matching openpyxl and Excel. ``insert_rows(2)``
     puts a new blank row AT row 2 and pushes every existing row at or below
     row 2 down. Operations are recorded and applied at ``save()`` time.
+
+    ``ws["A1"]`` reads the effective value at cell A1: a direct edit (via
+    ``set_cell`` or a range assignment) shadows the original workbook XML
+    immediately; otherwise the original cell value is returned. Empty cells
+    read as ``None``. Numbers and dates read as ``float``, booleans as
+    ``bool``, strings/errors as ``str``, formulas as their formula text with
+    one leading ``=``, and rich text as its flattened text.
+
+    ``ws["A1:B2"]`` reads a rectangular range as a row-major
+    ``list[list[scalar]]``; ``ws["A1:B2"] = [[..], [..]]`` writes one where the
+    value must be a 2D list/tuple of exactly the range's dimensions (converted
+    before any edit is recorded, so a bad value leaves no partial writes).
+
+    Queued ``insert_rows``/``delete_rows``/``insert_cols``/``delete_cols``/
+    ``move_range`` operations materialize at ``save()`` time and are not
+    reflected by reads until then.
     """
 
+    def __getitem__(self, key: str) -> object | list[list[object]]:
+        """Read a cell (``"A1"`` → scalar) or a range (``"A1:B2"`` → 2D list).
+
+        Raises ``ValueError`` when ``key`` is not a valid A1 cell or range
+        (malformed syntax, zero, or out of the 1..1_048_576 row / A..XFD
+        column grid).
+        """
+    def __setitem__(self, key: str, value: object) -> None:
+        """Set a cell (``"A1"``) or a rectangular range (``"A1:B2"``).
+
+        Range values must be 2D lists/tuples of the exact range dimensions;
+        otherwise ``TypeError``. Invalid ``key`` raises ``ValueError``. All
+        values are validated and converted before any edit is recorded, so a
+        bad element never leaves a partial write.
+        """
     def set_cell(self, row: int, col: int, value: object) -> None:
-        """Set the value of cell ``(row, col)`` (1-based)."""
+        """Set the value of cell ``(row, col)`` (1-based).
+
+        Raises ``ValueError`` when ``row``/``col`` is zero or out of the
+        1..1_048_576 row / 1..16_384 column grid.
+        """
     def set_cell_style(
         self,
         row: int,
@@ -410,7 +445,10 @@ class EditableSheet:
         border: dict | None = None,
         num_fmt: str | None = None,
     ) -> None:
-        """Set a style on cell ``(row, col)`` (1-based)."""
+        """Set a style on cell ``(row, col)`` (1-based).
+
+        Raises ``ValueError`` when ``row``/``col`` is zero or out of grid.
+        """
     def insert_rows(self, idx: int, amount: int = 1) -> None:
         """Insert ``amount`` blank rows at 1-based ``idx``.
 
@@ -464,11 +502,12 @@ class EditableSheet:
         straddle the boundary stay put. Formulas *outside* the range that point
         into it are **not** rewritten.
 
-        Raises ``InvalidParametersError`` when ``range_string`` is malformed or
-        at ``save()`` time when the move would push any cell off the grid
-        (1,048,576 rows / 16,384 columns), an implicit-numbered row/cell lies
-        inside the moved region, or a shared-formula ``ref=`` would leave the
-        grid — nothing is written.
+        Raises ``ValueError`` immediately when ``range_string`` is malformed or
+        out of the 1..1_048_576 row / A..XFD column grid, and
+        ``InvalidParametersError`` at ``save()`` time when the move would push
+        any cell off the grid (1,048,576 rows / 16,384 columns), an
+        implicit-numbered row/cell lies inside the moved region, or a
+        shared-formula ``ref=`` would leave the grid — nothing is written.
         """
 
 class EditableWorkbook:
@@ -503,6 +542,25 @@ def validate_excel(path: str) -> dict:
 
 def repair_excel(path: str, out_path: str, severity: str = "warning") -> dict:
     """Repair a workbook into out_path; returns {wrote_output, report, actions}."""
+
+# --- standalone formula API (backing `kyrax.formulas`) ---
+
+def evaluate(formula: str, context: dict[str, object] | None = None) -> object:
+    """Evaluate one formula against an optional A1->value cell context.
+
+    Returns float / str / bool / error-code str, None for blank, or a nested
+    list for an array result. The GIL is released during evaluation.
+    """
+
+def list_functions() -> list[tuple[str, str]]:
+    """Every registered worksheet function as (name, category) pairs."""
+
+def dependencies(formula: str) -> list[str]:
+    """The cell references the formula reads, as sorted A1 strings."""
+
+def recalculate(sheets: list) -> bytes:
+    """Recalculate a workbook (same sheet-dict schema as write_excel_turbo)
+    and return it as XLSX bytes with computed formula caches."""
 
 __version__: str
 

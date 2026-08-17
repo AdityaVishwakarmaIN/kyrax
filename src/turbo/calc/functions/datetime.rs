@@ -134,15 +134,18 @@ fn days_in_month(y: i64, m: i64, date1904: bool) -> i64 {
     }
 }
 
-/// Split the time-of-day fraction of a serial into (hour, minute, second).
-/// The fractional part wraps the day, so HOUR(1.5) == HOUR(0.5) == 12. Seconds
-/// are rounded, matching Excel (so SECOND(0.99) is 36, not 35).
+/// Split the time-of-day of a serial into (hour, minute, second). Computed
+/// from the full serial's total seconds rather than from the fractional part
+/// after `floor`, because subtracting a large integer floor from a big serial
+/// drops the low-order bits of the fraction and can push a minute like 45 to
+/// 44.99999... (Excel reads the same double and gets 45). Hours wrap the day,
+/// so HOUR(1.5) == HOUR(0.5) == 12. Seconds are rounded, matching Excel (so
+/// SECOND(0.99) is 36, not 35).
 fn time_parts(serial: f64) -> (i64, i64, i64) {
-    let frac = serial - serial.floor();
-    let total = frac * 86400.0;
-    let h = (total / 3600.0).floor();
-    let m = ((total - h * 3600.0) / 60.0).floor();
-    let s = (total - h * 3600.0 - m * 60.0).round();
+    let total = serial * 86400.0;
+    let h = (total / 3600.0).floor() % 24.0;
+    let m = (total / 60.0).floor() % 60.0;
+    let s = (total - (total / 60.0).floor() * 60.0).round();
     (h as i64, m as i64, s as i64)
 }
 
@@ -164,25 +167,192 @@ fn now_serial(date1904: bool) -> Result<f64, CalcError> {
     }
 }
 
-/// Strictly unambiguous ISO-8601 date `YYYY-MM-DD` (zero-padded). Anything
-/// else is not parsed — DATEVALUE never guesses a format.
-fn parse_iso_date(s: &str) -> Option<(i64, i64, i64)> {
-    let b = s.as_bytes();
-    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
-        return None;
+// ---------------------------------------------------------------------------
+// Date/time text parsing and date-argument coercion
+// ---------------------------------------------------------------------------
+
+/// Read a 1-or-2 digit run of decimal digits at `b[i]`, advancing `i`. `None`
+/// when there are no digits or more than two.
+fn read_digits_12(b: &[u8], i: &mut usize) -> Option<i64> {
+    let start = *i;
+    let mut v = 0i64;
+    while *i < b.len() && b[*i].is_ascii_digit() {
+        v = v * 10 + (b[*i] - b'0') as i64;
+        *i += 1;
     }
-    for &i in [0usize, 1, 2, 3, 5, 6, 8, 9].iter() {
-        if !b[i].is_ascii_digit() {
+    let n = *i - start;
+    if n == 0 || n > 2 { None } else { Some(v) }
+}
+
+/// Parse a `YYYY-MM-DD` or `YYYY/M/D` date prefix (1-2 digit month/day), the
+/// 4-digit year first making the format unambiguous. Returns the validated
+/// civil date and the byte index just past the day. The separator must match
+/// within the date; locale forms without a leading year are not guessed.
+fn parse_date_prefix(b: &[u8], date1904: bool) -> Option<(i64, i64, i64, usize)> {
+    let mut i = 0;
+    let mut year = 0i64;
+    for _ in 0..4 {
+        if i >= b.len() || !b[i].is_ascii_digit() {
             return None;
         }
+        year = year * 10 + (b[i] - b'0') as i64;
+        i += 1;
     }
-    let y = (b[0] - b'0') as i64 * 1000
-        + (b[1] - b'0') as i64 * 100
-        + (b[2] - b'0') as i64 * 10
-        + (b[3] - b'0') as i64;
-    let m = (b[5] - b'0') as i64 * 10 + (b[6] - b'0') as i64;
-    let d = (b[8] - b'0') as i64 * 10 + (b[9] - b'0') as i64;
-    Some((y, m, d))
+    if i >= b.len() || (b[i] != b'-' && b[i] != b'/') {
+        return None;
+    }
+    let sep = b[i];
+    i += 1;
+    let m = read_digits_12(b, &mut i)?;
+    if i >= b.len() || b[i] != sep {
+        return None;
+    }
+    i += 1;
+    let d = read_digits_12(b, &mut i)?;
+    if !(1..=12).contains(&m) || d < 1 || d > days_in_month(year, m, date1904) {
+        return None;
+    }
+    Some((year, m, d, i))
+}
+
+/// Parse a time `H[:MM[:SS]]` with an optional `AM`/`PM` suffix, starting at
+/// `b[i]` and consuming through the end of the trimmed string. Returns the
+/// fraction of a day. A bare hour with no minutes is refused unless it carries
+/// an AM/PM marker (Excel refuses `"8"` but accepts `"8 AM"`).
+fn parse_time_at(b: &[u8], mut i: usize) -> Option<f64> {
+    let mut h: i64 = 0;
+    let mut hd = 0;
+    while i < b.len() && b[i].is_ascii_digit() && hd < 2 {
+        h = h * 10 + (b[i] - b'0') as i64;
+        hd += 1;
+        i += 1;
+    }
+    if hd == 0 {
+        return None;
+    }
+    let mut m: i64 = 0;
+    let mut sec: i64 = 0;
+    let mut has_min = false;
+    let mut has_sec = false;
+    if i < b.len() && b[i] == b':' {
+        has_min = true;
+        i += 1;
+        let mut md = 0;
+        while i < b.len() && b[i].is_ascii_digit() && md < 2 {
+            m = m * 10 + (b[i] - b'0') as i64;
+            md += 1;
+            i += 1;
+        }
+        if md != 2 {
+            return None;
+        }
+        if i < b.len() && b[i] == b':' {
+            has_sec = true;
+            i += 1;
+            let mut sd = 0;
+            while i < b.len() && b[i].is_ascii_digit() && sd < 2 {
+                sec = sec * 10 + (b[i] - b'0') as i64;
+                sd += 1;
+                i += 1;
+            }
+            if sd != 2 {
+                return None;
+            }
+        }
+    }
+    while i < b.len() && b[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let mut pm = false;
+    let mut has_ampm = false;
+    match std::str::from_utf8(&b[i..])
+        .ok()?
+        .trim()
+        .to_ascii_uppercase()
+        .as_str()
+    {
+        "AM" => has_ampm = true,
+        "PM" => {
+            has_ampm = true;
+            pm = true;
+        }
+        "" => {}
+        _ => return None,
+    }
+    if m > 59 || sec > 59 {
+        return None;
+    }
+    let hour: i64 = if has_ampm {
+        if !(1..=12).contains(&h) {
+            return None;
+        }
+        (h % 12) + if pm { 12 } else { 0 }
+    } else {
+        if !has_min && !has_sec {
+            return None;
+        }
+        if h > 24 {
+            return None;
+        }
+        if h == 24 && (m != 0 || sec != 0) {
+            return None;
+        }
+        h % 24
+    };
+    Some(hour as f64 / 24.0 + m as f64 / 1440.0 + sec as f64 / 86400.0)
+}
+
+/// Parse a date/time string into `(date_serial, time_fraction)`. Accepted:
+/// `YYYY-MM-DD` or `YYYY/M/D` (1-2 digit month/day), optionally followed by
+/// whitespace or `T` and a time; or a bare time string (date serial 0).
+/// Nothing else is guessed — locale `M/D/Y` forms are refused.
+fn parse_date_time(s: &str, date1904: bool) -> Option<(f64, f64)> {
+    let b = s.trim().as_bytes();
+    if b.is_empty() {
+        return None;
+    }
+    if let Some((y, m, d, mut i)) = parse_date_prefix(b, date1904) {
+        if i < b.len() {
+            if b[i] == b'T' {
+                i += 1;
+            } else if b[i].is_ascii_whitespace() {
+                while i < b.len() && b[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+            } else {
+                return None;
+            }
+        }
+        let frac = if i < b.len() {
+            parse_time_at(b, i)?
+        } else {
+            0.0
+        };
+        Some((civil_to_serial(y, m, d, date1904) as f64, frac))
+    } else {
+        Some((0.0, parse_time_at(b, 0)?))
+    }
+}
+
+/// Coerce a date argument to a serial: numbers pass through, text is parsed as
+/// a date string (ISO/slash with optional time) and falls back to plain
+/// numeric coercion, blanks become 0, errors propagate.
+fn coerce_date_serial(ctx: &FuncCtx, arg: &FuncArg) -> Result<f64, CalcError> {
+    let v = arg.value(ctx)?;
+    match &v {
+        CalcValue::Text(t) => match parse_date_time(t, ctx.date1904) {
+            Some((d, f)) => Ok(d + f),
+            None => coerce_number(&v),
+        },
+        _ => coerce_number(&v),
+    }
+}
+
+/// Like [`coerce_date_serial`], but Excel rejects negative serials in every
+/// date-part function (`#NUM!`). Serial 0 stays valid (1900's "January 0").
+fn date_serial(ctx: &FuncCtx, arg: &FuncArg) -> Result<f64, CalcError> {
+    let s = coerce_date_serial(ctx, arg)?;
+    if s < 0.0 { Err(CalcError::Num) } else { Ok(s) }
 }
 
 // ---------------------------------------------------------------------------
@@ -231,51 +401,54 @@ fn now(ctx: &FuncCtx, _args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 }
 
 fn year(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let s = coerce_number(&args[0].value(ctx)?)?;
+    let s = date_serial(ctx, &args[0])?;
     let (y, _, _) = serial_to_civil(s, ctx.date1904);
     ok_num(y as f64)
 }
 
 fn month(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let s = coerce_number(&args[0].value(ctx)?)?;
+    let s = date_serial(ctx, &args[0])?;
     let (_, m, _) = serial_to_civil(s, ctx.date1904);
     ok_num(m as f64)
 }
 
 fn day(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let s = coerce_number(&args[0].value(ctx)?)?;
+    let s = date_serial(ctx, &args[0])?;
     let (_, _, d) = serial_to_civil(s, ctx.date1904);
     ok_num(d as f64)
 }
 
 fn hour(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let s = coerce_number(&args[0].value(ctx)?)?;
+    let s = date_serial(ctx, &args[0])?;
     let (h, _, _) = time_parts(s);
     ok_num(h as f64)
 }
 
 fn minute(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let s = coerce_number(&args[0].value(ctx)?)?;
+    let s = date_serial(ctx, &args[0])?;
     let (_, m, _) = time_parts(s);
     ok_num(m as f64)
 }
 
 fn second(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let s = coerce_number(&args[0].value(ctx)?)?;
+    let s = date_serial(ctx, &args[0])?;
     let (_, _, sec) = time_parts(s);
     ok_num(sec as f64)
 }
 
 fn time(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let h = coerce_number(&args[0].value(ctx)?)?.trunc();
-    let m = coerce_number(&args[1].value(ctx)?)?.trunc();
-    let s = coerce_number(&args[2].value(ctx)?)?.trunc();
-    let frac = h / 24.0 + m / 1440.0 + s / 86400.0;
+    let h = coerce_number(&args[0].value(ctx)?)?;
+    let m = coerce_number(&args[1].value(ctx)?)?;
+    let s = coerce_number(&args[2].value(ctx)?)?;
+    if h < 0.0 || m < 0.0 || s < 0.0 {
+        return Err(CalcError::Num);
+    }
+    let frac = h.trunc() / 24.0 + m.trunc() / 1440.0 + s.trunc() / 86400.0;
     ok_num(frac.rem_euclid(1.0))
 }
 
 fn weekday(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let serial = coerce_number(&args[0].value(ctx)?)?;
+    let serial = date_serial(ctx, &args[0])?;
     let rtype = if args.len() > 1 {
         coerce_number(&args[1].value(ctx)?)?
     } else {
@@ -315,7 +488,7 @@ fn shift_months(y: i64, m: i64, months: f64) -> (f64, f64) {
 }
 
 fn edate(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let start = coerce_number(&args[0].value(ctx)?)?;
+    let start = date_serial(ctx, &args[0])?;
     let months = coerce_number(&args[1].value(ctx)?)?;
     if months > 1e7 || months < -1e7 {
         return Err(CalcError::Num);
@@ -341,7 +514,7 @@ fn edate(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 }
 
 fn eomonth(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let start = coerce_number(&args[0].value(ctx)?)?;
+    let start = date_serial(ctx, &args[0])?;
     let months = coerce_number(&args[1].value(ctx)?)?;
     if months > 1e7 || months < -1e7 {
         return Err(CalcError::Num);
@@ -367,8 +540,8 @@ fn eomonth(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 }
 
 fn datedif(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let start = coerce_number(&args[0].value(ctx)?)?;
-    let end = coerce_number(&args[1].value(ctx)?)?;
+    let start = date_serial(ctx, &args[0])?;
+    let end = date_serial(ctx, &args[1])?;
     let unit = coerce_text(&args[2].value(ctx)?)?;
     let s = start.trunc();
     let e = end.trunc();
@@ -429,31 +602,26 @@ fn datedif(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 
 fn datevalue(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let text = coerce_text(&args[0].value(ctx)?)?;
-    let t = text.trim();
-    let Some((y, m, d)) = parse_iso_date(t) else {
+    let Some((date, _)) = parse_date_time(&text, ctx.date1904) else {
         return Err(CalcError::Value);
     };
-    if m < 1 || m > 12 || d < 1 || d > days_in_month(y, m, ctx.date1904) {
-        return Err(CalcError::Value);
-    }
-    let serial = civil_to_serial(y, m, d, ctx.date1904);
     let max = if ctx.date1904 {
         SERIAL_1904_MAX
     } else {
         SERIAL_1900_MAX
-    };
-    if serial < 0 {
+    } as f64;
+    if date < 0.0 {
         Err(CalcError::Value)
-    } else if serial > max {
+    } else if date > max {
         Err(CalcError::Num)
     } else {
-        ok_num(serial as f64)
+        ok_num(date)
     }
 }
 
 fn days(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let end = coerce_number(&args[0].value(ctx)?)?;
-    let start = coerce_number(&args[1].value(ctx)?)?;
+    let end = coerce_date_serial(ctx, &args[0])?.trunc();
+    let start = coerce_date_serial(ctx, &args[1])?.trunc();
     ok_num(end - start)
 }
 
@@ -724,8 +892,8 @@ fn workday_add(
 }
 
 fn networkdays(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let start = coerce_number(&args[0].value(ctx)?)?;
-    let end = coerce_number(&args[1].value(ctx)?)?;
+    let start = date_serial(ctx, &args[0])?;
+    let end = date_serial(ctx, &args[1])?;
     let holidays = collect_holidays(ctx, args.get(2))?;
     let count = networkdays_count(
         clamp_serial(start),
@@ -738,8 +906,8 @@ fn networkdays(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> 
 }
 
 fn networkdays_intl(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let start = coerce_number(&args[0].value(ctx)?)?;
-    let end = coerce_number(&args[1].value(ctx)?)?;
+    let start = date_serial(ctx, &args[0])?;
+    let end = date_serial(ctx, &args[1])?;
     let mask = weekend_mask_arg(ctx, args.get(2))?;
     let holidays = collect_holidays(ctx, args.get(3))?;
     let count = networkdays_count(
@@ -753,7 +921,7 @@ fn networkdays_intl(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcEr
 }
 
 fn workday(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let start = coerce_number(&args[0].value(ctx)?)?;
+    let start = date_serial(ctx, &args[0])?;
     let ndays = coerce_number(&args[1].value(ctx)?)?;
     let holidays = collect_holidays(ctx, args.get(2))?;
     let ndays = ndays.trunc();
@@ -774,7 +942,7 @@ fn workday(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 }
 
 fn workday_intl(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let start = coerce_number(&args[0].value(ctx)?)?;
+    let start = date_serial(ctx, &args[0])?;
     let ndays = coerce_number(&args[1].value(ctx)?)?;
     let mask = weekend_mask_arg(ctx, args.get(2))?;
     let holidays = collect_holidays(ctx, args.get(3))?;
@@ -932,8 +1100,8 @@ fn days360_core(s1: i64, s2: i64, european: bool, date1904: bool) -> i64 {
 }
 
 fn yearfrac(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let start = coerce_number(&args[0].value(ctx)?)?;
-    let end = coerce_number(&args[1].value(ctx)?)?;
+    let start = date_serial(ctx, &args[0])?;
+    let end = date_serial(ctx, &args[1])?;
     let basis = if args.len() > 2 {
         coerce_number(&args[2].value(ctx)?)?.trunc()
     } else {
@@ -952,8 +1120,8 @@ fn yearfrac(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 }
 
 fn days360(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let start = coerce_number(&args[0].value(ctx)?)?;
-    let end = coerce_number(&args[1].value(ctx)?)?;
+    let start = date_serial(ctx, &args[0])?;
+    let end = date_serial(ctx, &args[1])?;
     let european = if args.len() > 2 {
         match args[2].value(ctx)? {
             CalcValue::Bool(b) => b,
@@ -1003,7 +1171,7 @@ fn isoweek_number(s: i64, date1904: bool) -> i64 {
 }
 
 fn weeknum(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let serial = coerce_number(&args[0].value(ctx)?)?;
+    let serial = date_serial(ctx, &args[0])?;
     let rtype = if args.len() > 1 {
         coerce_number(&args[1].value(ctx)?)?.trunc()
     } else {
@@ -1025,7 +1193,7 @@ fn weeknum(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 }
 
 fn isoweeknum(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let serial = coerce_number(&args[0].value(ctx)?)?;
+    let serial = date_serial(ctx, &args[0])?;
     ok_num(isoweek_number(clamp_serial(serial), ctx.date1904) as f64)
 }
 
@@ -1033,114 +1201,13 @@ fn isoweeknum(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 // TIMEVALUE
 // ---------------------------------------------------------------------------
 
-/// Strict, unambiguous time parsing: an optional ISO `YYYY-MM-DD` date prefix
-/// (validated, its date part contributes nothing), then `H[:MM[:SS]]` with an
-/// optional AM/PM suffix. Nothing else is guessed, matching the family's
-/// DATEVALUE policy.
-fn parse_time_value(s: &str, date1904: bool) -> Option<f64> {
-    let b = s.as_bytes();
-    let mut i = 0;
-    if b.len() >= 11 && b[4] == b'-' && b[7] == b'-' && b[10].is_ascii_whitespace() {
-        for &j in [0usize, 1, 2, 3, 5, 6, 8, 9].iter() {
-            if !b[j].is_ascii_digit() {
-                return None;
-            }
-        }
-        let y = (b[0] - b'0') as i64 * 1000
-            + (b[1] - b'0') as i64 * 100
-            + (b[2] - b'0') as i64 * 10
-            + (b[3] - b'0') as i64;
-        let m = (b[5] - b'0') as i64 * 10 + (b[6] - b'0') as i64;
-        let d = (b[8] - b'0') as i64 * 10 + (b[9] - b'0') as i64;
-        if !(1..=12).contains(&m) || d < 1 || d > days_in_month(y, m, date1904) {
-            return None;
-        }
-        i = 11;
-        while i < b.len() && b[i].is_ascii_whitespace() {
-            i += 1;
-        }
-    }
-    let mut h: i64 = 0;
-    let mut hd = 0;
-    while i < b.len() && b[i].is_ascii_digit() && hd < 2 {
-        h = h * 10 + (b[i] - b'0') as i64;
-        hd += 1;
-        i += 1;
-    }
-    if hd == 0 {
-        return None;
-    }
-    let mut m: i64 = 0;
-    let mut sec: i64 = 0;
-    let mut has_min = false;
-    let mut has_sec = false;
-    if i < b.len() && b[i] == b':' {
-        has_min = true;
-        i += 1;
-        let mut md = 0;
-        while i < b.len() && b[i].is_ascii_digit() && md < 2 {
-            m = m * 10 + (b[i] - b'0') as i64;
-            md += 1;
-            i += 1;
-        }
-        if md != 2 {
-            return None;
-        }
-        if i < b.len() && b[i] == b':' {
-            has_sec = true;
-            i += 1;
-            let mut sd = 0;
-            while i < b.len() && b[i].is_ascii_digit() && sd < 2 {
-                sec = sec * 10 + (b[i] - b'0') as i64;
-                sd += 1;
-                i += 1;
-            }
-            if sd != 2 {
-                return None;
-            }
-        }
-    }
-    while i < b.len() && b[i].is_ascii_whitespace() {
-        i += 1;
-    }
-    let mut pm = false;
-    let mut has_ampm = false;
-    match s[i..].trim().to_ascii_uppercase().as_str() {
-        "AM" => has_ampm = true,
-        "PM" => {
-            has_ampm = true;
-            pm = true;
-        }
-        "" => {}
-        _ => return None,
-    }
-    if m > 59 || sec > 59 {
-        return None;
-    }
-    let hour: i64 = if has_ampm {
-        if !(1..=12).contains(&h) {
-            return None;
-        }
-        (h % 12) + if pm { 12 } else { 0 }
-    } else {
-        if !has_min && !has_sec {
-            return None;
-        }
-        if h > 24 {
-            return None;
-        }
-        if h == 24 && (m != 0 || sec != 0) {
-            return None;
-        }
-        h % 24
-    };
-    Some(hour as f64 / 24.0 + m as f64 / 1440.0 + sec as f64 / 86400.0)
-}
-
+/// TIMEVALUE returns the time-of-day fraction of a parsed date/time string;
+/// a date with no time contributes zero (Excel: `TIMEVALUE("2020-01-02")` is
+/// 0). Parsing is shared with the family's DATEVALUE via `parse_date_time`.
 fn timevalue(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let text = coerce_text(&args[0].value(ctx)?)?;
-    match parse_time_value(text.trim(), ctx.date1904) {
-        Some(f) => ok_num(f),
+    match parse_date_time(&text, ctx.date1904) {
+        Some((_, frac)) => ok_num(frac),
         None => Err(CalcError::Value),
     }
 }
@@ -1674,11 +1741,19 @@ mod tests {
         assert_eq!(call(&HOUR, false, vec![serial.clone()]), Ok(n(23.0)));
         assert_eq!(call(&MINUTE, false, vec![serial.clone()]), Ok(n(59.0)));
         assert_eq!(call(&SECOND, false, vec![serial]), Ok(n(59.0)));
+    }
 
-        let wrapped = call(&TIME, false, vec![n(-1.0), n(0.0), n(0.0)]).unwrap();
-        assert_eq!(call(&HOUR, false, vec![wrapped.clone()]), Ok(n(23.0)));
-        assert_eq!(call(&MINUTE, false, vec![wrapped.clone()]), Ok(n(0.0)));
-        assert_eq!(call(&SECOND, false, vec![wrapped]), Ok(n(0.0)));
+    #[test]
+    fn time_rejects_negative_arguments() {
+        // Excel-COM measured: any negative TIME argument is #NUM!.
+        for args in [
+            vec![n(-1.0), n(0.0), n(0.0)],
+            vec![n(0.0), n(-1.0), n(0.0)],
+            vec![n(0.0), n(0.0), n(-1.0)],
+            vec![n(-1.0), n(-50.0), n(-70.0)],
+        ] {
+            assert_eq!(call(&TIME, false, args), Err(CalcError::Num));
+        }
     }
 
     // --- WEEKDAY ------------------------------------------------------------
@@ -1923,7 +1998,7 @@ mod tests {
     // --- DATEVALUE ----------------------------------------------------------
 
     #[test]
-    fn datevalue_parses_iso_only() {
+    fn datevalue_parses_iso_slash_and_time() {
         assert_eq!(
             call(&DATEVALUE, false, vec![t("2024-03-01")]),
             Ok(n(45352.0))
@@ -1946,18 +2021,37 @@ mod tests {
             call(&DATEVALUE, true, vec![t("2024-03-01")]),
             Ok(n(43890.0))
         );
+        // unpadded ISO and year-first slash are unambiguous, so they parse
+        assert_eq!(call(&DATEVALUE, false, vec![t("2024-3-1")]), Ok(n(45352.0)));
+        assert_eq!(
+            call(&DATEVALUE, false, vec![t("2024/03/01")]),
+            Ok(n(45352.0))
+        );
+        assert_eq!(call(&DATEVALUE, false, vec![t("2011/1/1")]), Ok(n(40544.0)));
+        // a trailing time contributes nothing to the serial
+        assert_eq!(
+            call(&DATEVALUE, false, vec![t("2020-01-02 13:14:15")]),
+            Ok(n(43832.0))
+        );
+        assert_eq!(
+            call(&DATEVALUE, false, vec![t("2024-02-29 12:00")]),
+            Ok(n(45351.0))
+        );
+        // a bare time string has date part 0
+        assert_eq!(call(&DATEVALUE, false, vec![t("8:30 AM")]), Ok(n(0.0)));
     }
 
     #[test]
     fn datevalue_rejects_ambiguity() {
         for bad in [
-            "2024-3-1",
             "03/01/2024",
-            "2024/03/01",
+            "03-01-2024",
             "2024-13-01",
             "2024-02-30",
-            "2024-02-29 12:00",
+            "2024/13/01",
+            "2024/2/30",
             "hello",
+            "2020-01-02XYZ",
             "",
         ] {
             assert_eq!(
@@ -1990,9 +2084,23 @@ mod tests {
             Ok(n(-60.0))
         );
         assert_eq!(call(&DAYS, false, vec![n(45352.0), n(45352.0)]), Ok(n(0.0)));
+        // Excel truncates the fractional time portions of both serials.
         assert_eq!(
             call(&DAYS, false, vec![n(45352.5), n(45292.25)]),
-            Ok(n(60.25))
+            Ok(n(60.0))
+        );
+        assert_eq!(
+            call(&DAYS, false, vec![n(43832.233), n(1.0)]),
+            Ok(n(43831.0))
+        );
+        // date-text arguments are coerced like serials
+        assert_eq!(
+            call(&DAYS, false, vec![t("2020-01-02"), n(1.0)]),
+            Ok(n(43831.0))
+        );
+        assert_eq!(
+            call(&DAYS, false, vec![t("2011/1/29"), t("2011/1/1")]),
+            Ok(n(28.0))
         );
     }
 
@@ -2573,6 +2681,182 @@ mod tests {
             call(&TIMEVALUE, false, vec![n(45292.0)]),
             Err(CalcError::Value)
         );
+    }
+
+    // --- lane E: date-string coercion family (brief_lane_E.csv) ---------------
+
+    // Every row of brief_lane_E.csv, whose expected values are Excel-COM
+    // measured (referee_v2_full.txt). The theme: date strings (ISO and
+    // year-first slash, optional time) coerce in every date-part function,
+    // negative serials/times are #NUM!, and DAYS truncates to integers.
+    #[test]
+    fn lane_e_date_string_coercion() {
+        assert_eq!(call(&DAY, false, vec![t("2020-01-02")]), Ok(n(2.0)));
+        assert_eq!(call(&MONTH, false, vec![t("2020-01-02")]), Ok(n(1.0)));
+        assert_eq!(call(&YEAR, false, vec![t("2020-01-02")]), Ok(n(2020.0)));
+        assert_eq!(call(&HOUR, false, vec![t("2020-01-02 7:45")]), Ok(n(7.0)));
+        assert_eq!(
+            call(&MINUTE, false, vec![t("2020-01-02 7:45")]),
+            Ok(n(45.0))
+        );
+        assert_eq!(
+            call(&SECOND, false, vec![t("2020-01-02 7:45:18")]),
+            Ok(n(18.0))
+        );
+        assert_eq!(
+            call(&DATEVALUE, false, vec![t("2020-01-02 13:14:15")]),
+            Ok(n(43832.0))
+        );
+        assert_eq!(call(&TIMEVALUE, false, vec![t("2020-01-02")]), Ok(n(0.0)));
+        assert_eq!(
+            call(&WEEKDAY, false, vec![t("2008-11-26"), n(1.0)]),
+            Ok(n(4.0))
+        );
+        assert_eq!(call(&ISOWEEKNUM, false, vec![t("2008-11-26")]), Ok(n(48.0)));
+        assert_eq!(
+            call(&WEEKNUM, false, vec![t("2011-1-1"), n(21.0)]),
+            Ok(n(52.0))
+        );
+        assert_eq!(
+            call(&EOMONTH, false, vec![t("2011/1/1"), n(1.0)]),
+            Ok(n(40602.0))
+        );
+        assert_eq!(
+            call(&NETWORKDAYS, false, vec![t("2012-10-1"), t("2013-3-1")]),
+            Ok(n(110.0))
+        );
+        assert_eq!(
+            call(
+                &NETWORKDAYS_INTL,
+                false,
+                vec![t("2012-10-1"), t("2013-3-1")]
+            ),
+            Ok(n(110.0))
+        );
+        assert_eq!(
+            call(&WORKDAY, false, vec![t("2008-10-1"), n(151.0)]),
+            Ok(n(39933.0))
+        );
+        assert_eq!(
+            call(&WORKDAY_INTL, false, vec![t("2008-10-1"), n(151.0)]),
+            Ok(n(39933.0))
+        );
+        assert_eq!(
+            call(
+                &DATEDIF,
+                false,
+                vec![t("2011/1/29"), t("2021/3/31"), t("Y")]
+            ),
+            Ok(n(10.0))
+        );
+        assert_eq!(
+            call(&DAYS360, false, vec![t("2021/1/29"), t("2021/3/31")]),
+            Ok(n(62.0))
+        );
+        assert_eq!(
+            call(&DAYS, false, vec![n(43832.233), n(1.0)]),
+            Ok(n(43831.0))
+        );
+        assert_eq!(
+            call(&TIME, false, vec![n(-1.0), n(-50.0), n(-70.0)]),
+            Err(CalcError::Num)
+        );
+        assert!(near(
+            call(&YEARFRAC, false, vec![t("2012/2/2"), t("2021/3/11")]).unwrap(),
+            9.108333333333333
+        ));
+    }
+
+    #[test]
+    fn lane_e_slash_dates_and_ampm() {
+        // Excel-COM measured probes beyond the brief's one row per function.
+        assert_eq!(
+            call(&WEEKDAY, false, vec![t("2011/1/29"), n(1.0)]),
+            Ok(n(7.0))
+        );
+        assert_eq!(
+            call(&EDATE, false, vec![t("2011/1/1"), n(1.0)]),
+            Ok(n(40575.0))
+        );
+        assert_eq!(
+            call(&EOMONTH, false, vec![t("2011/1/1"), n(1.0)]),
+            Ok(n(40602.0))
+        );
+        assert_eq!(
+            call(&NETWORKDAYS, false, vec![t("2011/1/29"), t("2021/3/31")]),
+            Ok(n(2653.0))
+        );
+        assert_eq!(
+            call(&DAYS, false, vec![t("2020-01-02"), n(1.0)]),
+            Ok(n(43831.0))
+        );
+        assert_eq!(call(&DAY, false, vec![t("8:30 AM")]), Ok(n(0.0)));
+        assert_eq!(
+            call(&HOUR, false, vec![t("2020-01-02 7:45 PM")]),
+            Ok(n(19.0))
+        );
+        assert_eq!(call(&TIMEVALUE, false, vec![t("2011/1/29")]), Ok(n(0.0)));
+        assert!(near(
+            call(&TIMEVALUE, false, vec![t("2020-01-02 13:14:15")]).unwrap(),
+            0.5515625
+        ));
+        assert!(near(
+            call(&TIMEVALUE, false, vec![t("2020-01-02 7:45")]).unwrap(),
+            7.75 / 24.0
+        ));
+        assert!(near(
+            call(&TIMEVALUE, false, vec![t("2024-02-29 12:00")]).unwrap(),
+            0.5
+        ));
+        assert_eq!(call(&DAY, false, vec![t("2020-1-2")]), Ok(n(2.0)));
+    }
+
+    #[test]
+    fn negative_serials_are_num() {
+        for f in [
+            (&DAY, vec![n(-1.0)]),
+            (&MONTH, vec![n(-1.0)]),
+            (&YEAR, vec![n(-1.0)]),
+            (&HOUR, vec![n(-1.0)]),
+            (&MINUTE, vec![n(-0.5)]),
+            (&SECOND, vec![n(-1.5)]),
+            (&WEEKDAY, vec![n(-1.0)]),
+            (&ISOWEEKNUM, vec![n(-1.0)]),
+            (&WEEKNUM, vec![n(-1.0)]),
+        ] {
+            assert_eq!(call(f.0, false, f.1), Err(CalcError::Num));
+        }
+        assert_eq!(
+            call(&EDATE, false, vec![n(-1.0), n(1.0)]),
+            Err(CalcError::Num)
+        );
+        assert_eq!(
+            call(&EOMONTH, false, vec![n(-1.0), n(1.0)]),
+            Err(CalcError::Num)
+        );
+        assert_eq!(
+            call(&NETWORKDAYS, false, vec![n(-1.0), n(100.0)]),
+            Err(CalcError::Num)
+        );
+        assert_eq!(
+            call(&WORKDAY, false, vec![n(-1.0), n(1.0)]),
+            Err(CalcError::Num)
+        );
+        assert_eq!(
+            call(&DATEDIF, false, vec![n(-1.0), n(100.0), t("D")]),
+            Err(CalcError::Num)
+        );
+        assert_eq!(
+            call(&YEARFRAC, false, vec![n(-1.0), n(100.0)]),
+            Err(CalcError::Num)
+        );
+        assert_eq!(
+            call(&DAYS360, false, vec![n(-1.0), n(100.0)]),
+            Err(CalcError::Num)
+        );
+        // serial 0 stays valid: 1900's "January 0" / 1904-01-01
+        assert_eq!(call(&DAY, false, vec![n(0.0)]), Ok(n(0.0)));
+        assert_eq!(call(&YEAR, true, vec![n(0.0)]), Ok(n(1904.0)));
     }
 
     // --- registry wiring through the real path -------------------------------

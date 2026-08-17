@@ -796,8 +796,11 @@ fn randarray(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     } else {
         false
     };
-    if rows <= 0 || cols <= 0 {
+    if rows < 0 || cols < 0 {
         return Err(CalcError::Value);
+    }
+    if rows == 0 || cols == 0 {
+        return Err(CalcError::Calc);
     }
     if min > max {
         return Err(CalcError::Value);
@@ -2164,7 +2167,9 @@ mod tests {
             Grid::empty().error("=RANDARRAY(1, 1, 5, 1)"),
             CalcError::Value
         );
-        assert_eq!(Grid::empty().error("=RANDARRAY(0)"), CalcError::Value);
+        assert_eq!(Grid::empty().error("=RANDARRAY(0)"), CalcError::Calc);
+        assert_eq!(Grid::empty().error("=RANDARRAY(1, 0)"), CalcError::Calc);
+        assert_eq!(Grid::empty().error("=RANDARRAY(-1)"), CalcError::Value);
         let spec = crate::turbo::calc::functions::registry()
             .get("RANDARRAY")
             .unwrap();

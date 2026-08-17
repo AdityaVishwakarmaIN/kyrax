@@ -19,6 +19,17 @@ fn ok_num(n: f64) -> Result<CalcValue, CalcError> {
     }
 }
 
+/// Number coercion that rejects booleans (#VALUE!) — MROUND and RANDBETWEEN
+/// do not coerce TRUE/FALSE the way plain arithmetic does (verified:
+/// MROUND(2.15,TRUE) and RANDBETWEEN(TRUE,3) are both #VALUE! in Excel).
+/// Numeric text still coerces.
+fn coerce_number_no_bool(v: &CalcValue) -> Result<f64, CalcError> {
+    match v {
+        CalcValue::Bool(_) => Err(CalcError::Value),
+        _ => coerce_number(v),
+    }
+}
+
 fn sum(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let mut total = 0.0;
     for arg in args {
@@ -106,14 +117,20 @@ fn count(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
                 for v in a.iter() {
                     match v {
                         CalcValue::Number(_) => n += 1,
-                        CalcValue::Error(e) => return Err(*e),
+                        // Errors are skipped, not propagated: COUNT reports how
+                        // many numbers it sees (Excel: COUNT(#N/A) is 0).
                         _ => {}
                     }
                 }
             }
             v => {
-                coerce_number(&v)?;
-                n += 1;
+                // A direct error argument is likewise not a number — and is
+                // not propagated (measured: =COUNT(#N/A) returns 0).
+                if !matches!(v, CalcValue::Error(_)) {
+                    if coerce_number(&v).is_ok() {
+                        n += 1;
+                    }
+                }
             }
         }
     }
@@ -201,6 +218,11 @@ fn mod_(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     if d == 0.0 {
         return Err(CalcError::Div0);
     }
+    // Excel's MOD loses precision beyond 2^40 and returns #NUM! (verified:
+    // MOD(1125900000000,1) is #NUM! though 1125900000000 % 1 == 0).
+    if n.abs() >= 1099511627776.0 {
+        return Err(CalcError::Num);
+    }
     let mut r = n % d;
     if r != 0.0 && (r < 0.0) != (d < 0.0) {
         r += d;
@@ -214,6 +236,10 @@ fn power(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     if b == 0.0 && e < 0.0 {
         return Err(CalcError::Div0);
     }
+    // Excel: 0^0 is #NUM!, not 1.
+    if b == 0.0 && e == 0.0 {
+        return Err(CalcError::Num);
+    }
     if b < 0.0 && e.fract() != 0.0 {
         return Err(CalcError::Num);
     }
@@ -226,6 +252,16 @@ fn sqrt(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
         return Err(CalcError::Num);
     }
     ok_num(n.sqrt())
+}
+
+/// SQRTPI(number): the square root of number × π; negative numbers are
+/// #NUM!, like SQRT.
+fn sqrtpi(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    let n = coerce_number(&args[0].value(ctx)?)?;
+    if n < 0.0 {
+        return Err(CalcError::Num);
+    }
+    ok_num((n * std::f64::consts::PI).sqrt())
 }
 
 enum RoundMode {
@@ -624,6 +660,9 @@ fn atan2(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     // y argument leads.
     let x = coerce_number(&args[0].value(ctx)?)?;
     let y = coerce_number(&args[1].value(ctx)?)?;
+    if x == 0.0 && y == 0.0 {
+        return Err(CalcError::Div0);
+    }
     ok_num(y.atan2(x))
 }
 
@@ -639,8 +678,14 @@ fn acot(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     ok_num(v)
 }
 
+/// Excel's reciprocal trig functions return #NUM! for |x| >= 2^27 where the
+/// argument's stored precision makes the result meaningless (verified:
+/// COT(134217728) / CSC(134217728) / SEC(134217728) are all #NUM!).
 fn csc(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let n = coerce_number(&args[0].value(ctx)?)?;
+    if n.abs() >= 134217728.0 {
+        return Err(CalcError::Num);
+    }
     let s = n.sin();
     if s == 0.0 {
         return Err(CalcError::Div0);
@@ -650,6 +695,9 @@ fn csc(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 
 fn sec(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let n = coerce_number(&args[0].value(ctx)?)?;
+    if n.abs() >= 134217728.0 {
+        return Err(CalcError::Num);
+    }
     let c = n.cos();
     if c == 0.0 {
         return Err(CalcError::Div0);
@@ -659,6 +707,9 @@ fn sec(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 
 fn cot(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let n = coerce_number(&args[0].value(ctx)?)?;
+    if n.abs() >= 134217728.0 {
+        return Err(CalcError::Num);
+    }
     let t = n.tan();
     if t == 0.0 {
         return Err(CalcError::Div0);
@@ -759,9 +810,10 @@ fn floor_legacy(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError>
     ok_num(s * (n / s).floor())
 }
 
-/// CEILING.MATH(number, [significance=1], [mode=0]). Default rounds up (toward
-/// +inf) whatever the sign; a non-zero mode makes negative numbers round
-/// toward zero. Significance 0 is 0.
+/// CEILING.MATH(number, [significance=1], [mode=0]). The significance sign is
+/// ignored (its absolute value is the step). By default the result rounds up
+/// toward +inf whatever the number's sign; a non-zero `mode` makes negative
+/// numbers round toward zero instead. Significance 0 is 0.
 fn ceiling_math(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let n = coerce_number(&args[0].value(ctx)?)?;
     let s = if args.len() > 1 {
@@ -777,11 +829,10 @@ fn ceiling_math(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError>
     if n == 0.0 || s == 0.0 {
         return Ok(CalcValue::Number(0.0));
     }
+    let s = s.abs();
     let q = n / s;
-    let r = if mode == 0.0 || n >= 0.0 {
-        q.ceil()
-    } else if q >= 0.0 {
-        q.floor()
+    let r = if n < 0.0 && mode != 0.0 {
+        q.trunc()
     } else {
         q.ceil()
     };
@@ -803,8 +854,10 @@ fn ceiling_precise(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcErr
     ok_num(s * (n / s).ceil())
 }
 
-/// FLOOR.MATH(number, [significance=1], [mode=0]). Default rounds down (toward
-/// -inf); a non-zero mode makes negative numbers round toward zero.
+/// FLOOR.MATH(number, [significance=1], [mode=0]). The significance sign is
+/// ignored (its absolute value is the step). By default the result rounds down
+/// toward -inf whatever the number's sign; a non-zero `mode` makes negative
+/// numbers round toward zero instead. Significance 0 is 0.
 fn floor_math(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let n = coerce_number(&args[0].value(ctx)?)?;
     let s = if args.len() > 1 {
@@ -820,13 +873,12 @@ fn floor_math(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     if n == 0.0 || s == 0.0 {
         return Ok(CalcValue::Number(0.0));
     }
+    let s = s.abs();
     let q = n / s;
-    let r = if mode == 0.0 || n >= 0.0 {
-        q.floor()
-    } else if q >= 0.0 {
-        q.floor()
+    let r = if n < 0.0 && mode != 0.0 {
+        q.trunc()
     } else {
-        q.ceil()
+        q.floor()
     };
     ok_num(s * r)
 }
@@ -847,10 +899,11 @@ fn floor_precise(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError
 }
 
 /// MROUND: rounds half away from zero to the nearest multiple; opposite-sign
-/// arguments are #NUM! and a zero multiple is #DIV/0!.
+/// arguments are #NUM! and a zero multiple is #DIV/0!. Boolean arguments are
+/// #VALUE! (Excel does not coerce them here).
 fn mround(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let n = coerce_number(&args[0].value(ctx)?)?;
-    let m = coerce_number(&args[1].value(ctx)?)?;
+    let n = coerce_number_no_bool(&args[0].value(ctx)?)?;
+    let m = coerce_number_no_bool(&args[1].value(ctx)?)?;
     if n == 0.0 {
         return Ok(CalcValue::Number(0.0));
     }
@@ -1211,8 +1264,8 @@ fn rand(_ctx: &FuncCtx, _args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 }
 
 fn randbetween(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let bottom = coerce_number(&args[0].value(ctx)?)?.round();
-    let top = coerce_number(&args[1].value(ctx)?)?.round();
+    let bottom = coerce_number_no_bool(&args[0].value(ctx)?)?.round();
+    let top = coerce_number_no_bool(&args[1].value(ctx)?)?.round();
     if bottom > top {
         return Err(CalcError::Num);
     }
@@ -1289,10 +1342,18 @@ fn roman_digit(c: char) -> Option<(u16, bool)> {
 }
 
 /// ARABIC, ported from the ODFF/LibreOffice validator (case-insensitive,
-/// rejects non-canonical ordering and values above 3999 with #VALUE!).
+/// rejects non-canonical ordering and values above 3999 with #VALUE!). A
+/// leading minus sign negates the value (Excel: ARABIC("-mcmxii") = -1912).
 fn arabic(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let s = coerce_text(&args[0].value(ctx)?)?;
-    let s = s.trim().to_ascii_uppercase();
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(CalcError::Value);
+    }
+    let (neg, s) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest.trim().to_ascii_uppercase()),
+        None => (false, s.to_ascii_uppercase()),
+    };
     if s.is_empty() {
         return Err(CalcError::Value);
     }
@@ -1333,7 +1394,11 @@ fn arabic(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
             return Err(CalcError::Value);
         }
     }
-    Ok(CalcValue::Number(value as f64))
+    Ok(CalcValue::Number(if neg {
+        -(value as f64)
+    } else {
+        value as f64
+    }))
 }
 
 fn digit_char(d: u8) -> char {
@@ -1440,7 +1505,10 @@ fn var_pop(nums: &[f64]) -> f64 {
 /// The shared aggregate core behind SUBTOTAL and AGGREGATE. `ignore_errors`
 /// skips error cells (AGGREGATE options 2/3/6/7); otherwise the first error
 /// propagates. Group 3 is COUNTA (counts every non-blank cell), the rest
-/// operate on numbers only.
+/// operate on numbers only. Cells holding numeric TEXT ("100", "2.34") count
+/// as numbers — Excel's SUBTOTAL/AGGREGATE include them even though SUM over
+/// a range ignores text (verified: SUBTOTAL(9,A1:B2,A3:F4) = 111.57 including
+/// the "100" and "2.34" cells).
 fn aggregate_values(
     group: i64,
     values: &[CalcValue],
@@ -1463,6 +1531,11 @@ fn aggregate_values(
             CalcValue::Text(t) => {
                 if !t.is_empty() {
                     non_blank += 1;
+                }
+                if let Ok(n) = t.trim().parse::<f64>() {
+                    if n.is_finite() {
+                        nums.push(n);
+                    }
                 }
             }
             _ => {}
@@ -1573,6 +1646,7 @@ fn percentile_exc(nums: &[f64], k: f64) -> Result<CalcValue, CalcError> {
 }
 
 /// The k-taking AGGREGATE functions (LARGE/SMALL/PERCENTILE/QUARTILE).
+/// Numeric text cells count as numbers, matching the non-k aggregations.
 fn aggregate_k(
     group: i64,
     values: &[CalcValue],
@@ -1583,6 +1657,13 @@ fn aggregate_k(
     for v in values {
         match v {
             CalcValue::Number(n) => nums.push(*n),
+            CalcValue::Text(t) => {
+                if let Ok(n) = t.trim().parse::<f64>() {
+                    if n.is_finite() {
+                        nums.push(n);
+                    }
+                }
+            }
             CalcValue::Error(e) => {
                 if !ignore_errors {
                     return Err(*e);
@@ -1966,6 +2047,15 @@ const SQRT: FuncSpec = FuncSpec {
     volatile: false,
     array_aware: false,
     func: sqrt,
+};
+
+const SQRTPI: FuncSpec = FuncSpec {
+    name: "SQRTPI",
+    min_args: 1,
+    max_args: Some(1),
+    volatile: false,
+    array_aware: false,
+    func: sqrtpi,
 };
 
 const ROUND: FuncSpec = FuncSpec {
@@ -2683,6 +2773,7 @@ pub fn register(r: &mut Registry) {
     r.register(&MOD);
     r.register(&POWER);
     r.register(&SQRT);
+    r.register(&SQRTPI);
     r.register(&ROUND);
     r.register(&ROUNDUP);
     r.register(&ROUNDDOWN);
@@ -2851,6 +2942,23 @@ mod tests {
             call(sum, vec![CalcValue::err(CalcError::Div0)]),
             Err(CalcError::Div0)
         );
+    }
+
+    #[test]
+    fn count_skips_errors_instead_of_propagating() {
+        // Excel: =COUNT(#N/A) is 0 — COUNT reports how many numbers it sees.
+        assert_eq!(
+            call(count, vec![CalcValue::err(CalcError::Na)]),
+            Ok(num(0.0))
+        );
+        // Errors inside a range/array are skipped too.
+        let v = col(vec![
+            num(1.0),
+            CalcValue::err(CalcError::Div0),
+            num(3.0),
+            txt("x"),
+        ]);
+        assert_eq!(call(count, vec![v]), Ok(num(2.0)));
     }
 
     #[test]
@@ -3513,6 +3621,7 @@ mod tests {
             "SUMX2PY2",
             "SUMXMY2",
             "SERIESSUM",
+            "SQRTPI",
             "ROMAN",
             "ARABIC",
             "BASE",
@@ -3552,5 +3661,137 @@ mod tests {
                 "{name} must be array-aware"
             );
         }
+    }
+
+    // -- lane D (round 2): Excel-measured fixes ------------------------------
+
+    #[test]
+    fn sqrtpi_matches_excel() {
+        ax("=SQRTPI(1)", std::f64::consts::PI.sqrt(), 1e-15);
+        ax("=SQRTPI(2)", (2.0 * std::f64::consts::PI).sqrt(), 1e-15);
+        assert_eq!(n("=SQRTPI(0)"), 0.0);
+        assert_eq!(e("=SQRTPI(-1)"), CalcError::Num);
+        assert_eq!(e("=SQRTPI(1,\"x\")"), CalcError::Value);
+    }
+
+    #[test]
+    fn cot_csc_sec_reject_arguments_at_or_above_2_pow_27() {
+        assert_eq!(e("=COT(134217728)"), CalcError::Num);
+        assert_eq!(e("=CSC(134217728)"), CalcError::Num);
+        assert_eq!(e("=SEC(134217728)"), CalcError::Num);
+        assert_eq!(e("=COT(-134217728)"), CalcError::Num);
+        // below the limit they still compute
+        assert_eq!(n("=COT(134217727)"), 1.0 / 134217727f64.tan());
+        assert_eq!(n("=SEC(134217727)"), 1.0 / 134217727f64.cos());
+    }
+
+    #[test]
+    fn mod_overflow_is_num() {
+        assert_eq!(e("=MOD(1125900000000,1)"), CalcError::Num);
+        // well below the 2^40 limit MOD keeps working
+        assert_eq!(n("=MOD(17,5)"), 2.0);
+    }
+
+    #[test]
+    fn power_zero_to_zero_is_num() {
+        assert_eq!(e("=POWER(0,0)"), CalcError::Num);
+        assert_eq!(n("=POWER(0,1)"), 0.0);
+        assert_eq!(n("=POWER(2,0)"), 1.0);
+    }
+
+    #[test]
+    fn atan2_origin_is_div0() {
+        assert_eq!(e("=ATAN2(0,0)"), CalcError::Div0);
+        assert_eq!(n("=ATAN2(0,1)"), std::f64::consts::FRAC_PI_2);
+    }
+
+    #[test]
+    fn mround_and_randbetween_reject_boolean_arguments() {
+        assert_eq!(e("=MROUND(2.15,TRUE)"), CalcError::Value);
+        assert_eq!(e("=MROUND(FALSE,2)"), CalcError::Value);
+        assert_eq!(e("=RANDBETWEEN(TRUE,3)"), CalcError::Value);
+        assert_eq!(e("=RANDBETWEEN(1,FALSE)"), CalcError::Value);
+        // numeric text still coerces
+        assert_eq!(n("=MROUND(2.15,\"1\")"), 2.0);
+    }
+
+    #[test]
+    fn ceiling_floor_math_negative_significance_and_mode() {
+        // mode-null (default): CEILING.MATH rounds toward +inf, FLOOR.MATH
+        // toward -inf, whatever the sign of the significance.
+        assert_eq!(n("=CEILING.MATH(-2.5,-2)"), -2.0);
+        assert_eq!(n("=FLOOR.MATH(-2.5,-2)"), -4.0);
+        assert_eq!(n("=CEILING.MATH(-2.5,2)"), -2.0);
+        assert_eq!(n("=FLOOR.MATH(-2.5,2)"), -4.0);
+        // mode-set (non-zero) rounds negatives toward zero
+        assert_eq!(n("=CEILING.MATH(-2.5,-2,1)"), -2.0);
+        assert_eq!(n("=FLOOR.MATH(-2.5,-2,1)"), -2.0);
+    }
+
+    #[test]
+    fn arabic_accepts_negative_prefix() {
+        assert_eq!(n("=ARABIC(\"-mcmxii\")"), -1912.0);
+        assert_eq!(n("=ARABIC(\"-lvii\")"), -57.0);
+        assert_eq!(n("=ARABIC(\"- MCMXII\")"), -1912.0);
+        assert_eq!(n("=ARABIC(\"MCMXII\")"), 1912.0);
+        assert_eq!(e("=ARABIC(\"\")"), CalcError::Value);
+    }
+
+    #[test]
+    fn sumx_pair_functions_skip_text_pairs() {
+        // Excel skips a pair whenever either side is text: with the second
+        // array {text "3", 4} the first pair is skipped, the second counted.
+        assert_eq!(n("=SUMX2MY2({1,2},{\"3\",4})"), -12.0);
+        assert_eq!(n("=SUMX2PY2({1,2},{\"3\",4})"), 20.0);
+        assert_eq!(n("=SUMXMY2({1,2},{\"3\",4})"), 4.0);
+        // text in the first array skips too
+        assert_eq!(n("=SUMX2MY2({\"a\",2},{3,4})"), -12.0);
+        // anti-regression: numeric text is NOT coerced into SUMX* — when the
+        // second element of the first array is text "2" that pair is skipped,
+        // leaving only (1,3) = 1-9 = -8 (not -20 with "2" coerced)
+        assert_eq!(n("=SUMX2MY2({1,\"2\"},{3,4})"), -8.0);
+        // ...and two text pairs contribute nothing
+        assert_eq!(n("=SUMX2MY2({1,2},{\"3\",\"4\"})"), 0.0);
+    }
+
+    #[test]
+    fn subtotal_and_aggregate_sum_multiple_ranges_including_numeric_text() {
+        // The exact AGG_GRID the round-2 brief is measured against:
+        //   A1:B2       = 1 2 / 3 4                -> 10
+        //   A3:F4       = 1 " " 1.23 T F / 0 "100" "2.34" "test" -3
+        //   numeric text cells "100" and "2.34" count as numbers -> +102.34
+        //   booleans and non-numeric text are skipped
+        let g = Grid::empty()
+            .set_num("A1", 1.0)
+            .set_num("B1", 2.0)
+            .set_num("A2", 3.0)
+            .set_num("B2", 4.0)
+            .set_num("A3", 1.0)
+            .set_text("B3", " ")
+            .set_num("C3", 1.23)
+            .set_bool("D3", true)
+            .set_bool("E3", false)
+            .set_num("A4", 0.0)
+            .set_text("B4", "100")
+            .set_text("C4", "2.34")
+            .set_text("D4", "test")
+            .set_num("E4", -3.0);
+        let got = g.num("=SUBTOTAL(9,A1:B2,A3:F4)");
+        assert!(
+            (got - 111.57).abs() <= 1e-9 * 111.57,
+            "SUBTOTAL sum = {got}"
+        );
+        let got = g.num("=AGGREGATE(9,,A1:B2,A3:F4)");
+        assert!(
+            (got - 111.57).abs() <= 1e-9 * 111.57,
+            "AGGREGATE sum = {got}"
+        );
+        let got = g.num("=SUBTOTAL(1,A1:B2,A3:F4)");
+        assert!(
+            (got - 11.157).abs() <= 1e-9 * 11.157,
+            "SUBTOTAL avg = {got}"
+        );
+        assert_eq!(g.num("=SUBTOTAL(2,A1:B2,A3:F4)"), 10.0);
+        assert_eq!(g.num("=AGGREGATE(14,,A1:B2,2)"), 3.0);
     }
 }

@@ -57,17 +57,6 @@ def _sheet_xml(path, sheet_no=1):
         return z.read(name)
 
 
-def _strip_full_calc(path, out):
-    """Copy ``path`` to ``out`` with `` fullCalcOnLoad="1"`` removed from
-    ``xl/workbook.xml``. Forces the engine to guarantee recalc itself."""
-    with zipfile.ZipFile(path) as zin, zipfile.ZipFile(out, "w") as zout:
-        for item in zin.infolist():
-            data = zin.read(item.filename)
-            if item.filename == "xl/workbook.xml":
-                data = data.replace(b' fullCalcOnLoad="1"', b"")
-            zout.writestr(item, data)
-
-
 def _build_formula_sheet(path):
     wb = Workbook()
     ws = wb.active
@@ -178,29 +167,48 @@ def test_mut01_formula_body_and_cell_move_on_insert(tmp_path):
     assert "<f>A1+A2</f>" not in xml, xml
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "A3-MUT-01 stale-cache gate: the overlay save does not force "
-        "calcPr fullCalcOnLoad=\"1\" when a mutated sheet carries formulas, so a "
-        "reader presents a stale cached <v> as current. S1 dependency on "
-        "overlay.rs save(). Failing regression per corrected triage."
-    ),
-)
+def _seed_stale_cache(path, out):
+    """Copy ``path`` to ``out``, inject a nonempty cached `<v>` into the A3
+    formula cell, and strip ``fullCalcOnLoad="1"`` from ``xl/workbook.xml``.
+    Forces the engine to both clear the stale cached result and guarantee
+    recalc itself. The injection accepts both the self-closing `<v />` form
+    openpyxl emits and the paired `<v></v>` form."""
+    with zipfile.ZipFile(str(path)) as zin, zipfile.ZipFile(str(out), "w") as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                for old in (b"<f>A1+A2</f><v />", b"<f>A1+A2</f><v></v>"):
+                    if old in data:
+                        data = data.replace(old, b"<f>A1+A2</f><v>3</v>")
+                        break
+                assert b"<f>A1+A2</f><v>3</v>" in data, (
+                    "failed to seed stale cache: formula cell not found in source"
+                )
+            elif item.filename == "xl/workbook.xml":
+                data = data.replace(b' fullCalcOnLoad="1"', b"")
+            zout.writestr(item, data)
+
+
 def test_mut01_fail_probe_stale_cache_requires_full_calc_on_load(tmp_path):
     src = tmp_path / "src.xlsx"
-    stripped = tmp_path / "stripped.xlsx"
+    seeded = tmp_path / "seeded.xlsx"
     out = tmp_path / "out.xlsx"
     _build_formula_sheet(str(src))
-    _strip_full_calc(str(src), str(stripped))
+    _seed_stale_cache(str(src), str(seeded))
 
-    ed = kyrax.edit_excel(str(stripped))
+    ed = kyrax.edit_excel(str(seeded))
     ed["Data"].insert_rows(1, 1)
     ed.save(str(out))
 
     with zipfile.ZipFile(str(out)) as z:
         wb_xml = z.read("xl/workbook.xml")
+        sheet_xml = z.read("xl/worksheets/sheet1.xml")
     assert b'fullCalcOnLoad="1"' in wb_xml, wb_xml
+    # The moved formula (A1+A2 -> A2+A3) must carry NO cached result: the seeded
+    # <v>3</v> is gone and no <v> follows the formula.
+    assert b"<f>A2+A3</f>" in sheet_xml, sheet_xml
+    assert b"<f>A2+A3</f><v" not in sheet_xml, sheet_xml
+    assert b"<f>A2+A3</f></c>" in sheet_xml, sheet_xml
 
 
 # ---------------------------------------------------------------------------
@@ -505,16 +513,16 @@ def _add_synthetic_signature(path, out):
     not HAS_KYRAX_BINDINGS,
     reason="kyrax._kyrax bindings unavailable in this build",
 )
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "A3-SIG-01 gate: overlay save retains _xmlsignatures/* and the "
-        "signature-origin relationship after an edit, so the output still "
-        "presents as signed while invalid. S1 dependency on overlay.rs save(). "
-        "Detection (is_signed_workbook) is a separate PASS probe."
-    ),
-)
 def test_sig01_fail_probe_edit_removes_signature_parts(tmp_path):
+    """A3-SIG-01 (hard gate): a real content edit atomically removes the
+    invalid digital signature.
+
+    After an unrelated-value edit, every ``_xmlsignatures/*`` member is gone,
+    the signature-origin/signature relationships are gone from ``_rels/.rels``,
+    signature content-type declarations are gone from ``[Content_Types].xml``,
+    and the output member set is the input set minus exactly the two signature
+    parts -- no unrelated member is added or dropped.
+    """
     src = tmp_path / "src.xlsx"
     signed = tmp_path / "signed.xlsx"
     out = tmp_path / "out.xlsx"
@@ -527,10 +535,23 @@ def test_sig01_fail_probe_edit_removes_signature_parts(tmp_path):
     ed["Data"].set_cell(1, 1, 999.0)
     ed.save(str(out))
 
-    # Required: signature parts are gone after the edit.
-    assert _kx.is_signed_workbook(str(out)) is False
+    with zipfile.ZipFile(str(signed)) as z:
+        input_members = set(z.namelist())
     with zipfile.ZipFile(str(out)) as z:
-        assert not any(n.startswith("_xmlsignatures/") for n in z.namelist())
+        members = set(z.namelist())
+        assert not any(n.startswith("_xmlsignatures/") for n in members)
+        rels = z.read("_rels/.rels")
+        ct = z.read("[Content_Types].xml")
+
+    assert _kx.is_signed_workbook(str(out)) is False
+    assert b"digital-signature/origin" not in rels
+    assert b'Target="_xmlsignatures/' not in rels
+    assert b"/_xmlsignatures/" not in ct
+    assert b'Extension="sigs"' not in ct
+    assert members == input_members - {
+        "_xmlsignatures/sig1.xml",
+        "_xmlsignatures/origin.sigs",
+    }
 
 
 # ---------------------------------------------------------------------------

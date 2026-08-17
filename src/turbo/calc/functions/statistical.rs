@@ -367,6 +367,20 @@ fn range_array(ctx: &FuncCtx, arg: &FuncArg) -> Result<ArrayValue, CalcError> {
     }
 }
 
+/// Like [`range_array`], but a scalar *error* argument propagates immediately
+/// instead of being wrapped into a 1x1 array — the hypothesis-test family must
+/// surface `COVARIANCE.P(#NAME?, ...) -> #NAME?`, not a shape-driven #N/A.
+fn array_arg(ctx: &FuncCtx, arg: &FuncArg) -> Result<ArrayValue, CalcError> {
+    let v = arg.value(ctx)?;
+    if let CalcValue::Error(e) = &v {
+        return Err(*e);
+    }
+    Ok(match v {
+        CalcValue::Array(a) => (*a).clone(),
+        v => ArrayValue::new(1, 1, vec![v]),
+    })
+}
+
 /// The numeric elements of an array value (text/blank ignored, errors
 /// propagate); a scalar coerces to a single-element list.
 fn array_numbers(v: &CalcValue) -> Result<Vec<f64>, CalcError> {
@@ -532,9 +546,18 @@ fn countblank(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
                     }
                 }
             }
-            CalcValue::Blank => n += 1,
-            CalcValue::Text(t) if t.is_empty() => n += 1,
-            _ => {}
+            v => {
+                // A literal error argument propagates (Excel: COUNTBLANK(#REF!)
+                // -> #REF!); an error *inside a reference* is a value, not blank.
+                if arg.as_reference().is_none() {
+                    if let CalcValue::Error(e) = &v {
+                        return Err(*e);
+                    }
+                }
+                if v.is_blank() || matches!(&v, CalcValue::Text(t) if t.is_empty()) {
+                    n += 1;
+                }
+            }
         }
     }
     Ok(CalcValue::Number(n as f64))
@@ -764,7 +787,9 @@ fn devsq(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 
 fn large_small(ctx: &FuncCtx, args: &[FuncArg], largest: bool) -> Result<CalcValue, CalcError> {
     let v = sorted(collect_numbers(ctx, &args[..1], Agg::Numbers)?);
-    let k = coerce_number(&args[1].value(ctx)?)?.trunc() as i64;
+    // Excel rounds k to the nearest integer (LARGE(...,2.5) -> 3rd largest),
+    // not truncates (which gave 2nd largest).
+    let k = coerce_number(&args[1].value(ctx)?)?.round() as i64;
     if k <= 0 || (k as usize) > v.len() {
         return Err(CalcError::Num);
     }
@@ -882,11 +907,22 @@ fn percentrank(ctx: &FuncCtx, args: &[FuncArg], exc: bool) -> Result<CalcValue, 
     let v = sorted(collect_numbers(ctx, &args[..1], Agg::Numbers)?);
     let x = coerce_number(&args[1].value(ctx)?)?;
     let sig = if args.len() == 3 {
-        let s = coerce_number(&args[2].value(ctx)?)?.trunc();
-        if s < 1.0 {
-            return Err(CalcError::Num);
+        let a3 = &args[2];
+        let v3 = a3.value(ctx)?;
+        // Excel distinguishes an empty *cell reference* significance (→ #N/A)
+        // from an omitted/trailing-comma argument (defaults to 3 digits).
+        if a3.as_reference().is_some() && v3.is_blank() {
+            return Err(CalcError::Na);
         }
-        s as i32
+        if v3.is_blank() {
+            3
+        } else {
+            let s = coerce_number(&v3)?.trunc();
+            if s < 1.0 {
+                return Err(CalcError::Num);
+            }
+            s as i32
+        }
     } else {
         3
     };
@@ -908,7 +944,8 @@ fn percentrank(ctx: &FuncCtx, args: &[FuncArg], exc: bool) -> Result<CalcValue, 
             let base = if exc { (i + 1) as f64 } else { i as f64 };
             rank = base / n1 as f64;
             let factor = 10f64.powi(sig);
-            return ok_num((rank * factor).round() / factor);
+            // Excel truncates to `sig` digits (0.255, not 0.256), never rounds.
+            return ok_num((rank * factor).trunc() / factor);
         }
     }
     // interpolate between v[i] and v[i+1]
@@ -920,7 +957,7 @@ fn percentrank(ctx: &FuncCtx, args: &[FuncArg], exc: bool) -> Result<CalcValue, 
         }
     }
     let factor = 10f64.powi(sig);
-    ok_num((rank * factor).round() / factor)
+    ok_num((rank * factor).trunc() / factor)
 }
 
 fn percentrank_inc(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
@@ -1157,12 +1194,28 @@ fn f_dist(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     }
 }
 
+/// Γ(x) for any x except the non-positive integers (poles → NaN). Negative
+/// non-integers use the reflection formula Γ(x) = π / (sin πx · Γ(1−x));
+/// Excel's GAMMA accepts them (e.g. Γ(−2.5) ≈ −0.9453).
+fn gamma_val(x: f64) -> f64 {
+    if x > 0.0 {
+        gammaln(x).exp()
+    } else if x.trunc() == x {
+        // non-positive integers are poles (sin πx is ~1e-16, not exactly 0)
+        f64::NAN
+    } else {
+        let s = (PI * x).sin();
+        if s == 0.0 {
+            f64::NAN
+        } else {
+            PI / (s * gamma_val(1.0 - x))
+        }
+    }
+}
+
 fn gamma_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let x = coerce_number(&args[0].value(ctx)?)?;
-    if x <= 0.0 {
-        return Err(CalcError::Num);
-    }
-    ok_num(gammaln(x).exp())
+    ok_num(gamma_val(x))
 }
 
 fn gammaln_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
@@ -1316,8 +1369,8 @@ fn negbinom_dist(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError
 
 /// Pair up two equal-shape arrays, keeping only (number, number) pairs.
 fn pair_arrays(ctx: &FuncCtx, args: &[FuncArg]) -> Result<(Vec<f64>, Vec<f64>), CalcError> {
-    let a1 = range_array(ctx, &args[0])?;
-    let a2 = range_array(ctx, &args[1])?;
+    let a1 = array_arg(ctx, &args[0])?;
+    let a2 = array_arg(ctx, &args[1])?;
     if a1.shape() != a2.shape() {
         return Err(CalcError::Na);
     }
@@ -1438,6 +1491,12 @@ fn forecast_linear(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcErr
 
 fn covariance(ctx: &FuncCtx, args: &[FuncArg], sample: bool) -> Result<CalcValue, CalcError> {
     let (xs, ys) = pair_arrays(ctx, args)?;
+    if xs.is_empty() {
+        // Referee (2026-08): no numeric pairs at all -> #VALUE! (Excel), not
+        // #DIV/0!. The plan's "single pair -> 0" is wrong; a lone pair is
+        // still under-determined and stays #DIV/0! below.
+        return Err(CalcError::Value);
+    }
     if xs.len() < 2 {
         return Err(CalcError::Div0);
     }
@@ -1505,8 +1564,10 @@ fn fisher(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 
 fn fisherinv(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let y = coerce_number(&args[0].value(ctx)?)?;
-    let e = (2.0 * y).exp();
-    ok_num((e - 1.0) / (e + 1.0))
+    // FISHERINV(y) = tanh(y) = (e^2y − 1)/(e^2y + 1). tanh saturates at ±1,
+    // matching Excel for extreme arguments (FISHERINV(9999999.23658) -> 1);
+    // the old exp-form overflowed to inf/inf = NaN.
+    ok_num(y.tanh())
 }
 
 fn standardize(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
@@ -1611,8 +1672,12 @@ fn f_inv(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let p = coerce_number(&args[0].value(ctx)?)?;
     let d1 = coerce_number(&args[1].value(ctx)?)?;
     let d2 = coerce_number(&args[2].value(ctx)?)?;
-    if p <= 0.0 || p > 1.0 || d1 <= 0.0 || d2 <= 0.0 {
+    if p < 0.0 || p > 1.0 || d1 <= 0.0 || d2 <= 0.0 {
         return Err(CalcError::Num);
+    }
+    // Referee (2026-08): F.INV with p = 0 (blank probability) is 0, not #NUM!.
+    if p == 0.0 {
+        return ok_num(0.0);
     }
     let u = invert_beta(d1 / 2.0, d2 / 2.0, p);
     ok_num(d2 * u / (d1 * (1.0 - u)))
@@ -1624,6 +1689,11 @@ fn f_inv_rt(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let d2 = coerce_number(&args[2].value(ctx)?)?;
     if p <= 0.0 || p > 1.0 || d1 <= 0.0 || d2 <= 0.0 {
         return Err(CalcError::Num);
+    }
+    // Referee (2026-08): F.INV.RT(TRUE,...) = F.INV(0,...) = 0. The bisection
+    // would otherwise land on a tiny-but-nonzero value.
+    if p == 1.0 {
+        return ok_num(0.0);
     }
     let v = invert_beta(d2 / 2.0, d1 / 2.0, p);
     ok_num(d2 * (1.0 - v) / (d1 * v))
@@ -1781,10 +1851,21 @@ fn binom_dist_range(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcEr
 // -- group 8: hypothesis tests ------------------------------------------------
 
 fn chisq_test(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let actual = range_array(ctx, &args[0])?;
-    let expected = range_array(ctx, &args[1])?;
+    let actual = array_arg(ctx, &args[0])?;
+    let expected = array_arg(ctx, &args[1])?;
     if actual.shape() != expected.shape() {
         return Err(CalcError::Na);
+    }
+    // Incoming Excel error values propagate before any other rule.
+    for v in actual.iter().chain(expected.iter()) {
+        if let CalcValue::Error(e) = v {
+            return Err(*e);
+        }
+    }
+    // Referee (2026-08): 1x1 or empty ranges have fewer than two data points
+    // -> #VALUE! (not #N/A as Univer claims, not the old #NUM!).
+    if actual.data.len() < 2 || expected.data.len() < 2 {
+        return Err(CalcError::Value);
     }
     let (rows, cols) = actual.shape();
     let df = ((rows as i64) - 1) * ((cols as i64) - 1);
@@ -1845,8 +1926,8 @@ fn t_test(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     if ty != 1.0 && ty != 2.0 && ty != 3.0 {
         return Err(CalcError::Num);
     }
-    let a1 = range_array(ctx, &args[0])?;
-    let a2 = range_array(ctx, &args[1])?;
+    let a1 = array_arg(ctx, &args[0])?;
+    let a2 = array_arg(ctx, &args[1])?;
     let (t, df) = if ty == 1.0 {
         // Paired: differences within the pair.
         if a1.shape() != a2.shape() {
@@ -2534,7 +2615,8 @@ fn prob(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let xa = range_array(ctx, &args[0])?;
     let pa = range_array(ctx, &args[1])?;
     if xa.shape() != pa.shape() {
-        return Err(CalcError::Num);
+        // Excel: a different number of data points -> #N/A (not #NUM!).
+        return Err(CalcError::Na);
     }
     let mut xs = Vec::new();
     let mut ps = Vec::new();
@@ -2696,6 +2778,62 @@ fn reg(r: &mut Registry, spec: FuncSpec) {
     r.register(Box::leak(Box::new(spec)));
 }
 
+// -- legacy compatibility wrappers -------------------------------------------
+//
+// The pre-2010 names either fix a cumulative flag the modern form takes as an
+// argument, or route a `tails` selector to the one-tailed/two-tailed pair.
+// Each wrapper clones the original arguments, appends the fixed flag, and
+// delegates to the modern implementation.
+
+fn with_cumulative(
+    ctx: &FuncCtx,
+    args: &[FuncArg],
+    cumulative: bool,
+    inner: fn(&FuncCtx, &[FuncArg]) -> Result<CalcValue, CalcError>,
+) -> Result<CalcValue, CalcError> {
+    let mut full = args.to_vec();
+    full.push(FuncArg::Value(CalcValue::Bool(cumulative)));
+    inner(ctx, &full)
+}
+
+/// BETADIST(x, α, β, [A], [B]) = BETA.DIST(x, α, β, TRUE, [A], [B]).
+fn betadist_legacy(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    let mut full = args.to_vec();
+    full.insert(3, FuncArg::Value(CalcValue::Bool(true)));
+    beta_dist(ctx, &full)
+}
+
+/// LOGNORMDIST(x, μ, σ) = LOGNORM.DIST(x, μ, σ, TRUE).
+fn lognormdist_legacy(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    with_cumulative(ctx, args, true, lognorm_dist)
+}
+
+/// NEGBINOMDIST(k, f, p) = NEGBINOM.DIST(k, f, p, FALSE).
+fn negbinomdist_legacy(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    with_cumulative(ctx, args, false, negbinom_dist)
+}
+
+/// HYPGEOMDIST(k, n, K, N) = HYPGEOM.DIST(k, n, K, N, FALSE).
+fn hypgeomdist_legacy(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    with_cumulative(ctx, args, false, hypgeom_dist)
+}
+
+/// NORMSDIST(z) = NORM.S.DIST(z, TRUE).
+fn normsdist_legacy(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    with_cumulative(ctx, args, true, norm_s_dist)
+}
+
+/// TDIST(x, df, tails): tails 1 routes to T.DIST.RT, tails 2 to T.DIST.2T.
+fn tdist_legacy(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    let tails = coerce_number(&args[2].value(ctx)?)?.trunc();
+    let pair = [args[0].clone(), args[1].clone()];
+    match tails as i64 {
+        1 => t_dist_rt(ctx, &pair),
+        2 => t_dist_2t(ctx, &pair),
+        _ => Err(CalcError::Num),
+    }
+}
+
 pub fn register(r: &mut Registry) {
     // group 1 — core aggregates
     reg(r, spec_variadic("AVERAGEA", averagea));
@@ -2772,6 +2910,9 @@ pub fn register(r: &mut Registry) {
     // group 7 — right tails and inverse distributions
     reg(r, spec("CHISQ.DIST.RT", 2, Some(2), chisq_dist_rt));
     reg(r, spec("CHISQ.INV.RT", 2, Some(2), chisq_inv_rt));
+    // compatibility aliases: CHIDIST = CHISQ.DIST.RT, CHIINV = CHISQ.INV.RT
+    reg(r, spec("CHIDIST", 2, Some(2), chisq_dist_rt));
+    reg(r, spec("CHIINV", 2, Some(2), chisq_inv_rt));
     reg(r, spec("F.DIST.RT", 3, Some(3), f_dist_rt));
     reg(r, spec("F.INV", 3, Some(3), f_inv));
     reg(r, spec("F.INV.RT", 3, Some(3), f_inv_rt));
@@ -2802,6 +2943,50 @@ pub fn register(r: &mut Registry) {
     reg(r, spec_arr("PROB", 3, Some(4), prob));
     reg(r, spec_arr("FREQUENCY", 2, Some(2), frequency));
     reg(r, spec_variadic("SKEW.P", skew_p));
+    // group 12 — legacy compatibility names (Excel pre-2010). Plain aliases
+    // where the legacy signature matches the modern function exactly;
+    // wrappers where legacy semantics differ (fixed cumulative flag or
+    // tails argument).
+    reg(r, spec("BETAINV", 3, Some(5), beta_inv));
+    reg(r, spec("BINOMDIST", 4, Some(4), binom_dist));
+    reg(r, spec_arr("CHITEST", 2, Some(2), chisq_test));
+    reg(r, spec("CONFIDENCE", 3, Some(3), confidence_norm));
+    reg(r, spec("COVAR", 2, Some(2), covar_p));
+    reg(r, spec("CRITBINOM", 3, Some(3), binom_inv));
+    reg(r, spec("EXPONDIST", 3, Some(3), expon_dist));
+    reg(r, spec_arr("FTEST", 2, Some(2), f_test));
+    reg(r, spec("GAMMADIST", 4, Some(4), gamma_dist));
+    reg(r, spec("GAMMAINV", 3, Some(3), gamma_inv));
+    reg(r, spec("LOGINV", 3, Some(3), lognorm_inv));
+    reg(r, spec_variadic("MODE", mode_sngl));
+    reg(r, spec("NORMDIST", 4, Some(4), norm_dist));
+    reg(r, spec("NORMINV", 3, Some(3), norm_inv));
+    reg(r, spec("NORMSINV", 1, Some(1), norm_s_inv_fn));
+    reg(r, spec("PERCENTILE", 2, Some(2), percentile_inc));
+    reg(r, spec("PERCENTRANK", 2, Some(3), percentrank_inc));
+    reg(r, spec("POISSON", 3, Some(3), poisson_dist));
+    reg(r, spec("QUARTILE", 2, Some(2), quartile_inc));
+    reg(r, spec("RANK", 2, Some(3), rank_eq));
+    reg(r, spec_variadic("STDEV", stdev_s));
+    reg(r, spec_variadic("STDEVP", stdev_p));
+    reg(r, spec_arr("TTEST", 4, Some(4), t_test));
+    reg(r, spec_variadic("VAR", var_s));
+    reg(r, spec_variadic("VARP", var_p));
+    reg(r, spec("WEIBULL", 4, Some(4), weibull_dist));
+    reg(r, spec_arr("ZTEST", 2, Some(3), z_test));
+    reg(r, spec("FORECAST", 3, Some(3), forecast_linear));
+    reg(r, spec("GAMMALN.PRECISE", 1, Some(1), gammaln_fn));
+    reg(r, spec("HYPGEOMDIST", 4, Some(4), hypgeomdist_legacy));
+    // right-tail legacy forms map straight onto the right-tail moderns
+    reg(r, spec("FDIST", 3, Some(3), f_dist_rt));
+    reg(r, spec("FINV", 3, Some(3), f_inv_rt));
+    reg(r, spec("TINV", 2, Some(2), t_inv_2t));
+    // wrappers: legacy fixed-cumulative / tails semantics
+    reg(r, spec("BETADIST", 3, Some(5), betadist_legacy));
+    reg(r, spec("LOGNORMDIST", 3, Some(3), lognormdist_legacy));
+    reg(r, spec("NEGBINOMDIST", 3, Some(3), negbinomdist_legacy));
+    reg(r, spec("NORMSDIST", 1, Some(1), normsdist_legacy));
+    reg(r, spec("TDIST", 3, Some(3), tdist_legacy));
 }
 
 #[cfg(test)]
@@ -3334,7 +3519,8 @@ mod tests {
         approx("=BINOM.INV(6,0.5,0.75)", 4.0, 1e-12);
         approx("=BINOM.INV(10,0.3,0.5)", 3.0, 1e-12);
         assert_eq!(error("=CHISQ.INV.RT(0,10)"), CalcError::Num);
-        assert_eq!(error("=F.INV(0,6,4)"), CalcError::Num);
+        // Referee (2026-08): F.INV with p = 0 / blank p returns 0, not #NUM!.
+        assert_eq!(num("=F.INV(0,6,4)"), 0.0);
         assert_eq!(error("=F.INV.RT(1.5,6,4)"), CalcError::Num);
         assert_eq!(error("=T.INV.2T(0,60)"), CalcError::Num);
         assert_eq!(error("=BETA.INV(0,8,10)"), CalcError::Num);
@@ -3590,5 +3776,206 @@ mod tests {
         let s = Grid::empty().col("A1", &[3.0, 4.0, 5.0, 2.0, 3.0, 4.0, 5.0, 6.0, 4.0, 7.0]);
         g_approx_tol("=SKEW.P(A1:A10)", 0.303193, 1e-6, &s);
         assert_eq!(s.error("=SKEW.P(A1:A2)"), CalcError::Div0);
+    }
+
+    // -- Lane C round-2 referee corrections (local Excel, 2026-08) ------------
+
+    #[test]
+    fn chidist_chinv_compatibility_aliases() {
+        // CHIDIST(x,df) = CHISQ.DIST.RT(x,df); CHIINV(p,df) = CHISQ.INV.RT(p,df).
+        approx("=CHIDIST(3.247,7)", 0.8612515, 1e-6);
+        approx("=CHIDIST(18.307,10)", 0.05, 1e-4);
+        approx("=CHIINV(0.05,10)", 18.307038, 1e-4);
+        approx("=CHIINV(0.95,10)", 3.940299, 1e-6);
+        assert_eq!(error("=CHIDIST(1,0)"), CalcError::Num);
+        assert_eq!(error("=CHIINV(0,10)"), CalcError::Num);
+    }
+
+    #[test]
+    fn chitest_1x1_or_empty_ranges_are_value_error() {
+        // Referee: CHISQ.TEST/CHITEST on 1x1 or empty ranges is #VALUE!, not
+        // #N/A (Univer's claim) and not the old #NUM!.
+        assert_eq!(
+            Grid::empty().error("=CHISQ.TEST(A7:A7,A8:A8)"),
+            CalcError::Value
+        );
+        assert_eq!(
+            Grid::empty().error("=CHISQ.TEST(BZ1,CA1)"),
+            CalcError::Value
+        );
+    }
+
+    #[test]
+    fn chisq_test_propagates_incoming_errors() {
+        assert_eq!(error("=CHISQ.TEST(#NAME?,BZ1:CA2)"), CalcError::Name);
+    }
+
+    #[test]
+    fn covariance_p_propagates_incoming_errors() {
+        assert_eq!(error("=COVARIANCE.P(#NAME?,A9:B11)"), CalcError::Name);
+        assert_eq!(error("=COVARIANCE.P(A9:B11,#REF!)"), CalcError::Ref);
+    }
+
+    #[test]
+    fn covariance_p_empty_args_are_value_error() {
+        // Referee: empty args -> #VALUE!; the plan's "single pair -> 0" is wrong.
+        assert_eq!(error("=COVARIANCE.P(S1,T1)"), CalcError::Value);
+        assert_eq!(error("=COVARIANCE.S(S1,T1)"), CalcError::Value);
+    }
+
+    #[test]
+    fn t_test_propagates_incoming_errors() {
+        assert_eq!(error("=T.TEST(#NAME?,A5:D5,2,1)"), CalcError::Name);
+        assert_eq!(error("=T.TEST(A5:D5,#REF!,2,1)"), CalcError::Ref);
+    }
+
+    #[test]
+    fn percentrank_trailing_comma_defaults_to_3_digits() {
+        // Trailing-comma empty significance defaults to 3 digits; Excel
+        // truncates rather than rounds (0.255, not 0.256).
+        let g = Grid::empty().row("A1", &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
+        assert_eq!(g.num("=PERCENTRANK.INC(A1:J1,3.3,)"), 0.255);
+        assert_eq!(g.num("=PERCENTRANK.EXC(A1:J1,3.3,)"), 0.3);
+    }
+
+    #[test]
+    fn percentrank_empty_ref_significance_is_na() {
+        // Referee: a blank *cell-reference* significance argument is #N/A —
+        // distinct from the trailing-comma (omitted) case in the test above.
+        assert_eq!(
+            Grid::empty().error("=PERCENTRANK.EXC(EX1:FG1,3.3,EX9001)"),
+            CalcError::Na
+        );
+        assert_eq!(
+            Grid::empty().error("=PERCENTRANK.INC(FV1:GE1,3.3,FV9001)"),
+            CalcError::Na
+        );
+    }
+
+    #[test]
+    fn large_small_round_non_integer_k() {
+        // Referee: LARGE(...,2.5) rounds k up to 3 (8); the old truncation gave
+        // k=2 (9).
+        let g = Grid::empty().col("A1", &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
+        assert_eq!(g.num("=LARGE(A1:A10,2.5)"), 8.0);
+        assert_eq!(g.num("=SMALL(A1:A10,2.5)"), 3.0);
+    }
+
+    #[test]
+    fn f_inv_blank_p_is_zero() {
+        assert_eq!(num("=F.INV(0,6,4)"), 0.0);
+        assert_eq!(Grid::empty().num("=F.INV(BP9001,6,4)"), 0.0);
+        assert_eq!(error("=F.INV(-0.1,6,4)"), CalcError::Num);
+    }
+
+    #[test]
+    fn f_inv_rt_p_is_one_is_zero() {
+        assert_eq!(num("=F.INV.RT(TRUE,6,4)"), 0.0);
+        assert_eq!(num("=F.INV.RT(1,6,4)"), 0.0);
+        assert_eq!(error("=F.INV.RT(0,6,4)"), CalcError::Num);
+        assert_eq!(error("=F.INV.RT(1.5,6,4)"), CalcError::Num);
+    }
+
+    #[test]
+    fn fisherinv_large_arguments_saturate_at_plus_minus_one() {
+        approx("=FISHERINV(9999999.23658)", 1.0, 1e-9);
+        approx("=FISHERINV(-9999999.23658)", -1.0, 1e-9);
+    }
+
+    #[test]
+    fn gamma_accepts_numeric_strings_and_negative_non_integers() {
+        // Referee: GAMMA("-2.5") -> -0.945308720482942 (numeric string accepted,
+        // reflection formula handles negative non-integers).
+        approx("=GAMMA(\"-2.5\")", -0.945308720482942, 1e-9);
+        approx("=GAMMA(-0.5)", -3.544907701811032, 1e-9);
+        // Poles at non-positive integers remain #NUM!.
+        assert_eq!(error("=GAMMA(-1)"), CalcError::Num);
+        assert_eq!(error("=GAMMA(0)"), CalcError::Num);
+    }
+
+    #[test]
+    fn countblank_propagates_literal_error_arguments() {
+        assert_eq!(error("=COUNTBLANK(#REF!)"), CalcError::Ref);
+        assert_eq!(error("=COUNTBLANK(#N/A)"), CalcError::Na);
+    }
+
+    #[test]
+    fn prob_mismatched_range_sizes_are_na() {
+        assert_eq!(
+            Grid::empty().error("=PROB(AF1:AJ1,AN1:AQ1,2)"),
+            CalcError::Na
+        );
+    }
+
+    #[test]
+    fn legacy_excel_names_are_registered_and_route_to_modern_semantics() {
+        let names = [
+            "BETADIST",
+            "BETAINV",
+            "BINOMDIST",
+            "CHITEST",
+            "CONFIDENCE",
+            "COVAR",
+            "CRITBINOM",
+            "EXPONDIST",
+            "FDIST",
+            "FINV",
+            "FTEST",
+            "GAMMADIST",
+            "GAMMAINV",
+            "HYPGEOMDIST",
+            "LOGINV",
+            "LOGNORMDIST",
+            "MODE",
+            "NEGBINOMDIST",
+            "NORMDIST",
+            "NORMINV",
+            "NORMSDIST",
+            "NORMSINV",
+            "PERCENTILE",
+            "PERCENTRANK",
+            "POISSON",
+            "QUARTILE",
+            "RANK",
+            "STDEV",
+            "STDEVP",
+            "TDIST",
+            "TINV",
+            "TTEST",
+            "VAR",
+            "VARP",
+            "WEIBULL",
+            "ZTEST",
+            "FORECAST",
+            "GAMMALN.PRECISE",
+        ];
+        for name in names {
+            assert!(
+                crate::turbo::calc::functions::registry()
+                    .get(name)
+                    .is_some(),
+                "{name} is absent from the function registry"
+            );
+        }
+
+        let equivalent = [
+            ("=BETADIST(0.5,2,3,0,1)", "=BETA.DIST(0.5,2,3,TRUE,0,1)"),
+            ("=HYPGEOMDIST(1,4,8,20)", "=HYPGEOM.DIST(1,4,8,20,FALSE)"),
+            ("=LOGNORMDIST(4,3.5,1.2)", "=LOGNORM.DIST(4,3.5,1.2,TRUE)"),
+            (
+                "=NEGBINOMDIST(10,5,0.25)",
+                "=NEGBINOM.DIST(10,5,0.25,FALSE)",
+            ),
+            ("=NORMSDIST(1.5)", "=NORM.S.DIST(1.5,TRUE)"),
+            ("=TDIST(1.5,10,1)", "=T.DIST.RT(1.5,10)"),
+            ("=TDIST(1.5,10,2)", "=T.DIST.2T(1.5,10)"),
+            ("=TINV(0.05,10)", "=T.INV.2T(0.05,10)"),
+            ("=FDIST(1.5,10,12)", "=F.DIST.RT(1.5,10,12)"),
+            ("=FINV(0.05,10,12)", "=F.INV.RT(0.05,10,12)"),
+        ];
+        for (legacy, modern) in equivalent {
+            approx(legacy, num(modern), 1e-12);
+        }
+        assert_eq!(error("=TDIST(1.5,10,3)"), CalcError::Num);
     }
 }

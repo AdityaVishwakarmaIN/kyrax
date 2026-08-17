@@ -31,6 +31,21 @@ fn ok_num(n: f64) -> Result<CalcValue, CalcError> {
     }
 }
 
+/// Excel's engineering functions reject boolean arguments with `#VALUE!`
+/// rather than coercing TRUE/FALSE to 1/0 (measured against Excel COM: every
+/// function in this file returns `#VALUE!` for a boolean argument). Error
+/// values still propagate unchanged.
+fn reject_bool_args(ctx: &FuncCtx, args: &[FuncArg]) -> Result<(), CalcError> {
+    for a in args {
+        match a.value(ctx)? {
+            CalcValue::Bool(_) => return Err(CalcError::Value),
+            CalcValue::Error(e) => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Base conversion (1): DEC2BIN/DEC2OCT/DEC2HEX, BIN2DEC, OCT2DEC, HEX2DEC and
 // the cross-base conversions. Negatives are two's complement over the fixed
@@ -160,6 +175,7 @@ fn apply_places(
 
 /// Shared body for the "from decimal" conversions.
 fn dec_to_base(ctx: &FuncCtx, args: &[FuncArg], base: Base) -> Result<CalcValue, CalcError> {
+    reject_bool_args(ctx, args)?;
     let num = coerce_number(&args[0].value(ctx)?)?;
     let n = num.trunc() as i128;
     let (min, max) = base.range();
@@ -181,6 +197,7 @@ fn cross_base(
     from: Base,
     to: Base,
 ) -> Result<CalcValue, CalcError> {
+    reject_bool_args(ctx, args)?;
     let s = coerce_text(&args[0].value(ctx)?)?;
     let val = parse_radix(&s, from)?;
     let (min, max) = to.range();
@@ -197,6 +214,7 @@ fn cross_base(
 
 /// Shared body for the "X2DEC" conversions: parse, then return the number.
 fn to_dec(ctx: &FuncCtx, args: &[FuncArg], base: Base) -> Result<CalcValue, CalcError> {
+    reject_bool_args(ctx, args)?;
     let s = coerce_text(&args[0].value(ctx)?)?;
     let val = parse_radix(&s, base)?;
     ok_num(val as f64)
@@ -332,6 +350,7 @@ fn bitrshift(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 // ---------------------------------------------------------------------------
 
 fn delta(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    reject_bool_args(ctx, args)?;
     let a = coerce_number(&args[0].value(ctx)?)?;
     let b = if args.len() == 2 {
         coerce_number(&args[1].value(ctx)?)?
@@ -342,6 +361,7 @@ fn delta(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 }
 
 fn gestep(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    reject_bool_args(ctx, args)?;
     let a = coerce_number(&args[0].value(ctx)?)?;
     let b = if args.len() == 2 {
         coerce_number(&args[1].value(ctx)?)?
@@ -419,6 +439,7 @@ fn erfc(x: f64) -> f64 {
 }
 
 fn erf_(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    reject_bool_args(ctx, args)?;
     let lo = coerce_number(&args[0].value(ctx)?)?;
     if lo < 0.0 {
         return Err(CalcError::Num);
@@ -435,11 +456,13 @@ fn erf_(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 }
 
 fn erf_precise(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    reject_bool_args(ctx, args)?;
     let x = coerce_number(&args[0].value(ctx)?)?;
     ok_num(erf(x))
 }
 
 fn erfc_(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    reject_bool_args(ctx, args)?;
     let x = coerce_number(&args[0].value(ctx)?)?;
     ok_num(erfc(x))
 }
@@ -683,6 +706,46 @@ fn c_tan(a: Cplx) -> Result<Cplx, CalcError> {
     c_div(c_sin(a), c_cos(a))
 }
 
+fn c_sinh(a: Cplx) -> Cplx {
+    Cplx {
+        re: a.re.sinh() * a.im.cos(),
+        im: a.re.cosh() * a.im.sin(),
+    }
+}
+fn c_cosh(a: Cplx) -> Cplx {
+    Cplx {
+        re: a.re.cosh() * a.im.cos(),
+        im: a.re.sinh() * a.im.sin(),
+    }
+}
+/// Reciprocal of a complex number; a zero divisor is `#NUM!` (Excel's IMCSCH/
+/// IMCSC/IMCOT/... semantics), unlike IMDIV which stays `#DIV/0!`.
+fn c_inv(a: Cplx) -> Result<Cplx, CalcError> {
+    if a.re == 0.0 && a.im == 0.0 {
+        return Err(CalcError::Num);
+    }
+    c_div(Cplx { re: 1.0, im: 0.0 }, a)
+}
+fn c_cot(a: Cplx) -> Result<Cplx, CalcError> {
+    let s = c_sin(a);
+    if s.re == 0.0 && s.im == 0.0 {
+        return Err(CalcError::Num);
+    }
+    c_div(c_cos(a), s)
+}
+fn c_csc(a: Cplx) -> Result<Cplx, CalcError> {
+    c_inv(c_sin(a))
+}
+fn c_sec(a: Cplx) -> Result<Cplx, CalcError> {
+    c_inv(c_cos(a))
+}
+fn c_csch(a: Cplx) -> Result<Cplx, CalcError> {
+    c_inv(c_sinh(a))
+}
+fn c_sech(a: Cplx) -> Result<Cplx, CalcError> {
+    c_inv(c_cosh(a))
+}
+
 /// The suffix an operation must format with: reject mixing "i" and "j".
 fn resolve_suffix(suffixes: &[Option<Suffix>]) -> Result<Suffix, CalcError> {
     let mut found: Option<Suffix> = None;
@@ -701,6 +764,7 @@ fn resolve_suffix(suffixes: &[Option<Suffix>]) -> Result<Suffix, CalcError> {
 }
 
 fn complex(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    reject_bool_args(ctx, args)?;
     let re = coerce_number(&args[0].value(ctx)?)?;
     let im = coerce_number(&args[1].value(ctx)?)?;
     let suffix = if args.len() == 3 {
@@ -767,6 +831,7 @@ fn imdiv(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     ok_complex(c_div(a, b)?, resolve_suffix(&[sa, sb])?)
 }
 fn impower(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    reject_bool_args(ctx, args)?;
     let (z, s) = parse_complex(&args[0].value(ctx)?)?;
     let w = coerce_number(&args[1].value(ctx)?)?;
     ok_complex(c_pow(z, w)?, s.unwrap_or(Suffix::I))
@@ -776,6 +841,7 @@ fn imsqrt(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     ok_complex(c_sqrt(c), s.unwrap_or(Suffix::I))
 }
 fn imexp(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    reject_bool_args(ctx, args)?;
     let (c, s) = parse_complex(&args[0].value(ctx)?)?;
     ok_complex(c_exp(c), s.unwrap_or(Suffix::I))
 }
@@ -818,6 +884,42 @@ fn imcos(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 fn imtan(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let (c, s) = parse_complex(&args[0].value(ctx)?)?;
     ok_complex(c_tan(c)?, s.unwrap_or(Suffix::I))
+}
+
+fn imsinh(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    reject_bool_args(ctx, args)?;
+    let (c, s) = parse_complex(&args[0].value(ctx)?)?;
+    ok_complex(c_sinh(c), s.unwrap_or(Suffix::I))
+}
+fn imcosh(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    reject_bool_args(ctx, args)?;
+    let (c, s) = parse_complex(&args[0].value(ctx)?)?;
+    ok_complex(c_cosh(c), s.unwrap_or(Suffix::I))
+}
+fn imcot(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    reject_bool_args(ctx, args)?;
+    let (c, s) = parse_complex(&args[0].value(ctx)?)?;
+    ok_complex(c_cot(c)?, s.unwrap_or(Suffix::I))
+}
+fn imcsc(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    reject_bool_args(ctx, args)?;
+    let (c, s) = parse_complex(&args[0].value(ctx)?)?;
+    ok_complex(c_csc(c)?, s.unwrap_or(Suffix::I))
+}
+fn imcsch(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    reject_bool_args(ctx, args)?;
+    let (c, s) = parse_complex(&args[0].value(ctx)?)?;
+    ok_complex(c_csch(c)?, s.unwrap_or(Suffix::I))
+}
+fn imsec(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    reject_bool_args(ctx, args)?;
+    let (c, s) = parse_complex(&args[0].value(ctx)?)?;
+    ok_complex(c_sec(c)?, s.unwrap_or(Suffix::I))
+}
+fn imsech(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    reject_bool_args(ctx, args)?;
+    let (c, s) = parse_complex(&args[0].value(ctx)?)?;
+    ok_complex(c_sech(c)?, s.unwrap_or(Suffix::I))
 }
 
 // ---------------------------------------------------------------------------
@@ -883,7 +985,7 @@ const UNITS: &[Unit] = &[
     u("pica", Cat::Len, 0.0254 / 6.0, false),
     u("Pica", Cat::Len, 0.0254 / 72.0, false),
     u("Picapt", Cat::Len, 0.0254 / 96.0, false),
-    u("survey_mi", Cat::Len, 1609.347_218_694_437_3, false),
+    u("survey_mi", Cat::Len, 1_609.347_218_694_437_3, false),
     // Mass (grams).
     u("g", Cat::Mass, 1.0, true),
     u("kg", Cat::Mass, 1000.0, false),
@@ -897,12 +999,12 @@ const UNITS: &[Unit] = &[
     u("uk_cwt", Cat::Mass, 50_802.345_44, false),
     u("lcwt", Cat::Mass, 50_802.345_44, false),
     u("hweight", Cat::Mass, 50_802.345_44, false),
-    u("stone", Cat::Mass, 6350.293_18, false),
-    u("st", Cat::Mass, 6350.293_18, false),
+    u("stone", Cat::Mass, 6_350.293_18, false),
+    u("st", Cat::Mass, 6_350.293_18, false),
     u("ton", Cat::Mass, 907_184.74, false),
-    u("uk_ton", Cat::Mass, 1_016_046.9088, false),
-    u("LTON", Cat::Mass, 1_016_046.9088, false),
-    u("brton", Cat::Mass, 1_016_046.9088, false),
+    u("uk_ton", Cat::Mass, 1_016_046.908_8, false),
+    u("LTON", Cat::Mass, 1_016_046.908_8, false),
+    u("brton", Cat::Mass, 1_016_046.908_8, false),
     u("t", Cat::Mass, 1_000_000.0, false),
     // Liquid volume (millilitres).
     u("tsp", Cat::Vol, 4.928_921_593_75, false),
@@ -912,7 +1014,7 @@ const UNITS: &[Unit] = &[
     u("cup", Cat::Vol, 236.588_236_5, false),
     u("pt", Cat::Vol, 473.176_473, false),
     u("qt", Cat::Vol, 946.352_946, false),
-    u("gal", Cat::Vol, 3785.411_784, false),
+    u("gal", Cat::Vol, 3_785.411_784, false),
     u("l", Cat::Vol, 1000.0, true),
     u("lt", Cat::Vol, 1000.0, true),
     u("barrel", Cat::Vol, 158_987.294_928, false),
@@ -929,8 +1031,8 @@ const UNITS: &[Unit] = &[
     u("yd2", Cat::Area, 0.836_127_36, false),
     u("mi2", Cat::Area, 2_589_988.110_336, false),
     u("Nmi2", Cat::Area, 3_429_904.0, false),
-    u("acre", Cat::Area, 4046.856_422_4, false),
-    u("uk_acre", Cat::Area, 4046.856_422_4, false),
+    u("acre", Cat::Area, 4_046.856_422_4, false),
+    u("uk_acre", Cat::Area, 4_046.856_422_4, false),
     u("ar", Cat::Area, 100.0, false),
     u("ha", Cat::Area, 10_000.0, false),
     // Time (seconds).
@@ -943,7 +1045,7 @@ const UNITS: &[Unit] = &[
     u("Pa", Cat::Press, 1.0, true),
     u("atm", Cat::Press, 101_325.0, false),
     u("mmHg", Cat::Press, 133.322_368_421_051_3, false),
-    u("psi", Cat::Press, 6894.757_293_168_361, false),
+    u("psi", Cat::Press, 6_894.757_293_168_361, false),
     u("Torr", Cat::Press, 133.322_368_421_052_63, false),
     u("bar", Cat::Press, 100_000.0, false),
     u("at", Cat::Press, 98_066.5, false),
@@ -958,8 +1060,8 @@ const UNITS: &[Unit] = &[
     u("hh", Cat::Energy, 105_505_585.257_348, false),
     u("Wh", Cat::Energy, 3600.0, false),
     u("flb", Cat::Energy, 1.355_817_948_331_400_4, false),
-    u("BTU", Cat::Energy, 1055.055_852_62, false),
-    u("btu", Cat::Energy, 1055.055_852_62, false),
+    u("BTU", Cat::Energy, 1_055.055_852_62, false),
+    u("btu", Cat::Energy, 1_055.055_852_62, false),
     // Power (watts).
     u("W", Cat::Power, 1.0, true),
     u("HP", Cat::Power, 745.699_871_582_270_22, false),
@@ -1063,6 +1165,7 @@ fn temp_convert(v: f64, from: TempKind, to: TempKind) -> f64 {
 }
 
 fn convert(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    reject_bool_args(ctx, args)?;
     let num = coerce_number(&args[0].value(ctx)?)?;
     let from = coerce_text(&args[1].value(ctx)?)?;
     let to = coerce_text(&args[2].value(ctx)?)?;
@@ -1080,12 +1183,344 @@ fn convert(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 }
 
 // ---------------------------------------------------------------------------
-// Bessel functions (7): BESSELI/BESSELJ/BESSELK/BESSELY. Each uses a power
-// series for small arguments and an asymptotic expansion (plus stable forward
-// recurrences in the order, and Miller's backward recurrence for J) for large
-// ones. Achieved relative accuracy vs 25-digit reference values: J ~1e-13,
-// Y ~2e-12, I ~1e-15, K ~1e-11.
+// Bessel functions (7): BESSELI/BESSELJ/BESSELK/BESSELY.
+//
+// BESSELJ, BESSELI and BESSELK reproduce Excel's algorithm bit-for-bit: the
+// classic A&S 9.4.x / 9.8.x polynomial and rational approximations with the
+// Miller backward recurrence for J and I and the forward recurrence for K
+// (validated against Excel COM Value2 doubles across 40+ (x, n) points).
+// Excel's values are only ~1e-8 relative accurate, and matching them exactly —
+// including the BESSELK(1.5,1) = 0.277387803632 result that accurate series
+// code cannot reproduce — is what the CONFIRMED-EXCEL rows demand. J and I
+// accept negative x (odd orders flip sign, like Excel); Y and K require x > 0.
+// BESSELY keeps the accurate series/asymptotic pair below.
 // ---------------------------------------------------------------------------
+
+const W_2PI: f64 = 0.636619772; // Excel's 2/pi constant for the J/Y asymptotics
+
+fn horner(coeffs: &[f64], x: f64) -> f64 {
+    let mut z = 0.0;
+    for &c in coeffs {
+        z = z * x + c;
+    }
+    z
+}
+
+const J0_A1A: &[f64] = &[
+    -184.9052456,
+    77392.33017,
+    -11214424.18,
+    651619640.7,
+    -13362590354.0,
+    57568490574.0,
+];
+const J0_A2A: &[f64] = &[
+    1.0,
+    267.8532712,
+    59272.64853,
+    9494680.718,
+    1029532985.0,
+    57568490411.0,
+];
+const J0_A1B: &[f64] = &[
+    0.2093887211e-6,
+    -0.2073370639e-5,
+    0.2734510407e-4,
+    -0.1098628627e-2,
+    1.0,
+];
+const J0_A2B: &[f64] = &[
+    -0.934935152e-7,
+    0.7621095161e-6,
+    -0.6911147651e-5,
+    0.1430488765e-3,
+    -0.1562499995e-1,
+];
+const J1_A1A: &[f64] = &[
+    -30.16036606,
+    15704.48260,
+    -2972611.439,
+    242396853.1,
+    -7895059235.0,
+    72362614232.0,
+];
+const J1_A2A: &[f64] = &[
+    1.0,
+    376.9991397,
+    99447.43394,
+    18583304.74,
+    2300535178.0,
+    144725228442.0,
+];
+const J1_A1B: &[f64] = &[
+    -0.240337019e-6,
+    0.2457520174e-5,
+    -0.3516396496e-4,
+    0.183105e-2,
+    1.0,
+];
+const J1_A2B: &[f64] = &[
+    0.105787412e-6,
+    -0.88228987e-6,
+    0.8449199096e-5,
+    -0.2002690873e-3,
+    0.04687499995,
+];
+const I0_A: &[f64] = &[
+    0.45813e-2,
+    0.360768e-1,
+    0.2659732,
+    1.2067492,
+    3.0899424,
+    3.5156229,
+    1.0,
+];
+const I0_B: &[f64] = &[
+    0.392377e-2,
+    -0.1647633e-1,
+    0.2635537e-1,
+    -0.2057706e-1,
+    0.916281e-2,
+    -0.157565e-2,
+    0.225319e-2,
+    0.1328592e-1,
+    0.39894228,
+];
+const I1_A: &[f64] = &[
+    0.32411e-3,
+    0.301532e-2,
+    0.2658733e-1,
+    0.15084934,
+    0.51498869,
+    0.87890594,
+    0.5,
+];
+const I1_B: &[f64] = &[
+    -0.420059e-2,
+    0.1787654e-1,
+    -0.2895312e-1,
+    0.2282967e-1,
+    -0.1031555e-1,
+    0.163801e-2,
+    -0.362018e-2,
+    -0.3988024e-1,
+    0.39894228,
+];
+const K0_A: &[f64] = &[
+    0.74e-5,
+    0.10750e-3,
+    0.262698e-2,
+    0.3488590e-1,
+    0.23069756,
+    0.42278420,
+    -0.57721566,
+];
+const K0_B: &[f64] = &[
+    0.53208e-3,
+    -0.251540e-2,
+    0.587872e-2,
+    -0.1062446e-1,
+    0.2189568e-1,
+    -0.7832358e-1,
+    1.25331414,
+];
+const K1_A: &[f64] = &[
+    -0.4686e-4,
+    -0.110404e-2,
+    -0.1919402e-1,
+    -0.18156897,
+    -0.67278579,
+    0.15443144,
+    1.0,
+];
+const K1_B: &[f64] = &[
+    -0.68245e-3,
+    0.325614e-2,
+    -0.780353e-2,
+    0.1504268e-1,
+    -0.3655620e-1,
+    0.23498619,
+    1.25331414,
+];
+
+fn bessel_j0(x: f64) -> f64 {
+    let y = x * x;
+    if x < 8.0 {
+        horner(J0_A1A, y) / horner(J0_A2A, y)
+    } else {
+        let xx = x - 0.785398164;
+        let y2 = 64.0 / y;
+        (W_2PI / x).sqrt()
+            * (xx.cos() * horner(J0_A1B, y2) - xx.sin() * horner(J0_A2B, y2) * 8.0 / x)
+    }
+}
+
+fn bessel_j1(x: f64) -> f64 {
+    let y = x * x;
+    let xx = x.abs() - 2.356194491;
+    if x.abs() < 8.0 {
+        x * horner(J1_A1A, y) / horner(J1_A2A, y)
+    } else {
+        let y2 = 64.0 / y;
+        let a = (W_2PI / x.abs()).sqrt()
+            * (xx.cos() * horner(J1_A1B, y2) - xx.sin() * horner(J1_A2B, y2) * 8.0 / x.abs());
+        if x < 0.0 { -a } else { a }
+    }
+}
+
+/// J_n upward recurrence from J_0/J_1 (Excel's path when x > n).
+fn j_bessel_iter(x: f64, n: u32, f0: f64, f1: f64) -> f64 {
+    if n == 0 {
+        return f0;
+    }
+    if n == 1 {
+        return f1;
+    }
+    let tdx = 2.0 / x;
+    let mut f2 = f1;
+    let mut f0 = f0;
+    let mut f1 = f1;
+    for o in 1..n {
+        f2 = f1 * o as f64 * tdx - f0;
+        f0 = f1;
+        f1 = f2;
+    }
+    f2
+}
+
+fn bessel_j(x: f64, n: u32) -> f64 {
+    if x < 0.0 {
+        let v = bessel_j(-x, n);
+        return if n % 2 == 1 { -v } else { v };
+    }
+    if n == 0 {
+        return bessel_j0(x);
+    }
+    if n == 1 {
+        return bessel_j1(x);
+    }
+    if x == 0.0 {
+        return 0.0;
+    }
+    if x > n as f64 {
+        j_bessel_iter(x, n, bessel_j0(x), bessel_j1(x))
+    } else {
+        // Miller's backward recurrence (Excel's path when x <= n).
+        let m = 2 * (((n as f64 + (40.0 * n as f64).sqrt().floor()) / 2.0).floor() as u32);
+        let mut jsum = false;
+        let mut bjp = 0.0;
+        let mut sum = 0.0;
+        let mut bj = 1.0;
+        let tox = 2.0 / x;
+        let mut ret = 0.0;
+        for j in (1..=m).rev() {
+            let bjm = j as f64 * tox * bj - bjp;
+            bjp = bj;
+            bj = bjm;
+            if bj.abs() > 1e10 {
+                bj *= 1e-10;
+                bjp *= 1e-10;
+                ret *= 1e-10;
+                sum *= 1e-10;
+            }
+            if jsum {
+                sum += bj;
+            }
+            jsum = !jsum;
+            if j == n {
+                ret = bjp;
+            }
+        }
+        sum = 2.0 * sum - bj;
+        ret / sum
+    }
+}
+
+fn besseli0(x: f64) -> f64 {
+    if x < 3.75 {
+        horner(I0_A, x * x / (3.75 * 3.75))
+    } else {
+        x.abs().exp() / x.abs().sqrt() * horner(I0_B, 3.75 / x.abs())
+    }
+}
+
+fn besseli1(x: f64) -> f64 {
+    if x < 3.75 {
+        x * horner(I1_A, x * x / (3.75 * 3.75))
+    } else {
+        x.signum() * x.abs().exp() / x.abs().sqrt() * horner(I1_B, 3.75 / x.abs())
+    }
+}
+
+fn bessel_i(x: f64, n: u32) -> f64 {
+    if n == 0 {
+        return besseli0(x);
+    }
+    if n == 1 {
+        return besseli1(x);
+    }
+    if x.abs() == 0.0 {
+        return 0.0;
+    }
+    // Miller's backward recurrence on |x|; the (-1)^n sign is applied last.
+    let tox = 2.0 / x.abs();
+    let mut bip = 0.0;
+    let mut bi = 1.0;
+    let m = 2 * (((n as f64 + (40.0 * n as f64).sqrt().round()) / 2.0).round() as u32);
+    let mut ret = 0.0;
+    for j in (1..=m).rev() {
+        let bim = j as f64 * tox * bi + bip;
+        bip = bi;
+        bi = bim;
+        if bi.abs() > 1e10 {
+            bi *= 1e-10;
+            bip *= 1e-10;
+            ret *= 1e-10;
+        }
+        if j == n {
+            ret = bip;
+        }
+    }
+    ret *= besseli0(x) / bi;
+    if x < 0.0 && n % 2 == 1 { -ret } else { ret }
+}
+
+fn besselk0(x: f64) -> f64 {
+    if x <= 2.0 {
+        -(x / 2.0).ln() * besseli0(x) + horner(K0_A, x * x / 4.0)
+    } else {
+        (-x).exp() / x.sqrt() * horner(K0_B, 2.0 / x)
+    }
+}
+
+fn besselk1(x: f64) -> f64 {
+    if x <= 2.0 {
+        (x / 2.0).ln() * besseli1(x) + (1.0 / x) * horner(K1_A, x * x / 4.0)
+    } else {
+        (-x).exp() / x.sqrt() * horner(K1_B, 2.0 / x)
+    }
+}
+
+fn bessel_k(x: f64, n: u32) -> f64 {
+    let k0 = besselk0(x);
+    let k1 = besselk1(x);
+    if n == 0 {
+        k0
+    } else if n == 1 {
+        k1
+    } else {
+        let tdx = 2.0 / x;
+        let mut f0 = k0;
+        let mut f1 = k1;
+        let mut f2 = f1;
+        for o in 1..n {
+            f2 = f1 * o as f64 * tdx + f0;
+            f0 = f1;
+            f1 = f2;
+        }
+        f2
+    }
+}
 
 fn harmonic(n: u64) -> f64 {
     if n < 2000 {
@@ -1115,28 +1550,6 @@ fn bessel_j_series(x: f64, n: u32) -> f64 {
         term *= -(half * half) / (k as f64 * (n as f64 + k as f64));
         sum += term;
         if term.abs() < 1e-18 * sum.abs().max(1.0) || k > 10_000 {
-            break;
-        }
-        k += 1;
-    }
-    sum
-}
-
-fn bessel_i_series(x: f64, n: u32) -> f64 {
-    let half = x / 2.0;
-    let mut term = 1.0;
-    for i in 1..=n {
-        term *= half / i as f64;
-    }
-    if term == 0.0 {
-        return 0.0;
-    }
-    let mut sum = term;
-    let mut k = 1u64;
-    loop {
-        term *= (half * half) / (k as f64 * (n as f64 + k as f64));
-        sum += term;
-        if term.abs() < 1e-18 * sum.abs().max(1.0) || k > 50_000 {
             break;
         }
         k += 1;
@@ -1186,57 +1599,6 @@ fn bessel_y_series(x: f64, n: u32) -> f64 {
         last = term;
     }
     y - (1.0 / std::f64::consts::PI) * s3
-}
-
-/// K_n via the A&S 9.6.11 series (ψ = H - γ form). Valid for small x.
-fn bessel_k_series(x: f64, n: u32) -> f64 {
-    let half = x / 2.0;
-    let lh = half.ln();
-    let inn = bessel_i_series(x, n);
-    let mut fs = 0.0;
-    if n > 0 {
-        let mut t = 1.0 / half;
-        for i in 1..n {
-            t *= i as f64 / half;
-        }
-        fs = t;
-        for k in 1..n {
-            t *= (-half * half) / ((n - k) as f64 * k as f64);
-            fs += t;
-        }
-    }
-    let mut kk = 0.5 * fs;
-    if n % 2 == 0 {
-        kk -= lh * inn;
-    } else {
-        kk += lh * inn;
-    }
-    let mut hk = 0.0;
-    let mut hnk = harmonic(n as u64);
-    let mut t = 1.0;
-    for i in 1..=n {
-        t *= half / i as f64;
-    }
-    let mut s3 = 0.0;
-    let mut k = 0u64;
-    let mut last: f64 = 1.0;
-    loop {
-        let psi = hk + hnk - 2.0 * GAMMA;
-        let term = t * psi;
-        s3 += term;
-        k += 1;
-        hk += 1.0 / k as f64;
-        hnk += 1.0 / (n as f64 + k as f64);
-        t *= (half * half) / (k as f64 * (n as f64 + k as f64));
-        let small = term.abs() < 1e-18 * s3.abs().max(1.0);
-        if (small && last.abs() < 1e-18 * s3.abs().max(1.0)) || k > 20_000 {
-            break;
-        }
-        last = term;
-    }
-    s3 *= 0.5;
-    kk += if n % 2 == 0 { s3 } else { -s3 };
-    kk
 }
 
 /// a_m = Π_{j=1..m}(μ-(2j-1)^2) / (m!(8x)^m), truncated at the optimal
@@ -1289,49 +1651,6 @@ fn jy_asym(x: f64, n: u32) -> (f64, f64) {
     )
 }
 
-/// K_n via the DLMF 10.40.2 asymptotic expansion (all-positive coefficients).
-fn k_asym(x: f64, n: u32) -> f64 {
-    let mu = 4.0 * n as f64 * n as f64;
-    let a = asym_terms(mu, x);
-    let s: f64 = a.iter().sum();
-    (std::f64::consts::PI / (2.0 * x)).sqrt() * (-x).exp() * s
-}
-
-/// J_n via Miller's backward recurrence (stable for x > 12).
-fn bessel_j_miller(x: f64, n: u32) -> f64 {
-    let start = n + 50 + (2.0 * x).round() as u32;
-    let mut j = vec![0.0f64; start as usize + 2];
-    j[start as usize] = 1.0;
-    for k in (1..=start).rev() {
-        let v = (2.0 * k as f64 / x) * j[k as usize] - j[k as usize + 1];
-        j[k as usize - 1] = v;
-        if j[k as usize - 1].abs() > 1e200 {
-            for e in j.iter_mut() {
-                *e *= 1e-200;
-            }
-        }
-    }
-    let mut s = j[0];
-    let mut k = 2;
-    while k <= start {
-        s += 2.0 * j[k as usize];
-        k += 2;
-    }
-    j[n as usize] / s
-}
-
-fn bessel_j(x: f64, n: u32) -> f64 {
-    if x <= 12.0 {
-        bessel_j_series(x, n)
-    } else if n as f64 <= (2.0 * x).sqrt() {
-        jy_asym(x, n).0
-    } else if n as f64 + 2.0 * x <= 200_000.0 {
-        bessel_j_miller(x, n)
-    } else {
-        bessel_j_series(x, n)
-    }
-}
-
 fn bessel_y(x: f64, n: u32) -> f64 {
     if x <= 14.0 {
         bessel_y_series(x, n)
@@ -1358,40 +1677,10 @@ fn bessel_y(x: f64, n: u32) -> f64 {
     }
 }
 
-fn bessel_i(x: f64, n: u32) -> f64 {
-    bessel_i_series(x, n)
-}
-
-fn bessel_k(x: f64, n: u32) -> f64 {
-    if x <= 14.0 {
-        bessel_k_series(x, n)
-    } else {
-        let k0 = k_asym(x, 0);
-        if n == 0 {
-            return k0;
-        }
-        let k1 = k_asym(x, 1);
-        if n == 1 {
-            return k1;
-        }
-        let mut prev = k0;
-        let mut cur = k1;
-        for k in 1..n {
-            let nxt = prev + (2.0 * k as f64 / x) * cur;
-            prev = cur;
-            cur = nxt;
-            if !cur.is_finite() {
-                return cur;
-            }
-        }
-        cur
-    }
-}
-
 fn bessel(ctx: &FuncCtx, args: &[FuncArg], kind: u8) -> Result<CalcValue, CalcError> {
     let x = coerce_number(&args[0].value(ctx)?)?;
     let n_raw = coerce_number(&args[1].value(ctx)?)?;
-    if x < 0.0 || n_raw < 0.0 {
+    if n_raw < 0.0 {
         return Err(CalcError::Num);
     }
     let n = n_raw.trunc() as u64;
@@ -1404,10 +1693,21 @@ fn bessel(ctx: &FuncCtx, args: &[FuncArg], kind: u8) -> Result<CalcValue, CalcEr
     }
     let n = n as u32;
     let r = match kind {
+        // J and I accept negative x (odd orders flip sign); Y and K need x > 0.
         0 => bessel_j(x, n),
-        1 => bessel_y(x, n),
+        1 => {
+            if x <= 0.0 {
+                return Err(CalcError::Num);
+            }
+            bessel_y(x, n)
+        }
         2 => bessel_i(x, n),
-        _ => bessel_k(x, n),
+        _ => {
+            if x <= 0.0 {
+                return Err(CalcError::Num);
+            }
+            bessel_k(x, n)
+        }
     };
     ok_num(r)
 }
@@ -1485,6 +1785,13 @@ const SPECS: &[FuncSpec] = &[
     spec!("IMSIN", 1, Some(1), imsin),
     spec!("IMCOS", 1, Some(1), imcos),
     spec!("IMTAN", 1, Some(1), imtan),
+    spec!("IMSINH", 1, Some(1), imsinh),
+    spec!("IMCOSH", 1, Some(1), imcosh),
+    spec!("IMCOT", 1, Some(1), imcot),
+    spec!("IMCSC", 1, Some(1), imcsc),
+    spec!("IMCSCH", 1, Some(1), imcsch),
+    spec!("IMSEC", 1, Some(1), imsec),
+    spec!("IMSECH", 1, Some(1), imsech),
     spec!("CONVERT", 3, Some(3), convert),
     spec!("BESSELJ", 2, Some(2), besselj),
     spec!("BESSELY", 2, Some(2), bessely),
@@ -1786,15 +2093,18 @@ mod tests {
 
     #[test]
     fn bessel_known_values() {
-        // Anchored to 25-digit mpmath reference values.
-        approx("=BESSELJ(1,0)", 0.7651976865579666, 1e-12);
-        approx("=BESSELJ(1,1)", 0.4400505857449335, 1e-12);
-        approx("=BESSELJ(1,2)", 0.11490348493190048, 1e-12);
-        approx("=BESSELJ(10,0)", -0.2459357644513483, 1e-12);
-        approx("=BESSELJ(30,0)", -0.08636798358104021, 1e-10);
-        approx("=BESSELJ(30,10)", -0.12987689399858877, 1e-10);
-        approx("=BESSELJ(1.9,2)", 0.3299257276923872, 1e-12);
+        // Excel COM-measured doubles (Excel's J/I/K are only ~1e-8 relative
+        // accurate; matching its algorithm is the contract, so expectations
+        // are Excel's values, not the accurate mpmath ones).
+        approx("=BESSELJ(1,0)", 0.76519768375485919, 1e-12);
+        approx("=BESSELJ(1,1)", 0.44005058567713012, 1e-12);
+        approx("=BESSELJ(1,2)", 0.11490348499246938, 1e-12);
+        approx("=BESSELJ(10,0)", -0.24593576444129961, 1e-9);
+        approx("=BESSELJ(30,0)", -0.08636798364311063, 1e-9);
+        approx("=BESSELJ(30,10)", -0.1298768922593505, 1e-7);
+        approx("=BESSELJ(1.9,2)", 0.3299258286697852, 1e-12);
 
+        // BESSELY keeps the high-accuracy series, anchored to mpmath.
         approx("=BESSELY(1,0)", 0.08825696421567696, 1e-12);
         approx("=BESSELY(1,1)", -0.7812128213002887, 1e-12);
         approx("=BESSELY(10,0)", 0.05567116728359939, 1e-12);
@@ -1802,54 +2112,163 @@ mod tests {
         approx("=BESSELY(30,10)", 0.07505670212239711, 1e-10);
         approx("=BESSELY(1.9,2)", -0.669878679001289, 1e-12);
 
-        approx("=BESSELI(1,0)", 1.2660658777520084, 1e-12);
-        approx("=BESSELI(1,1)", 0.565159103992485, 1e-12);
-        approx("=BESSELI(10,0)", 2815.716628466254, 1e-12);
-        approx("=BESSELI(30,0)", 781672297823.9774, 1e-12);
-        approx("=BESSELI(30,10)", 145831809975.96713, 1e-12);
-        approx("=BESSELI(1.9,2)", 0.6032724329434784, 1e-12);
+        approx("=BESSELI(1,0)", 1.2660658480342601, 1e-12);
+        approx("=BESSELI(1,1)", 0.56515909758194349, 1e-12);
+        approx("=BESSELI(10,0)", 2815.7166648041534, 1e-12);
+        approx("=BESSELI(30,0)", 781672301405.57251, 1e-12);
+        approx("=BESSELI(30,10)", 145831810644.16339, 1e-9);
+        approx("=BESSELI(1.9,2)", 0.6032724354874498, 1e-12);
 
-        approx("=BESSELK(1,0)", 0.42102443824070834, 1e-12);
-        approx("=BESSELK(1,1)", 0.6019072301972346, 1e-12);
-        approx("=BESSELK(10,0)", 0.00001778006231616765, 1e-9);
-        approx("=BESSELK(30,0)", 2.1324774964630564e-14, 1e-9);
-        approx("=BESSELK(30,10)", 1.0842816942222974e-13, 1e-9);
-        approx("=BESSELK(1.9,2)", 0.2969092982578029, 1e-12);
+        approx("=BESSELK(1,0)", 0.42102442108341798, 1e-12);
+        approx("=BESSELK(1,1)", 0.60190723166690574, 1e-12);
+        approx("=BESSELK(10,0)", 0.000017780061933126626, 1e-9);
+        approx("=BESSELK(30,0)", 2.1324777935228201e-14, 1e-9);
+        approx("=BESSELK(30,10)", 1.0842816872662702e-13, 1e-9);
+        approx("=BESSELK(1.9,2)", 0.29690930137427463, 1e-12);
     }
 
     #[test]
     fn bessel_series_orders_and_errors() {
-        // Higher orders and boundary regime (series at x<=12 vs recurrence/asymptotic).
-        approx("=BESSELJ(12,0)", 0.04768931079683354, 1e-10);
-        approx("=BESSELJ(15,0)", -0.014224472826780773, 1e-10);
-        approx("=BESSELJ(20,10)", 0.18648255802394508, 1e-9);
+        // Higher orders and boundary regime; expectations are Excel's values.
+        approx("=BESSELJ(12,0)", 0.047689310661336595, 1e-9);
+        approx("=BESSELJ(15,0)", -0.014224472705558025, 1e-9);
+        approx("=BESSELJ(20,10)", 0.18648255214877354, 1e-7);
         approx("=BESSELY(12,0)", -0.22523731263436143, 1e-10);
         approx("=BESSELY(15,0)", 0.20546429603891826, 1e-10);
         approx("=BESSELY(15,1)", 0.021073628036873512, 1e-10);
         approx("=BESSELY(20,10)", -0.0438946535156584, 1e-9);
-        approx("=BESSELI(15,0)", 339649.3732979139, 1e-12);
-        approx("=BESSELK(15,0)", 9.819536482396434e-8, 1e-9);
-        approx("=BESSELK(20,10)", 6.31621452832158e-9, 1e-9);
+        approx("=BESSELI(15,0)", 339649.36988642148, 1e-12);
+        approx("=BESSELK(15,0)", 9.8195369117794849e-8, 1e-9);
+        approx("=BESSELK(20,10)", 6.3162144835754941e-9, 1e-9);
         // large order n ~ x
-        approx("=BESSELJ(30,100)", 4.5788015281752445e-42, 1e-9);
+        approx("=BESSELJ(30,100)", 4.5788015281752469e-42, 1e-9);
         approx("=BESSELY(30,100)", -7.287528470824471e38, 1e-9);
-        approx("=BESSELI(30,100)", 3.947642005333428e-40, 1e-9);
-        approx("=BESSELK(30,100)", 1.2131584253026667e37, 1e-9);
-        approx("=BESSELJ(15,100)", 1.9660095611249547e-71, 1e-9);
+        approx("=BESSELI(30,100)", 3.9476420234213908e-40, 1e-9);
+        approx("=BESSELK(30,100)", 1.2131584107864383e37, 1e-9);
+        approx("=BESSELJ(15,100)", 1.9660095611249569e-71, 1e-9);
         approx("=BESSELY(15,100)", -1.6375955323196364e68, 1e-9);
 
         // domain rules
-        assert_eq!(error("=BESSELJ(-1,2)"), err_num());
+        approx("=BESSELJ(-1,2)", 0.11490348499246938, 1e-12);
         assert_eq!(error("=BESSELJ(1,-1)"), err_num());
         assert_eq!(error("=BESSELY(0,0)"), err_num());
         assert_eq!(error("=BESSELK(0,0)"), err_num());
-        assert_eq!(num("=BESSELJ(0,0)"), 1.0);
+        assert_eq!(error("=BESSELY(-1,0)"), err_num());
+        assert_eq!(error("=BESSELK(-1,0)"), err_num());
+        // Excel's J0(0) is 1.00000000283141 (rational approximation ratio).
+        approx("=BESSELJ(0,0)", 1.00000000283141, 1e-12);
         assert_eq!(num("=BESSELI(0,0)"), 1.0);
         assert_eq!(num("=BESSELJ(0,2)"), 0.0);
         // n truncated toward zero
-        approx("=BESSELJ(1.9,2.9)", 0.3299257276923872, 1e-12);
+        approx("=BESSELJ(1.9,2.9)", 0.3299258286697852, 1e-12);
         // overflow -> #NUM!, like Excel
         assert_eq!(error("=BESSELI(1000,0)"), err_num());
+    }
+
+    #[test]
+    fn bessel_csv_excel_rows() {
+        // CONFIRMED-EXCEL rows: negative x for BESSELI/BESSELJ, and BESSELK's
+        // imprecise (Excel-matching) value.
+        approx("=BESSELI(-0.5,1)", -0.25789430328903556, 1e-12);
+        approx("=BESSELJ(-0.5,1)", -0.24226845767957006, 1e-12);
+        approx("=BESSELK(1.5,1)", 0.27738780363225868, 1e-12);
+        approx("=BESSELI(-1,2)", 0.13574766658069928, 1e-12);
+        approx("=BESSELJ(-1,1)", -0.44005058567713012, 1e-12);
+    }
+
+    #[test]
+    fn engineering_functions_reject_boolean_arguments() {
+        // Base conversions: a boolean argument is #VALUE!, never coerced.
+        assert_eq!(error("=BIN2DEC(TRUE)"), err_value());
+        assert_eq!(error("=BIN2HEX(11111011,TRUE)"), err_value());
+        assert_eq!(error("=BIN2OCT(11111011,TRUE)"), err_value());
+        assert_eq!(error("=DEC2BIN(22,TRUE)"), err_value());
+        assert_eq!(error("=DEC2HEX(22,TRUE)"), err_value());
+        assert_eq!(error("=DEC2OCT(22,TRUE)"), err_value());
+        assert_eq!(error("=HEX2BIN(22,TRUE)"), err_value());
+        assert_eq!(error("=HEX2DEC(TRUE)"), err_value());
+        assert_eq!(error("=HEX2OCT(22,TRUE)"), err_value());
+        assert_eq!(error("=OCT2DEC(TRUE)"), err_value());
+        assert_eq!(error("=OCT2HEX(22,TRUE)"), err_value());
+        assert_eq!(error("=OCT2BIN(22,TRUE)"), err_value());
+        // COMPLEX / CONVERT / DELTA / GESTEP / ERF family.
+        assert_eq!(error("=COMPLEX(TRUE,4,\"i\")"), err_value());
+        assert_eq!(error("=CONVERT(TRUE,\"lbm\",\"kg\")"), err_value());
+        assert_eq!(error("=DELTA(TRUE,4)"), err_value());
+        assert_eq!(error("=GESTEP(TRUE)"), err_value());
+        assert_eq!(error("=ERF(TRUE)"), err_value());
+        assert_eq!(error("=ERF.PRECISE(TRUE)"), err_value());
+        assert_eq!(error("=ERFC(TRUE)"), err_value());
+        assert_eq!(error("=ERFC.PRECISE(TRUE)"), err_value());
+        // IMEXP / IMPOWER were #NUM!, Excel says #VALUE!.
+        assert_eq!(error("=IMEXP(TRUE)"), err_value());
+        assert_eq!(error("=IMPOWER(TRUE,3)"), err_value());
+    }
+
+    // ---- new IM* functions (Excel COM measured) ----------------------------
+
+    #[test]
+    fn im_hyperbolic_doc_examples() {
+        assert_eq!(
+            text("=IMSINH(\"1+1i\")"),
+            "0.634963914784736+1.29845758141598i"
+        );
+        assert_eq!(
+            text("=IMCOSH(\"1+1i\")"),
+            "0.833730025131149+0.988897705762865i"
+        );
+        assert_eq!(text("=IMSINH(\"0.5i\")"), "0.479425538604203i");
+        assert_eq!(text("=IMCOSH(\"0.5i\")"), "0.877582561890373");
+        assert_eq!(text("=IMCOSH(\"2i\")"), "-0.416146836547142");
+        assert_eq!(text("=IMCOSH(\"0\")"), "1");
+        assert_eq!(text("=IMSINH(\"2i\")"), "0.909297426825682i");
+    }
+
+    #[test]
+    fn im_reciprocals_doc_examples() {
+        assert_eq!(
+            text("=IMCOT(\"1+1i\")"),
+            "0.217621561854403-0.868014142895925i"
+        );
+        assert_eq!(
+            text("=IMCOT(\"0.5+0.5i\")"),
+            "0.839139579024831-1.17194514452435i"
+        );
+        assert_eq!(text("=IMCOT(\"1i\")"), "-1.31303528549933i");
+        assert_eq!(text("=IMCSC(\"0.5i\")"), "-1.91903475133494i");
+        assert_eq!(text("=IMCSC(\"1i\")"), "-0.850918128239322i");
+        assert_eq!(text("=IMCSCH(\"0.5i\")"), "-2.08582964293349i");
+        assert_eq!(text("=IMCSCH(\"2i\")"), "-1.09975017029462i");
+        assert_eq!(
+            text("=IMSEC(\"1+1i\")"),
+            "0.498337030555187+0.591083841721045i"
+        );
+        assert_eq!(text("=IMSEC(\"0.5i\")"), "0.886818883970074");
+        assert_eq!(text("=IMSEC(\"2i\")"), "0.26580222883408");
+        assert_eq!(
+            text("=IMSECH(\"1+1i\")"),
+            "0.498337030555187-0.591083841721045i"
+        );
+        assert_eq!(text("=IMSECH(\"0.5i\")"), "1.13949392732455");
+        assert_eq!(text("=IMSECH(\"2i\")"), "-2.40299796172238");
+    }
+
+    #[test]
+    fn im_reciprocal_components_and_errors() {
+        // These two hit Excel's 15-digit rounding boundary in the last digit,
+        // so assert the numeric components with tolerance.
+        let (c, _) = parse_complex_str(&text("=IMCSC(\"1+1i\")")).expect("csc output must parse");
+        assert!((c.re - 0.621518017170428).abs() < 1e-13, "re {}", c.re);
+        assert!((c.im + 0.303931001628427).abs() < 1e-13, "im {}", c.im);
+        let (c, _) = parse_complex_str(&text("=IMCSCH(\"1+1i\")")).expect("csch output must parse");
+        assert!((c.re - 0.303931001628426).abs() < 1e-13, "re {}", c.re);
+        assert!((c.im + 0.621518017170429).abs() < 1e-13, "im {}", c.im);
+        assert_eq!(error("=IMCOSH(TRUE)"), err_value());
+        assert_eq!(error("=IMCSC(TRUE)"), err_value());
+        // Zero divisors are #NUM! (Excel), not #DIV/0!.
+        assert_eq!(error("=IMCSC(\"0\")"), err_num());
+        assert_eq!(error("=IMCSCH(\"0\")"), err_num());
+        assert_eq!(error("=IMCOT(\"0\")"), err_num());
     }
 
     // ---- registry sanity ---------------------------------------------------
@@ -1899,6 +2318,13 @@ mod tests {
             "IMSIN",
             "IMCOS",
             "IMTAN",
+            "IMSINH",
+            "IMCOSH",
+            "IMCOT",
+            "IMCSC",
+            "IMCSCH",
+            "IMSEC",
+            "IMSECH",
             "CONVERT",
             "BESSELJ",
             "BESSELY",

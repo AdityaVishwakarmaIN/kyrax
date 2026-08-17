@@ -2,11 +2,11 @@
 
 use pyo3::{
     Bound, PyAny, PyResult, Python,
-    exceptions::PyValueError,
+    exceptions::{PyTypeError, PyValueError},
     prelude::*,
     types::{PyBytes, PyDict, PyList, PyString, PyTuple},
 };
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use super::cf_dv::{CfRule, CfRuleKind, CfVo, ConditionalFormatting, DataValidation};
 use super::charts::{Anchor, Chart, ChartType, ChartsheetSpec, Grouping, Series};
@@ -21,11 +21,12 @@ use super::writer::{
     date_to_serial, datetime_to_serial, save_workbook, save_workbook_stream, write_workbook_bytes,
 };
 use crate::error::{KyraxError, KyraxErrorKind};
-use crate::turbo::error::TurboError;
+use crate::turbo::error::{TurboError, TurboResult};
 use crate::turbo::meta::{AutoFilterMeta, FilterColumnMeta};
-use crate::turbo::overlay::WorkbookOverlay;
+use crate::turbo::overlay::{WorkbookOverlay, hydrate_sheet_from_xml};
+use crate::turbo::scan::{MAX_GRID_COLS, MAX_GRID_ROWS, parse_ref_range_strict};
 use crate::turbo::structural::parse_range;
-use crate::turbo::zipmin::ArchiveMap;
+use crate::turbo::zipmin::{ArchiveMap, read_entry};
 
 fn write_err_to_py(err: std::io::Error) -> PyErr {
     let fe: KyraxError = KyraxErrorKind::Internal(format!("write error: {err}")).into();
@@ -3147,12 +3148,22 @@ fn _use_turbo_err(e: TurboError) -> PyErr {
 pub struct PyEditableSheet {
     sheet_name: String,
     overlay: Arc<std::sync::Mutex<WorkbookOverlay>>,
+    /// Hydrated original worksheet XML, computed at most ONCE per handle.
+    /// The archive source is immutable (edits only touch the overlay), so a
+    /// cached original stays valid for the handle's lifetime; pending
+    /// `modified_cells` shadow it at read time.
+    original: OnceLock<Option<Sheet>>,
 }
 
 #[pymethods]
 impl PyEditableSheet {
     #[pyo3(name = "set_cell")]
     fn py_set_cell(&self, row: u32, col: u32, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        if row == 0 || col == 0 || row > MAX_GRID_ROWS || col > MAX_GRID_COLS {
+            return Err(PyValueError::new_err(format!(
+                "set_cell: ({row}, {col}) is out of grid (rows 1..={MAX_GRID_ROWS}, columns 1..={MAX_GRID_COLS})"
+            )));
+        }
         let cell_val = py_to_cell_value(value, false)?;
         let mut ov = self
             .overlay
@@ -3210,16 +3221,14 @@ impl PyEditableSheet {
         cols: i64,
         translate: bool,
     ) -> PyResult<()> {
-        // Parse "B2:D4" (or "B2") into 1-based inclusive corners. `$` markers and
-        // reversed corners are tolerated; a malformed range is a ValueError.
-        let (r0, c0, r1_0, c1_0) = crate::turbo::scan::parse_ref_range(range_string.as_bytes());
-        let (r1, c1) = (r0 + 1, c0 + 1);
-        let (r2, c2) = (r1_0 + 1, c1_0 + 1);
-        if r1 == 0 || c1 == 0 {
+        // Parse "B2:D4" (or "B2") into 1-based inclusive corners. `$` markers
+        // are tolerated in valid positions and reversed corners are normalized;
+        // a malformed or out-of-grid range fails immediately with a ValueError.
+        let Some((r1, c1, r2, c2)) = parse_ref_range_strict(range_string.as_bytes()) else {
             return Err(PyValueError::new_err(format!(
                 "move_range: '{range_string}' is not a valid A1 range"
             )));
-        }
+        };
         self.record(|ov| ov.move_range(&self.sheet_name, r1, c1, r2, c2, rows, cols, translate))
     }
 
@@ -3233,6 +3242,11 @@ impl PyEditableSheet {
         border: Option<&Bound<'_, PyAny>>,
         num_fmt: Option<&str>,
     ) -> PyResult<()> {
+        if row == 0 || col == 0 || row > MAX_GRID_ROWS || col > MAX_GRID_COLS {
+            return Err(PyValueError::new_err(format!(
+                "set_cell_style: ({row}, {col}) is out of grid (rows 1..={MAX_GRID_ROWS}, columns 1..={MAX_GRID_COLS})"
+            )));
+        }
         let mut desc = StyleDesc::default();
         if let Some(f) = font {
             desc.font = Some(parse_font(f)?);
@@ -3254,6 +3268,79 @@ impl PyEditableSheet {
         ov.set_cell_style(&self.sheet_name, row, col, desc);
         Ok(())
     }
+
+    /// `ws["A1"]` → the scalar at that cell; `ws["A1:B2"]` → row-major
+    /// `list[list[scalar]]`. Direct edits (set_cell / range set) shadow the
+    /// original XML immediately; queued insert/delete/move operations
+    /// materialize at `save()` and are not reflected here.
+    fn __getitem__<'py>(&self, py: Python<'py>, key: &str) -> PyResult<Bound<'py, PyAny>> {
+        let Some((r1, c1, r2, c2)) = parse_ref_range_strict(key.as_bytes()) else {
+            return Err(PyValueError::new_err(format!(
+                "'{key}' is not a valid A1 cell or range"
+            )));
+        };
+        let ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        // Hydrate the original worksheet XML at most ONCE per handle (cached
+        // in `self.original`); pending direct edits in `modified_cells` shadow
+        // the hydrated original per cell.
+        let original = self
+            .original_sheet_locked(&ov)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let resolve = |row: u32, col: u32| {
+            self.cell_value_locked(&ov, original, row, col)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        };
+        if r1 == r2 && c1 == c2 {
+            let v = resolve(r1, c1)?;
+            return cell_value_to_py(py, &v);
+        }
+        let mut rows: Vec<Bound<'_, PyAny>> = Vec::with_capacity((r2 - r1 + 1) as usize);
+        for r in r1..=r2 {
+            let mut row_items: Vec<Bound<'_, PyAny>> = Vec::with_capacity((c2 - c1 + 1) as usize);
+            for c in c1..=c2 {
+                let v = resolve(r, c)?;
+                row_items.push(cell_value_to_py(py, &v)?);
+            }
+            rows.push(PyList::new(py, row_items)?.into_any());
+        }
+        Ok(PyList::new(py, rows)?.into_any())
+    }
+
+    /// `ws["A1"] = v` sets a single cell; `ws["A1:B2"] = [[…],[…]]` sets a
+    /// rectangular range (exact dimensions, validated and converted before any
+    /// edit is recorded so a bad value leaves no partial writes).
+    fn __setitem__(&self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let Some((r1, c1, r2, c2)) = parse_ref_range_strict(key.as_bytes()) else {
+            return Err(PyValueError::new_err(format!(
+                "'{key}' is not a valid A1 cell or range"
+            )));
+        };
+        if r1 == r2 && c1 == c2 {
+            let cell_val = py_to_cell_value(value, false)?;
+            let mut ov = self
+                .overlay
+                .lock()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            ov.set_cell(&self.sheet_name, r1, c1, cell_val);
+            return Ok(());
+        }
+        let nrows = (r2 - r1 + 1) as usize;
+        let ncols = (c2 - c1 + 1) as usize;
+        let matrix = extract_2d_values(value, nrows, ncols)?;
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        for (dr, row_vals) in matrix.iter().enumerate() {
+            for (dc, v) in row_vals.iter().enumerate() {
+                ov.set_cell(&self.sheet_name, r1 + dr as u32, c1 + dc as u32, v.clone());
+            }
+        }
+        Ok(())
+    }
 }
 
 impl PyEditableSheet {
@@ -3266,6 +3353,146 @@ impl PyEditableSheet {
         f(&mut ov);
         Ok(())
     }
+
+    /// Hydrate the original worksheet XML into a `Sheet` at most ONCE per
+    /// handle, so repeated get/range calls do not re-read, inflate, or re-
+    /// hydrate the part. `None` when the sheet is absent from the archive
+    /// (every cell then resolves to `Empty`). The returned reference is tied
+    /// to `self` (the cache); the caller holds the overlay mutex.
+    fn original_sheet_locked(&self, ov: &WorkbookOverlay) -> TurboResult<Option<&Sheet>> {
+        if let Some(cached) = self.original.get() {
+            return Ok(cached.as_ref());
+        }
+        let Some(target) = ov.archive_map.sheet_name_map.get(&self.sheet_name) else {
+            self.original.set(None).ok();
+            return Ok(None);
+        };
+        let Some(xml) = read_entry(&ov.archive_map.source_bytes, target)? else {
+            self.original.set(None).ok();
+            return Ok(None);
+        };
+        let sheet = hydrate_sheet_from_xml(&xml, &ov.archive_map.shared_strings)?;
+        // Only populate the cache on success; a read/hydration error leaves
+        // the cache empty so a later call may retry.
+        let _ = self.original.set(Some(sheet));
+        Ok(self.original.get().and_then(Option::as_ref))
+    }
+
+    /// Resolve the effective value at 1-based `(row, col)`: a pending direct
+    /// edit shadows the hydrated original immediately; otherwise the original
+    /// cell value is read from the pre-hydrated `original` sheet (may be
+    /// `None`, meaning the archive sheet is absent). Queued insert/delete/move
+    /// ops materialize at save and are not reflected here (documented in the
+    /// stub).
+    fn cell_value_locked(
+        &self,
+        ov: &WorkbookOverlay,
+        original: Option<&Sheet>,
+        row: u32,
+        col: u32,
+    ) -> TurboResult<CellValue> {
+        if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
+            if let Some(v) = so.modified_cells.get(&(row, col)) {
+                return Ok(v.clone());
+            }
+        }
+        if let Some(sheet) = original {
+            for r in &sheet.rows {
+                if r.row != row {
+                    continue;
+                }
+                for c in &r.cells {
+                    if c.col == col {
+                        return Ok(c.value.clone());
+                    }
+                }
+            }
+        }
+        Ok(CellValue::Empty)
+    }
+}
+
+/// Convert a `CellValue` to the Python scalar returned by `ws[key]`.
+fn cell_value_to_py<'py>(py: Python<'py>, v: &CellValue) -> PyResult<Bound<'py, PyAny>> {
+    use pyo3::IntoPyObjectExt;
+    Ok(match v {
+        CellValue::Empty => py.None().into_bound(py),
+        CellValue::Number(n) | CellValue::DateSerial(n) => n.into_bound_py_any(py)?,
+        CellValue::Bool(b) => b.into_bound_py_any(py)?,
+        CellValue::Error(s) | CellValue::Str(s) => s.as_str().into_bound_py_any(py)?,
+        CellValue::Rich(rt) => {
+            let mut text = String::new();
+            for run in &rt.runs {
+                match run {
+                    RichRun::Text(t) => text.push_str(t.as_str()),
+                    RichRun::Block {
+                        text: block_text, ..
+                    } => {
+                        text.push_str(block_text.as_str());
+                    }
+                }
+            }
+            text.into_bound_py_any(py)?
+        }
+        CellValue::Formula { text, .. } => {
+            // The stored text may already carry a leading '='; the getter must
+            // expose exactly one leading '=' regardless.
+            let trimmed = text.strip_prefix('=').unwrap_or(text);
+            let mut s = String::with_capacity(trimmed.len() + 1);
+            s.push('=');
+            s.push_str(trimmed);
+            s.into_bound_py_any(py)?
+        }
+    })
+}
+
+/// Validate a range-assignment value is an exact `nrows x ncols` 2D list/tuple
+/// and convert every element to `CellValue` BEFORE any edit is recorded, so an
+/// invalid element or shape mismatch leaves the overlay untouched.
+fn extract_2d_values(
+    value: &Bound<'_, PyAny>,
+    nrows: usize,
+    ncols: usize,
+) -> PyResult<Vec<Vec<CellValue>>> {
+    let outer: Vec<Bound<'_, PyAny>> = if let Ok(l) = value.cast::<PyList>() {
+        l.iter().collect()
+    } else if let Ok(t) = value.cast::<PyTuple>() {
+        t.iter().collect()
+    } else {
+        return Err(PyTypeError::new_err(
+            "range assignment value must be a 2D list or tuple",
+        ));
+    };
+    if outer.len() != nrows {
+        return Err(PyTypeError::new_err(format!(
+            "range assignment expects {nrows} rows, got {}",
+            outer.len()
+        )));
+    }
+    let mut matrix: Vec<Vec<CellValue>> = Vec::with_capacity(nrows);
+    for row_obj in outer {
+        let row_items: Vec<Bound<'_, PyAny>> = if let Ok(l) = row_obj.cast::<PyList>() {
+            l.iter().collect()
+        } else if let Ok(t) = row_obj.cast::<PyTuple>() {
+            t.iter().collect()
+        } else {
+            return Err(PyTypeError::new_err(
+                "each range-assignment row must be a list or tuple",
+            ));
+        };
+        if row_items.len() != ncols {
+            return Err(PyTypeError::new_err(format!(
+                "range assignment expects {ncols} columns per row, got {}",
+                row_items.len()
+            )));
+        }
+        let mut row_vals: Vec<CellValue> = Vec::with_capacity(ncols);
+        for item in row_items {
+            row_vals.push(py_to_cell_value(&item, false)?);
+        }
+        matrix.push(row_vals);
+    }
+    Ok(matrix)
 }
 
 #[pyclass(name = "EditableWorkbook")]
@@ -3290,6 +3517,7 @@ impl PyEditableWorkbook {
         Ok(PyEditableSheet {
             sheet_name: sheet_name.to_string(),
             overlay: Arc::clone(&self.overlay),
+            original: OnceLock::new(),
         })
     }
 

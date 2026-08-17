@@ -334,8 +334,9 @@ mod text_formatting {
         assert_eq!(error("=TEXT(45352,\"dd/mm/yyyy hh:mm\")"), CalcError::Value);
         assert_eq!(error("=TEXT(123,\"0.00E+00\")"), CalcError::Value);
         assert_eq!(error("=TEXT(5,\"@\")"), CalcError::Value);
-        assert_eq!(error("=TEXT(5,\"0 \"\"units\"\"\")"), CalcError::Value);
         assert_eq!(error("=TEXT(5,\"0.00;[Red]-0.00\")"), CalcError::Value);
+        // quoted literals are now reproduced exactly, as Excel does
+        assert_eq!(text("=TEXT(5,\"0 \"\"units\"\"\")"), "5 units");
     }
 
     #[test]
@@ -665,7 +666,8 @@ mod time {
         assert_eq!(num("=TIME(24,0,0)"), 0.0);
         assert_eq!(num("=TIME(0,0,0)"), 0.0);
         approx("=TIME(25,0,0)", 1.0 / 24.0, 1e-9);
-        approx("=TIME(-1,0,0)", 23.0 / 24.0, 1e-9);
+        // Excel-COM measured: any negative TIME argument is #NUM! (not a wrap)
+        assert_eq!(error("=TIME(-1,0,0)"), CalcError::Num);
         // hours above 24 wrap around to the same time of day
         assert_eq!(num("=HOUR(TIME(25,0,0))"), num("=HOUR(TIME(1,0,0))"));
     }
@@ -897,18 +899,20 @@ mod datevalue {
         assert_eq!(num("=DATEVALUE(\" 2024-03-01 \")"), 45352.0);
         assert_eq!(num("=DATEVALUE(\"2024-03-01\")"), num("=DATE(2024,3,1)"));
         assert_eq!(num("=DATEVALUE(\"2024-02-29\")"), num("=DATE(2024,2,29)"));
+        // unpadded ISO and year-first slash are unambiguous; a trailing time
+        // contributes nothing to the serial (all Excel-COM measured)
+        assert_eq!(num("=DATEVALUE(\"2024-3-1\")"), 45352.0);
+        assert_eq!(num("=DATEVALUE(\"2024/03/01\")"), 45352.0);
+        assert_eq!(num("=DATEVALUE(\"2020-01-02 13:14:15\")"), 43832.0);
     }
 
     #[test]
     fn refuses_ambiguous_or_otherwise_unsupported_forms() {
         for bad in [
-            "2024/03/01",
             "03/01/2024",
             "03-01-2024",
-            "2024-3-1",
             "2024-13-01",
             "2024-02-30",
-            "2024-02-29 12:00",
             "hello",
             "",
         ] {
@@ -950,7 +954,9 @@ mod days {
         assert_eq!(num("=DAYS(DATE(2024,1,1),DATE(2024,3,1))"), -60.0);
         assert_eq!(num("=DAYS(DATE(2024,3,1),DATE(2024,3,1))"), 0.0);
         assert_eq!(num("=DAYS(DATE(2024,3,1),DATE(2024,2,29))"), 1.0);
-        assert_eq!(num("=DAYS(45352.5,45292.25)"), 60.25);
+        // Excel truncates the time portions of both serials to integers.
+        assert_eq!(num("=DAYS(45352.5,45292.25)"), 60.0);
+        assert_eq!(num("=DAYS(43832.233,1)"), 43831.0);
     }
 
     #[test]

@@ -31,8 +31,8 @@ from ._kyrax import (
     ColumnInfoNoDtype,
     ColumnNotFoundError,
     DefinedName,
-    KyraxError,
     InvalidParametersError,
+    KyraxError,
     SheetNotFoundError,
     UnsupportedColumnTypeCombinationError,
     __version__,
@@ -42,20 +42,21 @@ from ._kyrax import (
     _TurboReader,
     _TurboSheet,
 )
+from ._kyrax import is_encrypted as _is_encrypted
 from ._kyrax import read_excel as _read_excel
 from ._kyrax import read_excel_turbo as _read_excel_turbo
+from ._kyrax import repair_excel as _repair_excel
+from ._kyrax import validate_excel as _validate_excel
 from ._kyrax import write_excel_turbo as _write_excel_turbo
 from ._kyrax import write_excel_turbo_bytes as _write_excel_turbo_bytes
 from ._kyrax import write_excel_turbo_stream as _write_excel_turbo_stream
-from ._kyrax import validate_excel as _validate_excel
-from ._kyrax import repair_excel as _repair_excel
-from ._kyrax import is_encrypted as _is_encrypted
+
 try:
     from ._kyrax import encryption_info as _encryption_info
 except ImportError:
     _encryption_info = None
 try:
-    from ._kyrax import edit_excel, EditableWorkbook, EditableSheet
+    from ._kyrax import EditableSheet, EditableWorkbook, edit_excel
 except ImportError:
     edit_excel = None
     EditableWorkbook = None
@@ -99,6 +100,7 @@ def repair_excel(
     if isinstance(out_path, Path):
         out_path = expanduser(str(out_path))
     return _repair_excel(str(path), str(out_path), severity=severity)
+
 
 def load_workbook(filename: str | Path, edit_mode: bool = False):
     """Load an Excel workbook.
@@ -1293,6 +1295,8 @@ def write_excel_turbo_bytes(
 __all__ = (
     # version
     "__version__",
+    # standalone formula API (lazy; imported on first access)
+    "formulas",
     # main entrypoint
     "read_excel",
     "read_excel_turbo",
@@ -1342,3 +1346,15 @@ __all__ = (
     "InvalidParametersError",
     "UnsupportedColumnTypeCombinationError",
 )
+
+
+def __getattr__(name: str):
+    # Lazy submodules: `from kyrax import formulas` (and `kyrax.formulas`)
+    # import on first use, so the `formulas` facade costs nothing when unused.
+    # `importlib.import_module` (not `from . import formulas`) avoids the
+    # parent-attribute lookup that would re-enter this hook and recurse.
+    if name == "formulas":
+        import importlib
+
+        return importlib.import_module(f"{__name__}.formulas")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -65,8 +65,7 @@ const MAX_STEPS: u64 = 10_000_000;
 /// cells for one result.
 const MAX_CELLS: u64 = 4_000_000;
 
-/// The functions that `calc/eval.rs` must hand raw (unevaluated) arguments.
-/// This is the contract `eval.rs` consults via [`wants_raw_args`].
+/// Functions that must receive raw arguments for lexical evaluation.
 const LAMBDA_FAMILY: [&str; 9] = [
     "LAMBDA",
     "LET",
@@ -79,7 +78,8 @@ const LAMBDA_FAMILY: [&str; 9] = [
     "ISOMITTED",
 ];
 
-/// Whether `eval.rs` must pass this call's arguments unevaluated.
+/// Whether a call's arguments must remain unevaluated.
+#[allow(dead_code)]
 pub fn wants_raw_args(name: &str) -> bool {
     let up = name.to_ascii_uppercase();
     LAMBDA_FAMILY.contains(&up.as_str())

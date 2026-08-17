@@ -13,7 +13,6 @@ import zipfile
 
 import kyrax
 import openpyxl
-import pytest
 from openpyxl.drawing.image import Image as OpxImage
 from openpyxl.drawing.spreadsheet_drawing import (
     AbsoluteAnchor,
@@ -218,5 +217,7 @@ def test_kyrax_reader_matches_openpyxl_on_openpyxl_written_file(tmp_path) -> Non
     krx_norm = sorted(_kyrax_anchor(d) for d in krx)
     assert opx_norm == krx_norm, "kyrax reader must agree with openpyxl.find_images"
 
-    for i, d in zip(sorted(images, key=lambda x: _opx_anchor(x.anchor)), sorted(krx, key=_kyrax_anchor)):
+    ordered_images = sorted(images, key=lambda x: _opx_anchor(x.anchor))
+    ordered_kyrax = sorted(krx, key=_kyrax_anchor)
+    for i, d in zip(ordered_images, ordered_kyrax):
         assert i.ref.getvalue() == d["data"]

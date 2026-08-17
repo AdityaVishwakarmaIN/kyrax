@@ -14,8 +14,12 @@ pub mod deps;
 mod eval;
 pub mod functions;
 mod hydrate;
+mod lambda;
 mod lexer;
 mod parser;
+/// PyO3 bindings for the `kyrax.formulas` facade (thin; see python_api.rs).
+#[cfg(feature = "python")]
+pub mod python_api;
 mod refs;
 mod sheetdata;
 /// Dynamic-array spill-region ownership. Public because the spill map is the

@@ -20,13 +20,14 @@
 use crate::turbo::calc::ast::Expr;
 use crate::turbo::calc::deps::{CellKey, DependencyGraph};
 use crate::turbo::calc::eval::eval;
-use crate::turbo::calc::functions::FuncCtx;
+use crate::turbo::calc::functions::{FuncCtx, MAX_COLS, MAX_ROWS};
 use crate::turbo::calc::parser::parse_formula;
 use crate::turbo::calc::sheetdata::SheetData;
-use crate::turbo::calc::value::CalcValue;
+use crate::turbo::calc::value::{ArrayValue, CalcValue};
 use crate::turbo::calc::{CalcOptions, CalcReport};
-use crate::turbo::write::model::{CellValue, Workbook};
-use std::collections::HashMap;
+use crate::turbo::write::model::{Cell, CellValue, Row, Sheet, Workbook};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 /// Evaluate `wb`'s formula cells and fill their `cached` slots.
 ///
@@ -120,7 +121,13 @@ pub fn hydrate_workbook(wb: &mut Workbook, options: &CalcOptions) -> CalcReport 
     report.cycles = topo.cycles.len();
     report.fallback = topo.fallback.len();
 
-    // 4. Evaluate in dependency order.
+    // 4. Evaluate in dependency order. An array result spills: the anchor
+    //    keeps its formula (cached with the array's first element) and every
+    //    other element is written as a plain value cell at its own position —
+    //    Excel's own no-rich-metadata representation of a spilled dynamic
+    //    array. A 1x1 array is scalarized to its single element, which is what
+    //    Excel itself stores for a function that happened to return a block of
+    //    one.
     for key in &topo.order {
         let Some(expr) = exprs.get(key) else {
             continue; // unparseable cells never reach `order`, but be explicit
@@ -138,16 +145,36 @@ pub fn hydrate_workbook(wb: &mut Workbook, options: &CalcOptions) -> CalcReport 
             };
             eval(expr, &ctx)
         };
+        // A multi-cell array is a pending spill, persisted after its rectangle
+        // has been checked against the whole sheet at once.
+        let mut spill: Option<Arc<ArrayValue>> = None;
         // An error is a legitimate Excel result as long as the code is one
         // Excel can store; internal-only codes mean "we could not compute
         // this", which is a fallback, not a value.
         let stored = match value {
-            Ok(CalcValue::Array(_)) | Ok(CalcValue::Blank) => None,
+            Ok(CalcValue::Array(arr)) if arr.rows == 0 || arr.cols == 0 => None,
+            Ok(CalcValue::Array(arr)) if arr.rows > 1 || arr.cols > 1 => {
+                spill = Some(arr);
+                None
+            }
+            Ok(CalcValue::Array(arr)) => scalar_cache(arr.get(0, 0)),
+            Ok(CalcValue::Blank) => None,
             Ok(CalcValue::Error(e)) if e.is_internal() => None,
             Ok(v) => Some(v),
             Err(e) if e.cacheable() => Some(CalcValue::Error(e)),
             Err(_) => None,
         };
+        if let Some(arr) = spill {
+            if persist_spill(&mut data, wb, key, &arr) {
+                report.computed += 1;
+                if arr.get(0, 0).is_error() {
+                    report.error_cells += 1;
+                }
+            } else {
+                report.fallback += 1;
+            }
+            continue;
+        }
         match stored {
             Some(v) => {
                 if v.is_error() {
@@ -167,6 +194,123 @@ pub fn hydrate_workbook(wb: &mut Workbook, options: &CalcOptions) -> CalcReport 
     //    scalar, so nothing fabricated can reach the XML.
     data.write_back(wb);
     report
+}
+
+/// The cacheable scalar view of an array element: `None` for blank and
+/// internal-only codes, which have no legal `<v>`.
+fn scalar_cache(v: &CalcValue) -> Option<CalcValue> {
+    match v {
+        CalcValue::Blank => None,
+        CalcValue::Error(e) if e.is_internal() => None,
+        other => Some(other.clone()),
+    }
+}
+
+/// Materialize a spilled array into `wb` using Excel's no-rich-metadata model:
+/// the anchor keeps its formula (its cached `<v>` comes from the first element
+/// via `write_back`), and every other element becomes a plain value cell at its
+/// row/col. Returns `false` when the spill cannot be persisted — off the grid,
+/// or its rectangle collides with content it must not overwrite — in which
+/// case the anchor is left uncached and `fullCalcOnLoad` makes Excel report
+/// `#SPILL!` itself.
+fn persist_spill(
+    data: &mut SheetData,
+    wb: &mut Workbook,
+    key: &CellKey,
+    arr: &Arc<ArrayValue>,
+) -> bool {
+    let (rows, cols) = arr.shape();
+    let (r0, c0) = (key.row, u32::from(key.col));
+    if r0 + rows > MAX_ROWS || c0 + cols > MAX_COLS as u32 {
+        return false; // off the grid: Excel would report #SPILL!
+    }
+    let Some(sheet) = wb.sheets.get_mut(key.sheet as usize) else {
+        return false;
+    };
+    // The anchor cell itself is occupied (it holds the formula) but every other
+    // cell in the rectangle must be empty, or writing would clobber user data.
+    let mut occupied = HashSet::with_capacity(64);
+    for row in &sheet.rows {
+        for cell in &row.cells {
+            if !matches!(cell.value, CellValue::Empty) {
+                occupied.insert((row.row, cell.col));
+            }
+        }
+    }
+    for dr in 0..rows {
+        for dc in 0..cols {
+            if dr == 0 && dc == 0 {
+                continue;
+            }
+            if occupied.contains(&(r0 + dr + 1, c0 + dc + 1)) {
+                return false;
+            }
+        }
+    }
+    // Anchor: give the resolver the first element so downstream formulas read
+    // it; `write_back` later stores it as the anchor's cached `<v>`.
+    let _ = data.update_computed(
+        key.sheet,
+        key.row,
+        u32::from(key.col),
+        arr.get(0, 0).clone(),
+    );
+    materialize_spill_cells(sheet, r0, c0, arr);
+    true
+}
+
+/// Write the spilled values of `arr` (whose anchor is `r0, c0`, 0-based) into
+/// `sheet` as plain cells. The anchor cell itself keeps its formula. Blank and
+/// internal-only elements leave their cell empty. Existing rows are reused
+/// (cells stay column-sorted) and new rows are appended then sorted, so the
+/// emitted XML is always strictly ascending.
+fn materialize_spill_cells(sheet: &mut Sheet, r0: u32, c0: u32, arr: &ArrayValue) {
+    let (_, cols) = arr.shape();
+    let mut new_rows: BTreeMap<u32, Vec<(u32, CellValue)>> = BTreeMap::new();
+    for (i, v) in arr.data.iter().enumerate() {
+        let dr = (i as u32) / cols;
+        let dc = (i as u32) % cols;
+        if dr == 0 && dc == 0 {
+            continue; // the anchor keeps its formula
+        }
+        let Some(cv) = spill_element_value(v) else {
+            continue; // blank / internal-only element: leave the cell empty
+        };
+        new_rows
+            .entry(r0 + dr + 1)
+            .or_default()
+            .push((c0 + dc + 1, cv));
+    }
+    for (row_num, cells) in new_rows {
+        if let Some(row) = sheet.rows.iter_mut().find(|r| r.row == row_num) {
+            for (col, cv) in cells {
+                match row.cells.binary_search_by(|c| c.col.cmp(&col)) {
+                    Ok(_) => {} // defensive: the collision check already excluded these
+                    Err(pos) => row.cells.insert(pos, Cell::new(col, cv)),
+                }
+            }
+        } else {
+            let mut row = Row::new(row_num);
+            for (col, cv) in cells {
+                row.cells.push(Cell::new(col, cv));
+            }
+            sheet.rows.push(row);
+        }
+    }
+    sheet.rows.sort_by_key(|r| r.row);
+}
+
+/// A spill element as a write-model cell value. Cacheable scalars become typed
+/// cells; blank and internal-only codes have no legal XML value and become
+/// `None` (the cell is left empty).
+fn spill_element_value(v: &CalcValue) -> Option<CellValue> {
+    match v {
+        CalcValue::Number(n) => Some(CellValue::Number(*n)),
+        CalcValue::Text(s) => Some(CellValue::Str(s.to_string())),
+        CalcValue::Bool(b) => Some(CellValue::Bool(*b)),
+        CalcValue::Error(e) if e.cacheable() => Some(CellValue::Error(e.code().to_string())),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -280,5 +424,91 @@ mod tests {
         // #NAME? is a legal cached error, so it may be stored — what must
         // never happen is a numeric cache.
         assert_ne!(cached_of(&wb, 1, 1), Some("Number(0.0)".to_string()));
+    }
+
+    #[test]
+    fn probe_index_eval() {
+        use crate::turbo::calc::eval::eval;
+        use crate::turbo::calc::functions::FuncCtx;
+        use crate::turbo::calc::parser::parse_formula;
+        use crate::turbo::calc::sheetdata::SheetData;
+        let mut wb = Workbook::new();
+        let mut r = Row::new(6);
+        r.cells = vec![Cell::new(1, CellValue::Str("Tom".into()))];
+        wb.sheets[0].rows = vec![r];
+        let data = SheetData::build(&wb);
+        let expr = parse_formula("=INDEX(A6:B7,1,1)").unwrap();
+        let ctx = FuncCtx {
+            date1904: false,
+            sheet: 0,
+            row: 2,
+            col: 2,
+            resolver: &data,
+        };
+        let r = eval(&expr, &ctx);
+        eprintln!("PROBE INDEX => {r:?}");
+    }
+
+    fn cell_value_of(wb: &Workbook, row: u32, col: u32) -> Option<&CellValue> {
+        let s = &wb.sheets[0];
+        let r = s.rows.iter().find(|r| r.row == row)?;
+        r.cells.iter().find(|c| c.col == col).map(|c| &c.value)
+    }
+
+    #[test]
+    fn a_true_spill_writes_each_value_as_a_plain_cell_and_caches_the_anchor() {
+        // =SEQUENCE(3) in A1 spills A1:A3 with {1;2;3}. The anchor keeps its
+        // formula (cached 1); A2 and A3 become plain Number cells.
+        let mut wb = book(vec![formula_cell(1, "=SEQUENCE(3)")]);
+        let report = hydrate_workbook(&mut wb, &CalcOptions::default());
+        assert_eq!(report.total_formulas, 1);
+        assert_eq!(report.computed, 1, "{report:?}");
+        assert_eq!(report.fallback, 0, "{report:?}");
+        // the anchor is cached with the array's first element...
+        assert_eq!(cached_of(&wb, 1, 1), Some("Number(1.0)".to_string()));
+        assert!(matches!(
+            cell_value_of(&wb, 1, 1),
+            Some(CellValue::Formula { .. })
+        ));
+        // ...and the rest of the spill are plain values at A2 / A3
+        assert!(matches!(
+            cell_value_of(&wb, 2, 1),
+            Some(CellValue::Number(2.0))
+        ));
+        assert!(matches!(
+            cell_value_of(&wb, 3, 1),
+            Some(CellValue::Number(3.0))
+        ));
+    }
+
+    #[test]
+    fn a_1x1_array_is_scalarized_to_a_plain_cache() {
+        let mut wb = book(vec![formula_cell(1, "=MUNIT(1)")]);
+        let report = hydrate_workbook(&mut wb, &CalcOptions::default());
+        assert_eq!(report.computed, 1, "{report:?}");
+        assert_eq!(cached_of(&wb, 1, 1), Some("Number(1.0)".to_string()));
+        // no spill cells appeared: only the anchor row exists
+        assert_eq!(wb.sheets[0].rows.len(), 1);
+    }
+
+    #[test]
+    fn a_spill_that_would_overwrite_content_is_dropped_not_clobbered() {
+        // A2 already holds 99; SEQUENCE(2) in A1 would write over it, so the
+        // spill is refused and the anchor is left uncached for Excel to
+        // recompute (#SPILL!) rather than silently clobbering user data.
+        let mut wb = Workbook::new();
+        let mut r1 = Row::new(1);
+        r1.cells = vec![formula_cell(1, "=SEQUENCE(2)")];
+        let mut r2 = Row::new(2);
+        r2.cells = vec![num_cell(1, 99.0)];
+        wb.sheets[0].rows = vec![r1, r2];
+        let report = hydrate_workbook(&mut wb, &CalcOptions::default());
+        assert_eq!(report.computed, 0, "{report:?}");
+        assert!(report.fallback >= 1, "{report:?}");
+        assert_eq!(cached_of(&wb, 1, 1), None);
+        assert!(matches!(
+            cell_value_of(&wb, 2, 1),
+            Some(CellValue::Number(99.0))
+        ));
     }
 }

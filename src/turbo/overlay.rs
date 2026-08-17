@@ -2,19 +2,23 @@
 
 use ahash::{AHashMap, AHashSet};
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::turbo::error::{TurboError, TurboResult};
 use crate::turbo::fixup::{
     fixup_pivot_cache_xml, fixup_pivot_table_xml, fixup_sheet_xml, fixup_table_part_xml,
     fixup_workbook_xml, pivot_cache_source_ref, set_pivot_cache_refresh_on_load,
 };
-use crate::turbo::mutate::{delete_cols, delete_rows, insert_cols, insert_rows, move_range};
+use crate::turbo::mutate::{
+    attr_value_span, delete_cols, delete_rows, insert_cols, insert_rows, move_range,
+};
 use crate::turbo::refshift::Axis;
 use crate::turbo::structural::{
     RelKind, parse_rels, parse_workbook_pivot_caches, resolve_zip_path,
 };
-use crate::turbo::write::model::{CachedValue, Cell, CellValue, Row, Sheet, SstBuilder};
+use crate::turbo::write::model::{
+    CachedValue, Cell, CellValue, FormulaKind, Row, Sheet, SstBuilder,
+};
 use crate::turbo::write::style_engine::{StyleDesc, StyleEngine};
 use crate::turbo::write::writer::write_worksheet;
 use crate::turbo::write::xml::{
@@ -339,6 +343,14 @@ impl WorkbookOverlay {
         let mut workbook_bytes: Option<Vec<u8>> = None;
         let mut workbook_modified = false;
 
+        // Any cell edit or grid mutation can invalidate cached formula results.
+        // Computed once up front: the splice path and the cross-sheet cache pass
+        // both consult it.
+        let formula_affected = self
+            .sheet_overlays
+            .values()
+            .any(|o| o.is_dirty && (!o.modified_cells.is_empty() || !o.ops.is_empty()));
+
         for (sheet_name, overlay) in &self.sheet_overlays {
             if !overlay.is_dirty {
                 continue;
@@ -529,6 +541,74 @@ impl WorkbookOverlay {
         }
 
         // ------------------------------------------------------------------
+        // Phase 1.6 — stale formula caches. A cell edit or grid mutation can
+        // leave cached `<v>` formula results stale (the splice never recomputes
+        // them). Two moves, both gated on the upfront `formula_affected` flag:
+        //   1. force `calcPr fullCalcOnLoad="1"` in `xl/workbook.xml`
+        //      (schema-safe; a source that already sets it stays byte-identical,
+        //      so the OVR-01/02 member-identity invariants hold), and
+        //   2. strip every cached `<v>` from formula cells in every worksheet
+        //      part, so no stale result survives even before Excel recalcs.
+        // Runs BEFORE the content_changed computation so a forced workbook
+        // rewrite is also seen by the signature-invalidation gate.
+        // ------------------------------------------------------------------
+        if formula_affected {
+            if workbook_bytes.is_none() {
+                workbook_bytes = inflate_entry(&self.archive_map, "xl/workbook.xml")?;
+            }
+            if let Some(wx) = workbook_bytes.as_mut() {
+                if let Cow::Owned(o) = ensure_full_calc_on_load(wx)? {
+                    *wx = o;
+                    workbook_modified = true;
+                }
+            }
+
+            // Strip every cached `<v>` result from formula cells across ALL
+            // worksheet parts. Dirty sheets are already in `rendered`; rewrite
+            // those in place. Pass-through sheets that actually contain a cached
+            // formula result are added to `rendered` so the ZIP emits the
+            // stripped bytes (a sheet with no cached results stays byte-identical
+            // and untouched — OVR-01/02 member identity is preserved).
+            let rendered_names: Vec<String> = rendered.keys().cloned().collect();
+            for name in rendered_names {
+                if let Some(stripped) = strip_formula_cached_values(&rendered[&name]) {
+                    rendered.insert(name, stripped);
+                }
+            }
+            for entry_name in self.archive_map.sheet_name_map.values() {
+                if rendered.contains_key(entry_name) || self.deleted_sheets.contains(entry_name) {
+                    continue;
+                }
+                if let Some(orig) = inflate_entry(&self.archive_map, entry_name)? {
+                    if let Some(stripped) = strip_formula_cached_values(&orig) {
+                        rendered.insert(entry_name.clone(), stripped);
+                    }
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Phase 1.5 — invalidate any digital signature, but ONLY when a real
+        // content edit actually changed the package. A no-op save keeps the
+        // (still valid) signature and stays byte-identical. Every refusal here
+        // happens before ZipWriter is constructed, so a malformed signed
+        // package can never emit a partial archive.
+        // ------------------------------------------------------------------
+        let content_changed = !rendered.is_empty()
+            || !table_edit.is_empty()
+            || !pivot_table_edit.is_empty()
+            || !pivot_cache_edit.is_empty()
+            || workbook_modified
+            || styles_modified
+            || !self.deleted_sheets.is_empty()
+            || !self.new_sheets.is_empty();
+        let signature_removal = if content_changed {
+            strip_signature_metadata(&self.archive_map)?
+        } else {
+            None
+        };
+
+        // ------------------------------------------------------------------
         // Phase 2 — write the zip. Nothing refuses here; every part is ready.
         // ------------------------------------------------------------------
         let mut zip = ZipWriter::new();
@@ -542,6 +622,12 @@ impl WorkbookOverlay {
                 || pivot_table_edit.contains_key(entry_name)
                 || pivot_cache_edit.contains_key(entry_name)
                 || (entry_name == "xl/workbook.xml" && workbook_modified)
+                || matches!(
+                    &signature_removal,
+                    Some(sr) if sr.drop.iter().any(|d| d == entry_name)
+                )
+                || (matches!(&signature_removal, Some(_)) && entry_name == "_rels/.rels")
+                || (matches!(&signature_removal, Some(_)) && entry_name == "[Content_Types].xml")
             {
                 continue;
             }
@@ -579,6 +665,12 @@ impl WorkbookOverlay {
             if let Some(wb) = &workbook_bytes {
                 zip.add("xl/workbook.xml", wb);
             }
+        }
+
+        // Rewritten signature metadata (fixed order for deterministic output).
+        if let Some(sr) = &signature_removal {
+            zip.add("_rels/.rels", &sr.rels);
+            zip.add("[Content_Types].xml", &sr.content_types);
         }
 
         // Append-only splice of xl/styles.xml: insert new font/fill/border/xf
@@ -710,6 +802,212 @@ fn inflate_entry(map: &ArchiveMap, name: &str) -> TurboResult<Option<Vec<u8>>> {
         entry.uncompressed_size as usize,
     )
     .map(Some)
+}
+
+/// Everything needed to invalidate a stale digital signature: the ZIP members
+/// to drop and the byte-preserving rewrites of the two package-level metadata
+/// parts that referenced them.
+struct SignatureRemoval {
+    drop: Vec<String>,
+    rels: Vec<u8>,
+    content_types: Vec<u8>,
+}
+
+/// When the workbook carries a digital signature, build the drop list and the
+/// rewrites of `_rels/.rels` and `[Content_Types].xml` that invalidate it.
+/// `Ok(None)` when the archive is unsigned (the common case costs one entry-name
+/// listing, no inflate). A signed archive that is missing or has malformed
+/// metadata it would have to rewrite refuses with `Format` — this is called
+/// before any ZIP emission, so a bad signed package can never produce a partial
+/// archive.
+fn strip_signature_metadata(map: &ArchiveMap) -> TurboResult<Option<SignatureRemoval>> {
+    let drop = crate::turbo::features::signatures::signature_part_names(&map.source_bytes)?;
+    if drop.is_empty() {
+        return Ok(None);
+    }
+    let rels_xml = inflate_entry(map, "_rels/.rels")?
+        .ok_or_else(|| TurboError::Format("signed workbook is missing _rels/.rels".into()))?;
+    let rels = crate::turbo::features::signatures::strip_signature_rels(&rels_xml)?;
+    let ct_xml = inflate_entry(map, "[Content_Types].xml")?.ok_or_else(|| {
+        TurboError::Format("signed workbook is missing [Content_Types].xml".into())
+    })?;
+    let content_types = crate::turbo::features::signatures::strip_signature_content_types(&ct_xml)?;
+    Ok(Some(SignatureRemoval {
+        drop,
+        rels,
+        content_types,
+    }))
+}
+
+/// Ensure `xl/workbook.xml` declares `calcPr fullCalcOnLoad="1"` so Excel
+/// recomputes every formula on load instead of presenting a stale cached `<v>`
+/// as current (the splice never recomputes formula results). Returns
+/// `Cow::Borrowed` when the property is already `"1"` (byte-identical no-op, so
+/// openpyxl-authored sources — which default to `"1"` — keep every member
+/// byte-identical), and a spliced owned buffer otherwise. A malformed workbook
+/// refuses with `Format` before any output is emitted.
+fn ensure_full_calc_on_load(xml: &[u8]) -> TurboResult<Cow<'_, [u8]>> {
+    const ATTR: &[u8] = b"fullCalcOnLoad";
+    // Locate the <calcPr open tag.
+    let Some(o) = memchr::memmem::find(xml, b"<calcPr") else {
+        return Ok(Cow::Owned(insert_calc_pr(xml)?));
+    };
+    let Some(gt_rel) = memchr::memchr(b'>', &xml[o..]) else {
+        return Err(TurboError::Format(
+            "unterminated <calcPr> tag in xl/workbook.xml".into(),
+        ));
+    };
+    let gt = o + gt_rel;
+    let tag = &xml[o..gt];
+    match crate::turbo::structural::find_attr(tag, ATTR) {
+        Some(b"1") => Ok(Cow::Borrowed(xml)),
+        Some(_) => {
+            // Replace the existing value in place with "1" (never a duplicate
+            // attribute; preserves every unrelated byte).
+            let (vs, ve) = attr_value_span(tag, ATTR).ok_or_else(|| {
+                TurboError::Format("malformed fullCalcOnLoad in xl/workbook.xml".into())
+            })?;
+            let mut out = Vec::with_capacity(xml.len() + 1);
+            out.extend_from_slice(&xml[..o + vs]);
+            out.extend_from_slice(b"1");
+            out.extend_from_slice(&xml[o + ve..]);
+            Ok(Cow::Owned(out))
+        }
+        None => {
+            // Insert the attribute before the tag's closing '>' (handles both
+            // `<calcPr ...>` and self-closing `<calcPr .../>`).
+            let mut out = Vec::with_capacity(xml.len() + b" fullCalcOnLoad=\"1\"".len());
+            out.extend_from_slice(&xml[..gt]);
+            out.extend_from_slice(b" fullCalcOnLoad=\"1\"");
+            out.extend_from_slice(&xml[gt..]);
+            Ok(Cow::Owned(out))
+        }
+    }
+}
+
+/// Insert a fresh `<calcPr fullCalcOnLoad="1"/>` into workbook.xml at a
+/// schema-legal position: right after `</definedNames>`, else before the first
+/// of `<oleSize`, `<customWorkbookViews`, `<pivotCaches`, `<smartTagPr`,
+/// `<extLst`, else immediately before `</workbook>`. Returns `Format` when the
+/// workbook has no `</workbook>` (malformed).
+fn insert_calc_pr(xml: &[u8]) -> TurboResult<Vec<u8>> {
+    const TAG: &[u8] = b"<calcPr fullCalcOnLoad=\"1\"/>";
+    const AFTER: &[u8] = b"</definedNames>";
+    let at = if let Some(p) = memchr::memmem::find(xml, AFTER) {
+        p + AFTER.len()
+    } else {
+        let mut at = None;
+        for n in [
+            b"<oleSize".as_slice(),
+            b"<customWorkbookViews".as_slice(),
+            b"<pivotCaches".as_slice(),
+            b"<smartTagPr".as_slice(),
+            b"<extLst".as_slice(),
+        ] {
+            if let Some(p) = memchr::memmem::find(xml, n) {
+                at = Some(p);
+                break;
+            }
+        }
+        match at {
+            Some(p) => p,
+            None => {
+                let p = memchr::memmem::find(xml, b"</workbook>").ok_or_else(|| {
+                    TurboError::Format("xl/workbook.xml is missing </workbook>".into())
+                })?;
+                p
+            }
+        }
+    };
+    let mut out = Vec::with_capacity(xml.len() + TAG.len());
+    out.extend_from_slice(&xml[..at]);
+    out.extend_from_slice(TAG);
+    out.extend_from_slice(&xml[at..]);
+    Ok(out)
+}
+
+/// Strip every cached `<v>` result from formula cells in a worksheet part.
+///
+/// A formula cell is a `<c>` whose content contains an `<f>` element; its cached
+/// result (a `<v>…</v>` element, or a self-closing `<v />`) is a materialised
+/// value that becomes stale the moment the grid shifts. This helper excises only
+/// those `<v>` elements and preserves every other byte exactly — formula text,
+/// attributes, and non-formula cells are untouched.
+///
+/// Returns `None` when nothing changed (no cached value found, or no formulas),
+/// so callers can leave the part byte-identical.
+fn strip_formula_cached_values(xml: &[u8]) -> Option<Vec<u8>> {
+    let mut removes: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0usize;
+    while i < xml.len() {
+        // A formula cell is `<c` … `</c>` whose body contains `<f`.
+        let Some(o) = memchr::memmem::find(&xml[i..], b"<c") else {
+            break;
+        };
+        let cs = i + o;
+        // Only a real cell element: `<c>` / `<c r=…>` / `<c …>`. A following `o`
+        // means `<cols>`/`<col>` — skip the tag.
+        match xml.get(cs + 2) {
+            Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n') | Some(b'/') => {}
+            _ => {
+                i = cs + 2;
+                continue;
+            }
+        }
+        let Some(gt_rel) = memchr::memchr(b'>', &xml[cs..]) else {
+            break;
+        };
+        let gt = cs + gt_rel;
+        let self_close = gt > cs && xml[gt - 1] == b'/';
+        if self_close {
+            i = gt + 1;
+            continue;
+        }
+        let Some(cl_rel) = memchr::memmem::find(&xml[gt + 1..], b"</c>") else {
+            break;
+        };
+        let ce = gt + 1 + cl_rel;
+        let body = &xml[gt + 1..ce];
+        if memchr::memmem::find(body, b"<f").is_none() {
+            i = ce;
+            continue;
+        }
+        // This cell holds a formula: remove every `<v …>…</v>` and `<v …/>`.
+        let mut j = 0usize;
+        while j < body.len() {
+            let Some(vo) = memchr::memmem::find(&body[j..], b"<v") else {
+                break;
+            };
+            let vs = j + vo;
+            let Some(vgt_rel) = memchr::memchr(b'>', &body[vs..]) else {
+                break;
+            };
+            let vgt = vs + vgt_rel;
+            let v_self = vgt > vs && body[vgt - 1] == b'/';
+            let ve = if v_self {
+                vgt + 1
+            } else {
+                let Some(vcl_rel) = memchr::memmem::find(&body[vgt + 1..], b"</v>") else {
+                    break;
+                };
+                vgt + 1 + vcl_rel + b"</v>".len()
+            };
+            removes.push((gt + 1 + vs, gt + 1 + ve));
+            j = ve;
+        }
+        i = ce;
+    }
+    if removes.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(xml.len());
+    let mut prev = 0usize;
+    for (s, e) in removes {
+        out.extend_from_slice(&xml[prev..s]);
+        prev = e;
+    }
+    out.extend_from_slice(&xml[prev..]);
+    Some(out)
 }
 
 /// Resolve the ZIP entry paths of every table part owned by `sheet_entry`,
@@ -1233,7 +1531,7 @@ fn emit_cell(out: &mut Vec<u8>, row: u32, col: u32, val: &CellValue, s_attr: Opt
             rt.emit_is(out);
             push(out, b"</c>");
         }
-        CellValue::Formula { text, cached, .. } => {
+        CellValue::Formula { text, kind, cached } => {
             // Declare the cached result's type before closing the cell tag, or
             // Excel reads a non-numeric `<v>` as a number. A numeric cache uses
             // the implicit default and emits no `t=`.
@@ -1243,10 +1541,61 @@ fn emit_cell(out: &mut Vec<u8>, row: u32, col: u32, val: &CellValue, s_attr: Opt
                 Some(CachedValue::Str(_)) => push(out, br#" t="str""#),
                 Some(CachedValue::Number(_)) | None => {}
             }
-            push(out, b"><f>");
             let bodytxt = text.strip_prefix('=').unwrap_or(text.as_str());
-            write_escaped_text(out, bodytxt);
-            push(out, b"</f>");
+            match kind {
+                FormulaKind::Normal => {
+                    push(out, b"><f>");
+                    write_escaped_text(out, bodytxt);
+                    push(out, b"</f>");
+                }
+                FormulaKind::Array { ref_ } => {
+                    push(out, br#"><f t="array" ref=""#);
+                    write_escaped_text(out, ref_);
+                    push(out, b"\">");
+                    write_escaped_text(out, bodytxt);
+                    push(out, b"</f>");
+                }
+                FormulaKind::DataTable {
+                    ref_,
+                    dt2d,
+                    dtr,
+                    r1,
+                    r2,
+                    del1,
+                    del2,
+                    ca,
+                } => {
+                    push(out, br#"><f t="dataTable" ref=""#);
+                    write_escaped_text(out, ref_);
+                    push(out, b"\"");
+                    if *dt2d {
+                        push(out, br#" dt2D="1""#);
+                    }
+                    if *dtr {
+                        push(out, br#" dtr="1""#);
+                    }
+                    if let Some(r) = r1 {
+                        push(out, br#" r1=""#);
+                        write_escaped_text(out, r);
+                        push(out, b"\"");
+                    }
+                    if let Some(r) = r2 {
+                        push(out, br#" r2=""#);
+                        write_escaped_text(out, r);
+                        push(out, b"\"");
+                    }
+                    if *del1 {
+                        push(out, br#" del1="1""#);
+                    }
+                    if *del2 {
+                        push(out, br#" del2="1""#);
+                    }
+                    if *ca {
+                        push(out, br#" ca="1""#);
+                    }
+                    push(out, b"/>");
+                }
+            }
             match cached {
                 Some(CachedValue::Number(n)) => {
                     push(out, b"<v>");
@@ -1382,6 +1731,12 @@ pub fn hydrate_sheet_from_xml(
     let mut sheet = Sheet::new("");
     let end = xml.len();
     let mut pos = 0;
+    // Shared-formula groups (`<f t="shared" si=...>`): the anchor carries the
+    // text, every dependent carries only `si`. Anchors are keyed by `si`; the
+    // dependents are translated from their anchor by their row/col delta after
+    // the main loop, matching the streaming reader (scan.rs) and openpyxl.
+    let mut shared_anchors: HashMap<u32, (u32, u32, String)> = HashMap::new();
+    let mut shared_deps: Vec<(u32, u32, u32)> = Vec::new();
 
     while pos < end {
         if let Some(ro) = memchr::memmem::find(&xml[pos..end], b"<row ") {
@@ -1445,10 +1800,34 @@ pub fn hydrate_sheet_from_xml(
                     }
 
                     let cell_body = &xml[c_start..c_end];
-                    let val = parse_cell_body(cell_body, cell_t.as_deref(), shared_strings);
+                    let f_info = scan_f(cell_body);
+                    let val = parse_cell_body(
+                        cell_body,
+                        cell_t.as_deref(),
+                        shared_strings,
+                        f_info.as_ref(),
+                    );
                     let mut cell = Cell::new(col_idx, val);
                     cell.style = cell_s;
                     row.cells.push(cell);
+
+                    if let Some(f) = &f_info {
+                        if f.t.as_deref() == Some("shared") {
+                            if let Some(si) = f.si {
+                                if f.text_start < f.text_end {
+                                    let mut scratch = Vec::new();
+                                    let decoded = crate::turbo::decode::decode_bytes(
+                                        &cell_body[f.text_start..f.text_end],
+                                        &mut scratch,
+                                    );
+                                    let text = String::from_utf8_lossy(decoded).into_owned();
+                                    shared_anchors.insert(si, (row_idx, col_idx, text));
+                                } else {
+                                    shared_deps.push((row_idx, col_idx, si));
+                                }
+                            }
+                        }
+                    }
                 } else {
                     break;
                 }
@@ -1463,27 +1842,193 @@ pub fn hydrate_sheet_from_xml(
         }
     }
 
+    // Translate every shared-formula dependent from its anchor's text by the
+    // (row, col) delta. An orphaned `si` (no anchor in this sheet) degrades to
+    // Empty, matching the streaming reader.
+    for (row, col, si) in shared_deps {
+        if let Some((arow, acol, text)) = shared_anchors.get(&si) {
+            let (dr, dc) = (row as i32 - *arow as i32, col as i32 - *acol as i32);
+            // Mirror the anchor's leading-`=` convention: `<f>` text is usually
+            // stored without `=`, but a writer may include it.
+            let translated = if let Some(rest) = text.strip_prefix('=') {
+                format!("={}", crate::turbo::formula::translate_body(rest, dr, dc))
+            } else {
+                crate::turbo::formula::translate_body(text, dr, dc)
+            };
+            if let Some(cell) = find_cell_mut(&mut sheet, row, col) {
+                if let CellValue::Formula { text, .. } = &mut cell.value {
+                    *text = translated;
+                }
+            }
+        } else if let Some(cell) = find_cell_mut(&mut sheet, row, col) {
+            cell.value = CellValue::Empty;
+        }
+    }
+
     Ok(sheet)
+}
+
+fn find_cell_mut<'a>(sheet: &'a mut Sheet, row: u32, col: u32) -> Option<&'a mut Cell> {
+    let r = sheet.rows.iter_mut().find(|r| r.row == row)?;
+    r.cells.iter_mut().find(|c| c.col == col)
+}
+
+/// Parsed attributes of a cell's `<f>` element. `None` (the `scan_f` return
+/// value) means the cell has no formula element at all.
+struct FInfo {
+    /// Raw `t` attribute value (`array` / `shared` / `dataTable`), `None` for a
+    /// plain `<f>`.
+    t: Option<String>,
+    ref_: Option<String>,
+    si: Option<u32>,
+    dt2d: bool,
+    dtr: bool,
+    r1: Option<String>,
+    r2: Option<String>,
+    del1: bool,
+    del2: bool,
+    ca: bool,
+    /// Formula body text span within the cell body (`start == end` when the
+    /// `<f>` element is self-closing, e.g. a shared dependent or dataTable).
+    text_start: usize,
+    text_end: usize,
+}
+
+/// Scan a cell body for its `<f>` element (plain, attributed, or self-closing).
+/// Any byte after `<f` other than a valid element boundary is skipped, so `<f`
+/// never matches inside another element's text (cell text is entity-escaped).
+fn scan_f(body: &[u8]) -> Option<FInfo> {
+    let mut pos = 0usize;
+    while let Some(off) = memchr::memmem::find(&body[pos..], b"<f") {
+        let s = pos + off;
+        match body.get(s + 2) {
+            Some(&b'>') | Some(&b'/') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n') => {
+                let gt = memchr::memchr(b'>', &body[s..])? + s;
+                let tag = &body[s..=gt];
+                let is_self_closing = gt > s && body[gt - 1] == b'/';
+                let mut info = FInfo {
+                    t: None,
+                    ref_: None,
+                    si: None,
+                    dt2d: false,
+                    dtr: false,
+                    r1: None,
+                    r2: None,
+                    del1: false,
+                    del2: false,
+                    ca: false,
+                    text_start: gt + 1,
+                    text_end: gt + 1,
+                };
+                if let Some(t) = extract_xml_attr(tag, b"t") {
+                    info.t = Some(t);
+                }
+                if let Some(r) = extract_xml_attr(tag, b"ref") {
+                    info.ref_ = Some(r);
+                }
+                if let Some(v) = extract_xml_attr(tag, b"si").and_then(|v| v.parse::<u32>().ok()) {
+                    info.si = Some(v);
+                }
+                info.dt2d = extract_xml_attr(tag, b"dt2D").as_deref() == Some("1");
+                info.dtr = extract_xml_attr(tag, b"dtr").as_deref() == Some("1");
+                if let Some(r) = extract_xml_attr(tag, b"r1") {
+                    info.r1 = Some(r);
+                }
+                if let Some(r) = extract_xml_attr(tag, b"r2") {
+                    info.r2 = Some(r);
+                }
+                info.del1 = extract_xml_attr(tag, b"del1").as_deref() == Some("1");
+                info.del2 = extract_xml_attr(tag, b"del2").as_deref() == Some("1");
+                info.ca = extract_xml_attr(tag, b"ca").as_deref() == Some("1");
+                if !is_self_closing {
+                    if let Some(ce) = memchr::memmem::find(&body[gt + 1..], b"</f>") {
+                        info.text_end = gt + 1 + ce;
+                    }
+                }
+                return Some(info);
+            }
+            _ => pos = s + 2,
+        }
+    }
+    None
 }
 
 fn parse_cell_body(
     body: &[u8],
     t_attr: Option<&str>,
     shared_strings: &crate::turbo::scan::StringArena,
+    f: Option<&FInfo>,
 ) -> CellValue {
-    if let Some(fo) = memchr::memmem::find(body, b"<f>") {
-        if let Some(fc) = memchr::memmem::find(body, b"</f>") {
-            let f_text = String::from_utf8_lossy(&body[fo + 3..fc]).into_owned();
-            let v_text = extract_tag_value(body, b"<v>", b"</v>");
-            let cached = v_text
-                .and_then(|v| v.parse::<f64>().ok())
-                .map(crate::turbo::write::model::CachedValue::Number);
-            return CellValue::Formula {
-                text: f_text,
-                kind: crate::turbo::write::model::FormulaKind::Normal,
-                cached,
-            };
-        }
+    if let Some(f) = f {
+        // Decode XML entities: the `<f>` text is stored escaped (`A1&lt;5`),
+        // and `emit_cell` re-escapes via `write_escaped_text`, so the model must
+        // hold the unescaped formula or a `&`/`<`/`>` in a formula double-escapes.
+        let mut scratch = Vec::new();
+        let decoded =
+            crate::turbo::decode::decode_bytes(&body[f.text_start..f.text_end], &mut scratch);
+        let f_text = String::from_utf8_lossy(decoded).into_owned();
+        let kind = match f.t.as_deref() {
+            Some("array") => FormulaKind::Array {
+                ref_: f.ref_.clone().unwrap_or_else(|| "A1".into()),
+            },
+            Some("dataTable") => FormulaKind::DataTable {
+                ref_: f.ref_.clone().unwrap_or_else(|| "A1".into()),
+                dt2d: f.dt2d,
+                dtr: f.dtr,
+                r1: f.r1.clone(),
+                r2: f.r2.clone(),
+                del1: f.del1,
+                del2: f.del2,
+                ca: f.ca,
+            },
+            _ => FormulaKind::Normal,
+        };
+        // A formula cell's `t` attribute declares the cached result's type
+        // (`b`/`e`/`str`), exactly mirroring the writer's `formula_result_type`.
+        // Without it, a boolean cache would read as a number and an error/str
+        // cache would be dropped entirely.
+        //
+        // `t="e"`/`t="str"` caches hold text and must be XML-decoded (`A&amp;B`
+        // → `A&B`) so a later emit's `write_escaped_text` re-escapes to the
+        // original bytes. `t="s"` is a shared-string index (some producers
+        // write formula results that way), resolved through the SST like the
+        // non-formula branch below.
+        let cached = extract_tag_value(body, b"<v>", b"</v>").and_then(|v| {
+            let mut scratch = Vec::new();
+            match t_attr {
+                Some("b") => Some(CachedValue::Bool(
+                    v == "1" || v.eq_ignore_ascii_case("true"),
+                )),
+                Some("e") => {
+                    let decoded = crate::turbo::decode::decode_bytes(v.as_bytes(), &mut scratch);
+                    Some(CachedValue::Error(
+                        String::from_utf8_lossy(decoded).into_owned(),
+                    ))
+                }
+                Some("str") => {
+                    let decoded = crate::turbo::decode::decode_bytes(v.as_bytes(), &mut scratch);
+                    Some(CachedValue::Str(
+                        String::from_utf8_lossy(decoded).into_owned(),
+                    ))
+                }
+                Some("s") => v
+                    .parse::<u32>()
+                    .ok()
+                    .and_then(|id| shared_strings.try_resolve(id))
+                    .map(|s| CachedValue::Str(String::from_utf8_lossy(s).into_owned())),
+                _ => v.parse::<f64>().map(CachedValue::Number).ok().or_else(|| {
+                    let decoded = crate::turbo::decode::decode_bytes(v.as_bytes(), &mut scratch);
+                    Some(CachedValue::Str(
+                        String::from_utf8_lossy(decoded).into_owned(),
+                    ))
+                }),
+            }
+        });
+        return CellValue::Formula {
+            text: f_text,
+            kind,
+            cached,
+        };
     }
 
     let v_text = extract_tag_value(body, b"<v>", b"</v>");
@@ -1768,6 +2313,301 @@ mod tests {
             cell_str(&saved, 3, 1).as_deref(),
             Some("b"),
             "the original row-2 value must shift down to row 3"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Editable-model formula import fidelity (Fix 2): kinds, typed caches,
+    // shared-formula translation, `_xlfn` pass-through.
+    // -----------------------------------------------------------------------
+
+    fn hydrate(xml: &str) -> Sheet {
+        hydrate_sheet_from_xml(
+            xml.as_bytes(),
+            &crate::turbo::scan::parse_shared_strings(b""),
+        )
+        .unwrap()
+    }
+
+    fn hydrate_sst(xml: &str, sst: &str) -> Sheet {
+        hydrate_sheet_from_xml(
+            xml.as_bytes(),
+            &crate::turbo::scan::parse_shared_strings(sst.as_bytes()),
+        )
+        .unwrap()
+    }
+
+    fn cell_at<'a>(sheet: &'a Sheet, row: u32, col: u32) -> Option<&'a Cell> {
+        let r = sheet.rows.iter().find(|r| r.row == row)?;
+        r.cells.iter().find(|c| c.col == col)
+    }
+
+    #[test]
+    fn hydrate_plain_formula_keeps_text_and_number_cache() {
+        let sheet = hydrate(r#"<row r="1"><c r="A1"><f>SUM(A1:A2)</f><v>3</v></c></row>"#);
+        match cell_at(&sheet, 1, 1).map(|c| &c.value) {
+            Some(CellValue::Formula { text, kind, cached }) => {
+                assert_eq!(text, "SUM(A1:A2)");
+                assert!(matches!(kind, FormulaKind::Normal));
+                assert_eq!(cached, &Some(CachedValue::Number(3.0)));
+            }
+            other => panic!("expected a plain formula cell, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hydrate_preserves_bool_error_and_str_caches() {
+        let sheet = hydrate(
+            r#"<row r="1"><c r="A1" t="b"><f>TRUE()</f><v>1</v></c>
+                <c r="B1" t="e"><f>1/0</f><v>#DIV/0!</v></c>
+                <c r="C1" t="str"><f>"x"</f><v>x</v></c></row>"#,
+        );
+        let a = cell_at(&sheet, 1, 1).unwrap();
+        let b = cell_at(&sheet, 1, 2).unwrap();
+        let c = cell_at(&sheet, 1, 3).unwrap();
+        let CellValue::Formula { cached, .. } = &a.value else {
+            panic!("A1 not a formula: {:?}", a.value);
+        };
+        assert_eq!(cached, &Some(CachedValue::Bool(true)));
+        let CellValue::Formula { cached, .. } = &b.value else {
+            panic!("B1 not a formula: {:?}", b.value);
+        };
+        assert_eq!(cached, &Some(CachedValue::Error("#DIV/0!".into())));
+        let CellValue::Formula { cached, .. } = &c.value else {
+            panic!("C1 not a formula: {:?}", c.value);
+        };
+        assert_eq!(cached, &Some(CachedValue::Str("x".into())));
+    }
+
+    #[test]
+    fn hydrate_preserves_array_and_data_table_kinds() {
+        let sheet = hydrate(
+            r#"<row r="1"><c r="A1"><f t="array" ref="A1:B2">SUM(A1:A2)</f><v>3</v></c>
+                <c r="B1" t="b"><f t="dataTable" ref="B1:B2" dt2D="1" r1="C1" r2="C2" del1="1" ca="1"/><v>1</v></c></row>"#,
+        );
+        match cell_at(&sheet, 1, 1).map(|c| &c.value) {
+            Some(CellValue::Formula { text, kind, cached }) => {
+                assert_eq!(text, "SUM(A1:A2)");
+                assert!(matches!(kind, FormulaKind::Array { ref_ } if ref_ == "A1:B2"));
+                assert_eq!(cached, &Some(CachedValue::Number(3.0)));
+            }
+            other => panic!("A1 not an array formula cell: {other:?}"),
+        }
+        match cell_at(&sheet, 1, 2).map(|c| &c.value) {
+            Some(CellValue::Formula { kind, cached, .. }) => {
+                assert!(matches!(
+                    kind,
+                    FormulaKind::DataTable {
+                        ref_, dt2d, dtr, r1, r2, del1, del2, ca
+                    } if ref_ == "B1:B2"
+                        && *dt2d
+                        && !*dtr
+                        && r1.as_deref() == Some("C1")
+                        && r2.as_deref() == Some("C2")
+                        && *del1
+                        && !*del2
+                        && *ca
+                ));
+                assert_eq!(cached, &Some(CachedValue::Bool(true)));
+            }
+            other => panic!("B1 not a dataTable formula cell: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hydrate_translates_shared_formula_dependents() {
+        let sheet = hydrate(
+            r#"<row r="1"><c r="A1"><f t="shared" ref="A1:A3" si="0">A1+A2</f><v>3</v></c></row>
+               <row r="2"><c r="A2" t="str"><f t="shared" si="0"/></c></row>
+               <row r="3"><c r="A3" t="str"><f t="shared" si="0"/></c></row>"#,
+        );
+        let CellValue::Formula { text, cached, .. } = &cell_at(&sheet, 1, 1).unwrap().value else {
+            panic!("A1 not a formula");
+        };
+        assert_eq!(text, "A1+A2");
+        assert_eq!(cached, &Some(CachedValue::Number(3.0)));
+        for (row, expected) in [(2, "A2+A3"), (3, "A3+A4")] {
+            let CellValue::Formula { text, .. } = &cell_at(&sheet, row, 1).unwrap().value else {
+                panic!("A{row} not a translated formula");
+            };
+            assert_eq!(
+                text, expected,
+                "A{row} must carry the translated anchor text"
+            );
+        }
+    }
+
+    #[test]
+    fn hydrate_translates_shared_anchor_with_leading_equals() {
+        let sheet = hydrate(
+            r#"<row r="1"><c r="A1"><f t="shared" ref="A1:A2" si="0">=A1*2</f><v>2</v></c></row>
+               <row r="2"><c r="A2"><f t="shared" si="0"/></c></row>"#,
+        );
+        let CellValue::Formula { text, .. } = &cell_at(&sheet, 1, 1).unwrap().value else {
+            panic!("A1 not a formula");
+        };
+        assert_eq!(text, "=A1*2");
+        let CellValue::Formula { text, .. } = &cell_at(&sheet, 2, 1).unwrap().value else {
+            panic!("A2 not a translated formula");
+        };
+        assert_eq!(text, "=A2*2");
+    }
+
+    #[test]
+    fn hydrate_orphan_shared_dependent_is_empty() {
+        let sheet = hydrate(r#"<row r="1"><c r="A1"><f t="shared" si="99"/></c></row>"#);
+        let cell = cell_at(&sheet, 1, 1).unwrap();
+        assert!(matches!(cell.value, CellValue::Empty));
+    }
+
+    #[test]
+    fn hydrate_preserves_xlfn_verbatim() {
+        let sheet =
+            hydrate(r#"<row r="1"><c r="A1"><f>_xlfn.XLOOKUP(B1,B2:B3,B4)</f><v>5</v></c></row>"#);
+        let CellValue::Formula { text, cached, .. } = &cell_at(&sheet, 1, 1).unwrap().value else {
+            panic!("A1 not a formula");
+        };
+        assert_eq!(text, "_xlfn.XLOOKUP(B1,B2:B3,B4)");
+        assert_eq!(cached, &Some(CachedValue::Number(5.0)));
+    }
+
+    #[test]
+    fn hydrate_decodes_entity_in_str_cache() {
+        let sheet = hydrate(r#"<row r="1"><c r="A1" t="str"><f>"x"</f><v>A&amp;B</v></c></row>"#);
+        let CellValue::Formula { cached, .. } = &cell_at(&sheet, 1, 1).unwrap().value else {
+            panic!("A1 not a formula");
+        };
+        assert_eq!(cached, &Some(CachedValue::Str("A&B".into())));
+    }
+
+    #[test]
+    fn hydrate_decodes_entity_in_error_cache() {
+        let sheet =
+            hydrate(r#"<row r="1"><c r="A1" t="e"><f>NA()</f><v>#NAME&amp;?</v></c></row>"#);
+        let CellValue::Formula { cached, .. } = &cell_at(&sheet, 1, 1).unwrap().value else {
+            panic!("A1 not a formula");
+        };
+        assert_eq!(cached, &Some(CachedValue::Error("#NAME&?".into())));
+    }
+
+    #[test]
+    fn emit_cell_re_escapes_decoded_str_cache() {
+        let sheet = hydrate(r#"<row r="1"><c r="A1" t="str"><f>"x"</f><v>A&amp;B</v></c></row>"#);
+        let a = cell_at(&sheet, 1, 1).unwrap();
+        let mut out = Vec::new();
+        emit_cell(&mut out, 1, 1, &a.value, None);
+        // Decoded in the model, re-escaped on emit: `A&B` round-trips byte-for-byte.
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            r#"<c r="A1" t="str"><f>"x"</f><v>A&amp;B</v></c>"#
+        );
+    }
+
+    #[test]
+    fn hydrate_resolves_formula_sst_cache_via_shared_strings() {
+        let sst =
+            r#"<sst count="2" uniqueCount="2"><si><t>alpha</t></si><si><t>a&amp;b</t></si></sst>"#;
+        let sheet = hydrate_sst(
+            r#"<row r="1"><c r="A1" t="s"><f>INDEX(B1:B2,1)</f><v>0</v></c></row>
+                <row r="2"><c r="A2" t="s"><f>INDEX(B1:B2,2)</f><v>1</v></c></row>"#,
+            sst,
+        );
+        let a = cell_at(&sheet, 1, 1).unwrap();
+        let b = cell_at(&sheet, 2, 1).unwrap();
+        let CellValue::Formula { cached, .. } = &a.value else {
+            panic!("A1 not a formula");
+        };
+        assert_eq!(cached, &Some(CachedValue::Str("alpha".into())));
+        let CellValue::Formula { cached, .. } = &b.value else {
+            panic!("A2 not a formula");
+        };
+        assert_eq!(cached, &Some(CachedValue::Str("a&b".into())));
+    }
+
+    #[test]
+    fn hydrate_out_of_range_sst_cache_is_dropped() {
+        let sst = r#"<sst count="1" uniqueCount="1"><si><t>alpha</t></si></sst>"#;
+        let sheet = hydrate_sst(
+            r#"<row r="1"><c r="A1" t="s"><f>INDEX(B1:B2,1)</f><v>99</v></c></row>"#,
+            sst,
+        );
+        let CellValue::Formula { cached, .. } = &cell_at(&sheet, 1, 1).unwrap().value else {
+            panic!("A1 not a formula");
+        };
+        assert_eq!(cached, &None);
+    }
+
+    #[test]
+    fn hydrate_decodes_formula_text_entities() {
+        let sheet =
+            hydrate(r#"<row r="1"><c r="A1"><f>IF(A1&lt;5,"x&amp;y",1)</f><v>1</v></c></row>"#);
+        let CellValue::Formula { text, .. } = &cell_at(&sheet, 1, 1).unwrap().value else {
+            panic!("A1 not a formula");
+        };
+        assert_eq!(text, "IF(A1<5,\"x&y\",1)");
+    }
+
+    #[test]
+    fn hydrate_decodes_named_and_numeric_entities() {
+        let sheet = hydrate(
+            r#"<row r="1"><c r="A1"><f>&quot;a&quot;&amp;&#60;&#x3E;&apos;b&apos;</f><v>1</v></c></row>"#,
+        );
+        let CellValue::Formula { text, .. } = &cell_at(&sheet, 1, 1).unwrap().value else {
+            panic!("A1 not a formula");
+        };
+        assert_eq!(text, "\"a\"&<>'b'");
+    }
+
+    #[test]
+    fn hydrate_decodes_shared_anchor_entities_before_translation() {
+        let sheet = hydrate(
+            r#"<row r="1"><c r="A1"><f t="shared" ref="A1:A2" si="0">IF(A1&lt;5,"x&amp;y",0)</f><v>1</v></c></row>
+               <row r="2"><c r="A2"><f t="shared" si="0"/></c></row>"#,
+        );
+        let CellValue::Formula { text, .. } = &cell_at(&sheet, 1, 1).unwrap().value else {
+            panic!("A1 not a formula");
+        };
+        assert_eq!(text, "IF(A1<5,\"x&y\",0)");
+        let CellValue::Formula { text, .. } = &cell_at(&sheet, 2, 1).unwrap().value else {
+            panic!("A2 not a translated formula");
+        };
+        assert_eq!(text, "IF(A2<5,\"x&y\",0)");
+    }
+
+    #[test]
+    fn emit_cell_re_escapes_decoded_formula_text() {
+        let sheet =
+            hydrate(r#"<row r="1"><c r="A1"><f>IF(A1&lt;5,"x&amp;y",1)</f><v>1</v></c></row>"#);
+        let a = cell_at(&sheet, 1, 1).unwrap();
+        let mut out = Vec::new();
+        emit_cell(&mut out, 1, 1, &a.value, None);
+        // Decoded in the model, re-escaped on emit: the saved bytes match the
+        // source bytes for the `<f>` body (no double-escape, no lost entity).
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            r#"<c r="A1"><f>IF(A1&lt;5,"x&amp;y",1)</f><v>1.0</v></c>"#
+        );
+    }
+
+    #[test]
+    fn emit_cell_round_trips_array_and_data_table_kinds() {
+        let sheet = hydrate(
+            r#"<row r="1"><c r="A1"><f t="array" ref="A1:B2">SUM(A1:A2)</f><v>3</v></c>
+                <c r="B1" t="b"><f t="dataTable" ref="B1:B2" dt2D="1" r1="C1" r2="C2" del1="1" ca="1"/><v>1</v></c></row>"#,
+        );
+        let a = cell_at(&sheet, 1, 1).unwrap();
+        let b = cell_at(&sheet, 1, 2).unwrap();
+        let mut out = Vec::new();
+        emit_cell(&mut out, 1, 1, &a.value, None);
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            r#"<c r="A1"><f t="array" ref="A1:B2">SUM(A1:A2)</f><v>3.0</v></c>"#
+        );
+        let mut out = Vec::new();
+        emit_cell(&mut out, 1, 2, &b.value, None);
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            r#"<c r="B1" t="b"><f t="dataTable" ref="B1:B2" dt2D="1" r1="C1" r2="C2" del1="1" ca="1"/><v>1</v></c>"#
         );
     }
 }

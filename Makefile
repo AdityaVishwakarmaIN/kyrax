@@ -89,8 +89,12 @@ test-rust-polars:
 .PHONY: test-rust  ## Run rust tests
 test-rust: test-rust-pyo3 test-rust-standalone test-rust-polars
 
+.PHONY: test-turbo  ## Run turbo fast-path tests (incl. coherence; not in default pytest collection)
+test-turbo: install
+	uv run pytest tests_turbo
+
 .PHONY: test  ## Run all tests
-test: test-rust test-python
+test: test-rust test-python test-turbo
 
 .PHONY: doc-serve  ## Serve documentation with live reload
 doc-serve: build-dev

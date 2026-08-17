@@ -260,7 +260,24 @@ fn call_function(
     let spec = registry().get(name).ok_or(CalcError::Name)?;
     spec.validate(args.len())?;
     let mut cargs: Vec<FuncArg> = Vec::with_capacity(args.len());
+    let lazy_args = [
+        "LAMBDA",
+        "LET",
+        "MAP",
+        "REDUCE",
+        "SCAN",
+        "BYROW",
+        "BYCOL",
+        "MAKEARRAY",
+        "ISOMITTED",
+    ]
+    .iter()
+    .any(|candidate| name.eq_ignore_ascii_case(candidate));
     for arg in args {
+        if lazy_args {
+            cargs.push(FuncArg::Expr(Box::new(arg.clone())));
+            continue;
+        }
         match arg {
             // A bare reference/range stays unevaluated so the function can
             // consume it raw (or surface the reference error itself).

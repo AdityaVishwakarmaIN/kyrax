@@ -413,7 +413,7 @@ fn offset(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
             }
         }
         // A non-reference first argument is #VALUE! in Excel too.
-        FuncArg::Value(_) => return Err(CalcError::Value),
+        FuncArg::Value(_) | FuncArg::Expr(_) => return Err(CalcError::Value),
     };
     let rows = r0 + dr;
     let cols = c0 + dc;
@@ -426,7 +426,7 @@ fn offset(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     if h <= 0 || w <= 0 {
         return Err(CalcError::Ref);
     }
-    if rows + h - 1 >= i64::from(MAX_ROWS) || cols + w - 1 >= i64::from(MAX_COLS) {
+    if rows + h > i64::from(MAX_ROWS) || cols + w > i64::from(MAX_COLS) {
         return Err(CalcError::Ref);
     }
     if h == 1 && w == 1 {
@@ -688,6 +688,119 @@ fn hyperlink(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     }
 }
 
+// -- AREAS / FORMULATEXT / IMAGE / WRAPCOLS / WRAPROWS -----------------------
+
+/// `AREAS(reference)`: the number of areas in a reference. The engine has no
+/// union-reference value type, so every reference it can hold is exactly one
+/// area and the answer is `1`; a non-reference argument is `#VALUE!`.
+fn areas(_ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    if args[0].as_reference().is_some() {
+        Ok(CalcValue::Number(1.0))
+    } else {
+        Err(CalcError::Value)
+    }
+}
+
+/// `FORMULATEXT(reference)`: the formula text of the referenced cell, or `#N/A`
+/// when the cell is not a formula.
+///
+/// The engine's `CellResolver` exposes computed values only, never the formula
+/// string, so no cell can be reported as holding one — the answer is `#N/A`,
+/// matching Excel's non-formula case. A non-reference argument is `#VALUE!`, as
+/// in Excel. Workbooks that need the real formula text route through the
+/// fallback path (`fullCalcOnLoad="1"`).
+fn formulatext(_ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    if args[0].as_reference().is_some() {
+        Err(CalcError::Na)
+    } else {
+        Err(CalcError::Value)
+    }
+}
+
+/// `IMAGE(url, [alt], [sizing], [height], [width])`.
+///
+/// STUB: a calculation engine returns values, not rendered images, so every
+/// call is `#VALUE!`. The function exists and is registered so workbooks
+/// calling it parse and route to the fallback path instead of failing as an
+/// unknown name.
+fn image(_ctx: &FuncCtx, _args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    Err(CalcError::Value)
+}
+
+/// Cell cap for a WRAPCOLS/WRAPROWS result (~4M cells, the same budget as
+/// OFFSET's materialization).
+const MAX_WRAP_CELLS: usize = 4_000_000;
+
+/// The elements of a one-dimensional array (row or column vector), in scan
+/// order. A 2-D array is `#VALUE!`, matching Excel; an empty array is a valid
+/// empty vector (its caller decides the empty-result error).
+fn wrap_vector(a: &ArrayValue) -> Result<Vec<CalcValue>, CalcError> {
+    if a.rows == 0 || a.cols == 0 {
+        return Ok(Vec::new());
+    }
+    if a.rows == 1 {
+        Ok((0..a.cols).map(|c| a.get(0, c).clone()).collect())
+    } else if a.cols == 1 {
+        Ok((0..a.rows).map(|r| a.get(r, 0).clone()).collect())
+    } else {
+        Err(CalcError::Value)
+    }
+}
+
+/// `WRAPROWS(vector, wrap_count, [pad_with])`: the vector laid out row by row,
+/// `wrap_count` cells per row, padded to a full rectangle with `pad_with`
+/// (default `#N/A`). Element `i` of the vector lands at `(i / wrap_count,
+/// i % wrap_count)`.
+fn wraprows(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    wrap_impl(ctx, args, false)
+}
+
+/// `WRAPCOLS(vector, wrap_count, [pad_with])`: the vector laid out column by
+/// column, `wrap_count` cells per column. Element `i` lands at
+/// `(i % wrap_count, i / wrap_count)`.
+fn wrapcols(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    wrap_impl(ctx, args, true)
+}
+
+fn wrap_impl(ctx: &FuncCtx, args: &[FuncArg], by_col: bool) -> Result<CalcValue, CalcError> {
+    let array = to_array(args[0].value(ctx)?);
+    let values = wrap_vector(&array)?;
+    let wrap = coerce_number(&args[1].value(ctx)?)?.trunc() as i64;
+    let pad = if args.len() > 2 {
+        args[2].value(ctx)?
+    } else {
+        CalcValue::err(CalcError::Na)
+    };
+    if wrap < 1 {
+        return Err(CalcError::Value);
+    }
+    if values.is_empty() {
+        return Err(CalcError::Calc);
+    }
+    let n = values.len();
+    let wrap = wrap as usize;
+    let groups = n.div_ceil(wrap);
+    let (rows, cols) = if by_col {
+        (wrap as u32, groups as u32)
+    } else {
+        (groups as u32, wrap as u32)
+    };
+    let total = (rows as usize) * (cols as usize);
+    if total > MAX_WRAP_CELLS {
+        return Err(CalcError::Value);
+    }
+    let mut data = vec![pad; total];
+    for (i, v) in values.iter().enumerate() {
+        let (r, c) = if by_col {
+            (i % wrap, i / wrap)
+        } else {
+            (i / wrap, i % wrap)
+        };
+        data[r * cols as usize + c] = v.clone();
+    }
+    Ok(CalcValue::array(ArrayValue::new(rows, cols, data)))
+}
+
 const VLOOKUP: FuncSpec = FuncSpec {
     name: "VLOOKUP",
     min_args: 3,
@@ -788,6 +901,51 @@ const HYPERLINK: FuncSpec = FuncSpec {
     func: hyperlink,
 };
 
+const AREAS: FuncSpec = FuncSpec {
+    name: "AREAS",
+    min_args: 1,
+    max_args: Some(1),
+    volatile: false,
+    array_aware: true,
+    func: areas,
+};
+
+const FORMULATEXT: FuncSpec = FuncSpec {
+    name: "FORMULATEXT",
+    min_args: 1,
+    max_args: Some(1),
+    volatile: false,
+    array_aware: false,
+    func: formulatext,
+};
+
+const IMAGE: FuncSpec = FuncSpec {
+    name: "IMAGE",
+    min_args: 1,
+    max_args: Some(5),
+    volatile: false,
+    array_aware: false,
+    func: image,
+};
+
+const WRAPROWS: FuncSpec = FuncSpec {
+    name: "WRAPROWS",
+    min_args: 2,
+    max_args: Some(3),
+    volatile: false,
+    array_aware: true,
+    func: wraprows,
+};
+
+const WRAPCOLS: FuncSpec = FuncSpec {
+    name: "WRAPCOLS",
+    min_args: 2,
+    max_args: Some(3),
+    volatile: false,
+    array_aware: true,
+    func: wrapcols,
+};
+
 pub fn register(r: &mut Registry) {
     r.register(&VLOOKUP);
     r.register(&HLOOKUP);
@@ -812,6 +970,11 @@ pub fn register(r: &mut Registry) {
     r.register(&INDIRECT);
     r.register(&ADDRESS);
     r.register(&HYPERLINK);
+    r.register(&AREAS);
+    r.register(&FORMULATEXT);
+    r.register(&IMAGE);
+    r.register(&WRAPROWS);
+    r.register(&WRAPCOLS);
 }
 
 #[cfg(test)]
@@ -1809,6 +1972,142 @@ mod tests {
         fn hyperlink_arity() {
             assert_eq!(error("=HYPERLINK()"), CalcError::Value);
             assert_eq!(error("=HYPERLINK(1,2,3)"), CalcError::Value);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Round-2 additions: AREAS, FORMULATEXT, IMAGE, WRAPCOLS, WRAPROWS.
+    // -----------------------------------------------------------------------
+    mod round2_additions {
+        use super::*;
+        use crate::turbo::calc::testkit::{Grid, Outcome, error, text};
+
+        #[test]
+        fn areas_reports_one_area_for_any_reference() {
+            let g = Grid::empty();
+            assert_eq!(g.num("=AREAS(A1)"), 1.0);
+            assert_eq!(g.num("=AREAS(A1:B2)"), 1.0);
+            assert_eq!(g.num("=AREAS(A:A)"), 1.0);
+            assert_eq!(g.num("=AREAS(Sheet1!A1)"), 1.0);
+            assert_eq!(g.error("=AREAS(\"A1\")"), CalcError::Value);
+            assert_eq!(g.error("=AREAS(5)"), CalcError::Value);
+        }
+
+        #[test]
+        fn formulatext_is_na_for_value_grid_cells() {
+            let g = Grid::empty().set_num("A1", 1.0);
+            // The resolver exposes computed values only, so no cell is a formula.
+            assert_eq!(g.error("=FORMULATEXT(A1)"), CalcError::Na);
+            assert_eq!(g.error("=FORMULATEXT(Z99)"), CalcError::Na);
+            assert_eq!(g.error("=FORMULATEXT(\"A1\")"), CalcError::Value);
+            assert_eq!(g.error("=FORMULATEXT(1)"), CalcError::Value);
+        }
+
+        #[test]
+        fn image_is_a_present_stub_that_errors() {
+            let g = Grid::empty();
+            assert_eq!(
+                g.error("=IMAGE(\"https://example.com/pic.png\")"),
+                CalcError::Value
+            );
+            assert_eq!(g.error("=IMAGE(\"u\",\"alt\",0,100,100)"), CalcError::Value);
+        }
+
+        #[test]
+        fn wraprows_lays_the_vector_out_row_by_row() {
+            let g = Grid::empty();
+            let a = g.array("=WRAPROWS({1,2,3,4,5},2)");
+            assert_eq!(a.shape(), (3, 2));
+            assert_eq!(a.get(0, 0), &CalcValue::Number(1.0));
+            assert_eq!(a.get(0, 1), &CalcValue::Number(2.0));
+            assert_eq!(a.get(1, 0), &CalcValue::Number(3.0));
+            assert_eq!(a.get(1, 1), &CalcValue::Number(4.0));
+            assert_eq!(a.get(2, 0), &CalcValue::Number(5.0));
+            assert_eq!(a.get(2, 1), &CalcValue::Error(CalcError::Na));
+
+            // a column vector and an exact multiple need no padding
+            let g = Grid::empty().col("A1", &[1.0, 2.0, 3.0, 4.0]);
+            let a = g.array("=WRAPROWS(A1:A4,2)");
+            assert_eq!(a.shape(), (2, 2));
+            assert_eq!(a.get(1, 1), &CalcValue::Number(4.0));
+
+            // a custom pad fills the gap
+            let g = Grid::empty();
+            let a = g.array("=WRAPROWS({1;2;3},2,0)");
+            assert_eq!(a.shape(), (2, 2));
+            assert_eq!(a.get(1, 1), &CalcValue::Number(0.0));
+        }
+
+        #[test]
+        fn wrapcols_lays_the_vector_out_column_by_column() {
+            let g = Grid::empty();
+            let a = g.array("=WRAPCOLS({1,2,3,4,5},2)");
+            assert_eq!(a.shape(), (2, 3));
+            assert_eq!(a.get(0, 0), &CalcValue::Number(1.0));
+            assert_eq!(a.get(1, 0), &CalcValue::Number(2.0));
+            assert_eq!(a.get(0, 1), &CalcValue::Number(3.0));
+            assert_eq!(a.get(1, 1), &CalcValue::Number(4.0));
+            assert_eq!(a.get(0, 2), &CalcValue::Number(5.0));
+            assert_eq!(a.get(1, 2), &CalcValue::Error(CalcError::Na));
+
+            let g = Grid::empty();
+            let a = g.array("=WRAPCOLS({1;2;3;4},2,0)");
+            assert_eq!(a.shape(), (2, 2));
+            assert_eq!(a.get(0, 0), &CalcValue::Number(1.0));
+            assert_eq!(a.get(1, 1), &CalcValue::Number(4.0));
+        }
+
+        #[test]
+        fn wrap_errors() {
+            let g = Grid::empty();
+            assert_eq!(g.error("=WRAPROWS({1,2},0)"), CalcError::Value);
+            assert_eq!(g.error("=WRAPROWS({1,2},-1)"), CalcError::Value);
+            assert_eq!(g.error("=WRAPCOLS({1,2},\"x\")"), CalcError::Value);
+            // a 2-D array cannot be wrapped
+            assert_eq!(g.error("=WRAPROWS({1,2;3,4},2)"), CalcError::Value);
+            // an empty vector -> #CALC! (direct call; `{}` is not parseable)
+            let empty = FuncArg::Value(CalcValue::array(ArrayValue::new(0, 0, Vec::new())));
+            let ctx = FuncCtx {
+                date1904: false,
+                sheet: 0,
+                row: 0,
+                col: 0,
+                resolver: &Grid::empty(),
+            };
+            assert_eq!(
+                (WRAPROWS.func)(&ctx, &[empty, FuncArg::Value(CalcValue::Number(2.0))]),
+                Err(CalcError::Calc)
+            );
+        }
+
+        #[test]
+        fn lane_g_round2_pins() {
+            // the fail-row forms that must evaluate, plus the add-missing
+            // functions' presence in the live registry
+            let g = Grid::empty().set_num("A1", 1.0);
+            assert_eq!(text("=ADDRESS(2,3)"), "$C$2");
+            assert_eq!(g.boolean("=ISREF(A1)"), true);
+            let r = crate::turbo::calc::functions::registry();
+            for name in [
+                "AREAS",
+                "FORMULATEXT",
+                "IMAGE",
+                "WRAPCOLS",
+                "WRAPROWS",
+                "ISFORMULA",
+                "SHEETS",
+                "ENCODEURL",
+            ] {
+                assert!(r.get(name).is_some(), "{name} must be registered");
+            }
+            // CHOOSE already returns an array value for an array constant
+            match g.calc("=CHOOSE(1,{2;3;4})") {
+                Outcome::Value(CalcValue::Array(a)) => {
+                    assert_eq!(a.shape(), (3, 1));
+                    assert_eq!(a.get(0, 0), &CalcValue::Number(2.0));
+                }
+                other => panic!("=CHOOSE(1,{{2;3;4}}) -> {other:?}"),
+            }
         }
     }
 }

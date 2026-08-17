@@ -138,11 +138,9 @@ mod aggregates {
     fn count_and_counta_scalar_coercion() {
         assert_eq!(num("=COUNT(1,\"2\",TRUE)"), 3.0, "scalar args are coerced");
         assert_eq!(num("=COUNTA(1,\"x\",TRUE)"), 3.0);
-        assert_eq!(
-            error("=COUNT(\"abc\")"),
-            CalcError::Value,
-            "a scalar must coerce"
-        );
+        // Excel-measured: =COUNT("abc") is 0 — untranslatable scalar text is
+        // not counted (no #VALUE!).
+        assert_eq!(num("=COUNT(\"abc\")"), 0.0, "non-numeric text is skipped");
     }
 
     #[test]
@@ -179,13 +177,18 @@ mod aggregates {
 
     #[test]
     fn aggregate_propagate_error_arguments() {
-        for f in ["SUM", "PRODUCT", "AVERAGE", "COUNT", "MIN", "MAX"] {
+        for f in ["SUM", "PRODUCT", "AVERAGE", "MIN", "MAX"] {
             assert_eq!(
                 error(&format!("={f}(1/0)")),
                 CalcError::Div0,
                 "{f} must propagate an error argument"
             );
         }
+        // Excel-measured: =COUNT(1/0) is 0 — COUNT skips computed errors
+        // rather than propagating them (like =COUNT(#N/A) and errors in
+        // ranges).
+        assert_eq!(num("=COUNT(1/0)"), 0.0, "COUNT skips error arguments");
+        assert_eq!(num("=COUNT({1,#N/A,3})"), 2.0, "array errors are skipped");
         // COUNTA counts an error value as a non-blank cell rather than
         // propagating it — matching Excel.
         assert_eq!(num("=COUNTA(1/0)"), 1.0);
@@ -679,6 +682,39 @@ mod is_predicates {
         assert_eq!(g.boolean("=ISNUMBER(A2)"), false);
         assert_eq!(g.boolean("=ISTEXT(A2)"), true);
         assert_eq!(g.boolean("=ISBLANK(A3)"), true);
+    }
+
+    #[test]
+    fn predicates_scalar_pick_array_arguments() {
+        // Excel COM referee: =ISNUMBER({1," ",1.23,TRUE,FALSE,"",#N/A,#DIV/0!,
+        // #SPILL!,#NULL!;0,"100","2.34","test",-3,#VALUE!,#REF!,#NUM!,#NAME?,""})
+        // reads True — the top-left element's answer, never a spill, never the
+        // formula-position element (anchor B1 would give the text " ").
+        assert_eq!(
+            boolean(
+                "=ISNUMBER({1,\" \",1.23,TRUE,FALSE,\"\",#N/A,#DIV/0!,#SPILL!,#NULL!;0,\"100\",\"2.34\",\"test\",-3,#VALUE!,#REF!,#NUM!,#NAME?,\"\"})"
+            ),
+            true,
+            "top-left element 1 is a number"
+        );
+        assert_eq!(
+            boolean("=ISNUMBER({\"x\",1})"),
+            false,
+            "top-left element \"x\" is text"
+        );
+        assert_eq!(boolean("=ISTEXT({\"x\",1})"), true);
+        assert_eq!(boolean("=ISNONTEXT({\"x\",1})"), false);
+        assert_eq!(boolean("=ISLOGICAL({1,TRUE})"), false);
+        assert_eq!(boolean("=ISLOGICAL({TRUE,1})"), true);
+        assert_eq!(boolean("=ISERROR({1,#N/A})"), false);
+        assert_eq!(boolean("=ISERROR({#N/A,1})"), true);
+        assert_eq!(boolean("=ISNA({1,#N/A})"), false);
+        assert_eq!(boolean("=ISNA({#N/A,1})"), true);
+        assert_eq!(
+            boolean("=ISBLANK({\"\",1})"),
+            false,
+            "top-left is empty text, not blank"
+        );
     }
 
     #[test]

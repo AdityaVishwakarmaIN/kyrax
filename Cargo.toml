@@ -1,6 +1,6 @@
 [package]
 name = "kyrax"
-version = "1.0.5"
+version = "1.0.6"
 description = "kyrax: a fast Excel engine"
 authors = ["Aditya Vishwakarma <aditya.vishwakarma@vertexconsulting.in>"]
 rust-version = "1.85.0"
@@ -28,6 +28,19 @@ include = [
 [lib]
 name = "kyrax"
 crate-type = ["cdylib", "rlib"]
+
+# Stage -1 direct-evaluator classification harness. Cargo only auto-discovers
+# integration tests under `tests/`; `tests_formulas/` is this repo's formula-
+# validation test area, so its harness needs an explicit target.
+[[test]]
+name = "direct_eval"
+path = "tests_formulas/direct_eval.rs"
+
+# Lane H: array-result hydration/spill persistence (see
+# formula-validation/round2/brief_lane_H.csv). Same explicit-target rationale.
+[[test]]
+name = "lane_h"
+path = "tests_formulas/lane_h.rs"
 
 [dependencies]
 arrow-array = { version = "^59", features = ["ffi"], optional = true }

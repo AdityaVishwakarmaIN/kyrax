@@ -1556,6 +1556,87 @@ pub(crate) fn parse_ref_range(refr: &[u8]) -> (u32, u32, u32, u32) {
     }
 }
 
+/// Excel grid limits for strict A1 validation.
+pub(crate) const MAX_GRID_ROWS: u32 = 1_048_576;
+pub(crate) const MAX_GRID_COLS: u32 = 16_384;
+
+/// Strictly parse a single A1 cell ref or an A1 range into normalized 1-based
+/// inclusive corners `(r1, c1, r2, c2)` (reversed corners are sorted).
+///
+/// Grammar (ASCII only): `[$]?COL[$]?ROW[:[$]?COL[$]?ROW]?` where COL is 1..=3
+/// letters mapping to `A..XFD` and ROW is 1..=1_048_576. `$` markers are
+/// optional and allowed only immediately before the column letters and/or the
+/// row digits. Returns `None` for empty, malformed, zero, non-ASCII, or
+/// out-of-grid input (including extra colons or trailing characters).
+pub(crate) fn parse_ref_range_strict(refr: &[u8]) -> Option<(u32, u32, u32, u32)> {
+    let mut colon_at: Option<usize> = None;
+    for (i, &b) in refr.iter().enumerate() {
+        if b == b':' {
+            if colon_at.is_some() {
+                return None; // more than one colon
+            }
+            colon_at = Some(i);
+        }
+    }
+    let (a, b) = match colon_at {
+        Some(i) => (&refr[..i], &refr[i + 1..]),
+        None => (refr, &[][..]),
+    };
+    let (r1, c1) = parse_ref_component(a)?;
+    let (r2, c2) = if colon_at.is_some() {
+        parse_ref_component(b)?
+    } else {
+        (r1, c1)
+    };
+    Some((r1.min(r2), c1.min(c2), r1.max(r2), c1.max(c2)))
+}
+
+/// Parse one `[$]?COL[$]?ROW` endpoint → 1-based `(row, col)`; `None` on any
+/// syntax or bounds violation.
+fn parse_ref_component(s: &[u8]) -> Option<(u32, u32)> {
+    if s.is_empty() {
+        return None;
+    }
+    let n = s.len();
+    let mut i = 0;
+    // Optional column absolute marker.
+    if s[i] == b'$' {
+        i += 1;
+        if i == n {
+            return None;
+        }
+    }
+    let lstart = i;
+    while i < n && s[i].is_ascii_alphabetic() {
+        i += 1;
+    }
+    let letters = &s[lstart..i];
+    if letters.is_empty() || letters.len() > 3 {
+        return None;
+    }
+    // Optional row absolute marker.
+    if i < n && s[i] == b'$' {
+        i += 1;
+    }
+    let dstart = i;
+    while i < n && s[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i != n || dstart == i {
+        // Trailing garbage or missing row digits.
+        return None;
+    }
+    let col1 = formula::letters_to_index(letters)?;
+    if col1 == 0 || col1 > MAX_GRID_COLS {
+        return None;
+    }
+    let row1: u32 = std::str::from_utf8(&s[dstart..i]).ok()?.parse().ok()?;
+    if row1 == 0 || row1 > MAX_GRID_ROWS {
+        return None;
+    }
+    Some((row1, col1))
+}
+
 pub(crate) fn sheet_data_region(x: &[u8]) -> TurboResult<(usize, usize)> {
     let sd = memchr::memmem::find(x, b"<sheetData")
         .ok_or_else(|| TurboError::Format("missing <sheetData> in worksheet".into()))?;

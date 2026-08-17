@@ -96,14 +96,16 @@ pub fn signature_part_names(zip_bytes: &[u8]) -> TurboResult<Vec<String>> {
         .collect())
 }
 
-/// Remove every `<Relationship>` whose Type ends in `/digital-signature/origin`
-/// from a rels part (the caller passes the inflated `_rels/.rels`), preserving
-/// every other byte exactly.
+/// Remove every signature-related `<Relationship>` from a rels part (the caller
+/// passes the inflated `_rels/.rels`): the digital-signature **origin**
+/// relationship (Type ends in `/digital-signature/origin`) and any relationship
+/// whose Target points into `_xmlsignatures/` (which would otherwise dangle once
+/// the signature parts are dropped). Every other byte is preserved exactly.
 ///
 /// When there are no such relationships the input is returned unchanged
 /// (a content-identical copy). Callers rely on that byte-for-byte equality to
 /// skip rewriting the part, so this function must never reorder or reformat
-/// the XML — it only excises whole origin-relationship elements.
+/// the XML — it only excises whole relationship elements.
 pub fn strip_signature_rels(rels_xml: &[u8]) -> TurboResult<Vec<u8>> {
     let mut removes: Vec<(usize, usize)> = Vec::new();
     let mut i = 0usize;
@@ -128,7 +130,7 @@ pub fn strip_signature_rels(rels_xml: &[u8]) -> TurboResult<Vec<u8>> {
             })?;
             cpos
         };
-        if rel_type_is_sig_origin(&rels_xml[start..te]) {
+        if rel_is_signature_related(&rels_xml[start..te]) {
             removes.push((start, close_end));
         }
         i = close_end;
@@ -143,6 +145,57 @@ pub fn strip_signature_rels(rels_xml: &[u8]) -> TurboResult<Vec<u8>> {
         prev = e;
     }
     out.extend_from_slice(&rels_xml[prev..]);
+    Ok(out)
+}
+
+/// Remove every signature-related declaration from a `[Content_Types].xml` part
+/// (the caller passes the inflated content types): `<Override>` elements whose
+/// `PartName` lives under `/_xmlsignatures/`, and `<Default>` elements for the
+/// `sigs` extension. Every other byte is preserved exactly.
+///
+/// Identity contract: when no signature declarations are present the input is
+/// returned unchanged, so callers can skip rewriting the part. This function
+/// never reorders or reformats the XML — it only excises whole declarations.
+pub fn strip_signature_content_types(ct_xml: &[u8]) -> TurboResult<Vec<u8>> {
+    let mut removes: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0usize;
+    while i < ct_xml.len() {
+        let Some(o) = memchr::memchr(b'<', &ct_xml[i..]) else {
+            break;
+        };
+        let start = i + o;
+        if !is_ct_open(&ct_xml[start + 1..]) {
+            i = start + 1;
+            continue;
+        }
+        let te = start
+            + memchr::memchr(b'>', &ct_xml[start..]).ok_or_else(|| {
+                TurboError::Format("unterminated declaration tag in [Content_Types].xml".into())
+            })?;
+        // Content types only carry self-closing declarations; refuse an unclosed
+        // element rather than guessing at its extent.
+        let close_end = if ct_xml.get(te.wrapping_sub(1)) == Some(&b'/') {
+            te + 1
+        } else {
+            return Err(TurboError::Format(
+                "unterminated declaration element in [Content_Types].xml".into(),
+            ));
+        };
+        if ct_decl_is_signature(&ct_xml[start..te]) {
+            removes.push((start, close_end));
+        }
+        i = close_end;
+    }
+    if removes.is_empty() {
+        return Ok(ct_xml.to_vec());
+    }
+    let mut out = Vec::with_capacity(ct_xml.len());
+    let mut prev = 0usize;
+    for (s, e) in removes {
+        out.extend_from_slice(&ct_xml[prev..s]);
+        prev = e;
+    }
+    out.extend_from_slice(&ct_xml[prev..]);
     Ok(out)
 }
 
@@ -202,11 +255,45 @@ fn find_close_rel(xml: &[u8], from: usize) -> Option<usize> {
     None
 }
 
-/// Does this `<Relationship>` open tag point at the digital-signature origin?
+/// Is this `<Relationship>` open tag signature-related? Yes when its Type is the
+/// digital-signature origin, or when its Target points into `_xmlsignatures/`
+/// (covers the per-signature relationships that would dangle after the drop).
 #[inline]
-fn rel_type_is_sig_origin(tag: &[u8]) -> bool {
-    crate::turbo::structural::find_attr(tag, b"Type")
+fn rel_is_signature_related(tag: &[u8]) -> bool {
+    if crate::turbo::structural::find_attr(tag, b"Type")
         .map_or(false, |t| t.ends_with(b"/digital-signature/origin"))
+    {
+        return true;
+    }
+    crate::turbo::structural::find_attr(tag, b"Target")
+        .map_or(false, |t| t.starts_with(b"_xmlsignatures/"))
+}
+
+/// `rest` is everything after a `<`. True for a `<Default` or `<Override`
+/// declaration open tag (never a close tag, processing instruction, or comment).
+#[inline]
+fn is_ct_open(rest: &[u8]) -> bool {
+    match rest.first() {
+        Some(b'/' | b'?' | b'!') => false,
+        _ => {
+            let local = tag_local_name(rest);
+            local == b"Default" || local == b"Override"
+        }
+    }
+}
+
+/// Is this a signature-related content-type declaration? An Override whose
+/// PartName lives under `/_xmlsignatures/`, or a Default for the `.sigs`
+/// extension.
+#[inline]
+fn ct_decl_is_signature(tag: &[u8]) -> bool {
+    if crate::turbo::structural::find_attr(tag, b"PartName")
+        .map_or(false, |p| p.starts_with(b"/_xmlsignatures/"))
+    {
+        return true;
+    }
+    crate::turbo::structural::find_attr(tag, b"Extension")
+        .map_or(false, |e| e.eq_ignore_ascii_case(b"sigs"))
 }
 
 /// Span of the first element whose local tag name is `local`, searching from
@@ -401,8 +488,10 @@ mod tests {
         for seg in [&head[..], r1, r2, rsig, r4, tail] {
             input.extend_from_slice(seg);
         }
+        // Both the origin rel AND the per-signature rel (Target into
+        // _xmlsignatures/) are excised; everything else is byte-identical.
         let mut expected = Vec::new();
-        for seg in [&head[..], r1, r2, r4, tail] {
+        for seg in [&head[..], r1, r2, tail] {
             expected.extend_from_slice(seg);
         }
         let out = strip_signature_rels(&input).unwrap();
@@ -428,5 +517,38 @@ mod tests {
         assert!(is_signed(b"not a zip archive").is_err());
         assert!(detect_signatures(b"PK\x03\x04too short").is_err());
         assert!(signature_part_names(b"").is_err());
+    }
+
+    #[test]
+    fn sig_strip_content_types_removes_signature_decls() {
+        let head = b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">";
+        let d_plain = b"<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>";
+        let o_wb = b"<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>";
+        let o_sig = b"<Override PartName=\"/_xmlsignatures/sig1.xml\" ContentType=\"application/vnd.openxmlformats-package.digital-signature-xml\"/>";
+        let d_sigs = b"<Default Extension=\"sigs\" ContentType=\"application/vnd.openxmlformats-package.digital-signature-origin\"/>";
+        let tail = b"</Types>";
+        let mut input = Vec::new();
+        for seg in [&head[..], d_plain, o_wb, o_sig, d_sigs, tail] {
+            input.extend_from_slice(seg);
+        }
+        let mut expected = Vec::new();
+        for seg in [&head[..], d_plain, o_wb, tail] {
+            expected.extend_from_slice(seg);
+        }
+        let out = strip_signature_content_types(&input).unwrap();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn sig_strip_content_types_unchanged_when_no_signature() {
+        let ct = b"<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/></Types>";
+        let out = strip_signature_content_types(ct).unwrap();
+        assert_eq!(out, ct);
+    }
+
+    #[test]
+    fn sig_strip_content_types_unterminated_is_error() {
+        let ct = b"<Types><Default Extension=\"sigs\" ContentType=\"application/vnd.openxmlformats-package.digital-signature-origin\">";
+        assert!(strip_signature_content_types(ct).is_err());
     }
 }

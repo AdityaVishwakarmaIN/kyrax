@@ -132,6 +132,19 @@ fn _kyrax(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(py_repair_excel, m)?)?;
     }
 
+    // "from kyrax import formulas" — standalone formula API (Lane I). The
+    // implementation is entirely in calc/python_api.rs; this block only
+    // registers the binding names.
+    {
+        use crate::turbo::calc::python_api::{
+            py_dependencies, py_evaluate, py_list_functions, py_recalculate,
+        };
+        m.add_function(wrap_pyfunction!(py_evaluate, m)?)?;
+        m.add_function(wrap_pyfunction!(py_list_functions, m)?)?;
+        m.add_function(wrap_pyfunction!(py_dependencies, m)?)?;
+        m.add_function(wrap_pyfunction!(py_recalculate, m)?)?;
+    }
+
     // Phase 3 features: the Tier 3 MEDIUM/LOW capabilities neither kyrax nor
     // openpyxl held before. Reachable from Python because an engine capability
     // nobody can call does not count as shipped.

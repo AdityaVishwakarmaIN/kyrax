@@ -255,7 +255,7 @@ pub fn parse_rich_values(part: &[u8]) -> TurboResult<Vec<RichValue>> {
                 continue;
             }
             let vclose = find_close_local(body, vte.saturating_add(1), b"v").unwrap_or(body.len());
-            if vte + 1 <= vclose && vclose <= body.len() {
+            if vte < vclose && vclose <= body.len() {
                 values.push(
                     String::from_utf8_lossy(decode_bytes(&body[vte + 1..vclose], &mut scratch))
                         .into_owned(),

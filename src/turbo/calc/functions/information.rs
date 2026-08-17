@@ -28,54 +28,58 @@ fn seen(ctx: &FuncCtx, arg: &FuncArg) -> CalcValue {
     }
 }
 
-/// A 1x1 array behaves as its single element for the predicates.
-fn unwrap_single(v: CalcValue) -> CalcValue {
+/// A predicate argument array is scalar-picked to a single value, matching
+/// Excel's documented single-value semantics for this family: a 1x1 array is
+/// its element, and any larger array — a range or a literal array constant —
+/// yields its top-left element (Excel-confirmed: `=ISNUMBER({1,...;...})`
+/// reads `True`, the top-left element's answer, in a live COM referee run).
+fn scalar_pick(v: CalcValue) -> CalcValue {
     match &v {
-        CalcValue::Array(a) if a.rows == 1 && a.cols == 1 => a.get(0, 0).clone(),
+        CalcValue::Array(a) => a.get(0, 0).clone(),
         _ => v,
     }
 }
 
 fn f_isblank(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let v = unwrap_single(seen(ctx, &args[0]));
+    let v = scalar_pick(seen(ctx, &args[0]));
     Ok(CalcValue::Bool(matches!(v, CalcValue::Blank)))
 }
 
 fn f_isnumber(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let v = unwrap_single(seen(ctx, &args[0]));
+    let v = scalar_pick(seen(ctx, &args[0]));
     Ok(CalcValue::Bool(matches!(v, CalcValue::Number(_))))
 }
 
 fn f_istext(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let v = unwrap_single(seen(ctx, &args[0]));
+    let v = scalar_pick(seen(ctx, &args[0]));
     Ok(CalcValue::Bool(matches!(v, CalcValue::Text(_))))
 }
 
 fn f_isnontext(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let v = unwrap_single(seen(ctx, &args[0]));
+    let v = scalar_pick(seen(ctx, &args[0]));
     Ok(CalcValue::Bool(!matches!(v, CalcValue::Text(_))))
 }
 
 fn f_islogical(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let v = unwrap_single(seen(ctx, &args[0]));
+    let v = scalar_pick(seen(ctx, &args[0]));
     Ok(CalcValue::Bool(matches!(v, CalcValue::Bool(_))))
 }
 
 fn f_iserror(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let v = unwrap_single(seen(ctx, &args[0]));
+    let v = scalar_pick(seen(ctx, &args[0]));
     Ok(CalcValue::Bool(v.is_error()))
 }
 
 /// `ISERR` is `ISERROR` minus `#N/A`.
 fn f_iserr(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let v = unwrap_single(seen(ctx, &args[0]));
+    let v = scalar_pick(seen(ctx, &args[0]));
     Ok(CalcValue::Bool(
         matches!(v.error(), Some(e) if e != CalcError::Na),
     ))
 }
 
 fn f_isna(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let v = unwrap_single(seen(ctx, &args[0]));
+    let v = scalar_pick(seen(ctx, &args[0]));
     Ok(CalcValue::Bool(v.error() == Some(CalcError::Na)))
 }
 
@@ -118,7 +122,7 @@ fn f_na(_ctx: &FuncCtx, _args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 /// `N`: numbers pass through, TRUE is 1, everything non-numeric is 0, an error
 /// stays an error.
 fn f_n(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    Ok(match unwrap_single(seen(ctx, &args[0])) {
+    Ok(match scalar_pick(seen(ctx, &args[0])) {
         CalcValue::Number(n) => CalcValue::Number(n),
         CalcValue::Bool(b) => CalcValue::Number(if b { 1.0 } else { 0.0 }),
         CalcValue::Error(e) => CalcValue::Error(e),
@@ -142,7 +146,7 @@ fn f_type(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 /// `ERROR.TYPE`: the documented 1-7 codes; anything that is not one of those
 /// errors (including a non-error value) is `#N/A`.
 fn f_error_type(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let Some(e) = unwrap_single(seen(ctx, &args[0])).error() else {
+    let Some(e) = scalar_pick(seen(ctx, &args[0])).error() else {
         return Ok(CalcValue::err(CalcError::Na));
     };
     let code = match e {
@@ -236,14 +240,18 @@ fn f_columns(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     size(ctx, &args[0], false)
 }
 
-// -- SHEET / CELL / INFO ------------------------------------------------------
+// -- SHEET / CELL / INFO / ISFORMULA / SHEETS ---------------------------------
 
 /// `SHEET([value])`: the 1-based sheet number of the formula's own sheet, of a
-/// reference, or of a sheet name. A name that does not resolve is `#REF!`.
+/// reference, or of a sheet name. A name or sheet-qualified reference that does
+/// not resolve is `#N/A` (Excel's documented error for a value that is not a
+/// sheet reference); the bare form is the formula's own sheet.
 ///
-/// `SHEETS` is deliberately NOT registered: its no-argument form needs the
-/// workbook's total sheet count, which `CellResolver` does not expose. An
-/// unregistered name routes to the fullCalcOnLoad fallback, which is correct.
+/// `SHEETS([reference])`: the number of sheets in a reference. The engine
+/// supports single-sheet references only, so a valid reference is `1`. The
+/// no-argument form needs the workbook's total sheet count, which `CellResolver`
+/// does not expose — it returns an internal-only code that routes the cell to
+/// the uncomputed fallback path (`fullCalcOnLoad="1"`), never a guessed number.
 fn f_sheet(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     if args.is_empty() {
         return Ok(CalcValue::Number(f64::from(ctx.sheet) + 1.0));
@@ -259,7 +267,42 @@ fn f_sheet(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     };
     match sheet {
         Some(s) => Ok(CalcValue::Number(f64::from(s) + 1.0)),
-        None => Err(CalcError::Ref),
+        None => Err(CalcError::Na),
+    }
+}
+
+/// `SHEETS([reference])` — see the `SHEET` docstring above for the no-argument
+/// fallback policy.
+fn f_sheets(_ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    if args.is_empty() {
+        // The resolver cannot count the workbook's sheets; an internal-only
+        // code sends the cell to the fallback path rather than guessing 1.
+        return Err(CalcError::Error);
+    }
+    match args[0].as_reference() {
+        Some(RefExpr::Local(_)) | Some(RefExpr::Sheet { .. }) => Ok(CalcValue::Number(1.0)),
+        Some(_) => Err(CalcError::Ref),
+        None => Err(CalcError::Value),
+    }
+}
+
+/// `ISFORMULA(reference)`: TRUE when the referenced cell contains a formula.
+///
+/// The engine's `CellResolver` exposes computed values only — it does not say
+/// whether a cell is a formula — so no addressable reference can be reported as
+/// a formula: the answer is `FALSE`, the same view the rest of the information
+/// family takes of a value grid. A non-reference argument is `#VALUE!`, as in
+/// Excel. Workbooks that need the true formula-presence answer route through
+/// the fallback path (`fullCalcOnLoad="1"`).
+fn f_isformula(_ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    let is_ref = matches!(
+        args[0].as_reference(),
+        Some(RefExpr::Local(_)) | Some(RefExpr::Sheet { .. })
+    );
+    if is_ref {
+        Ok(CalcValue::Bool(false))
+    } else {
+        Err(CalcError::Value)
     }
 }
 
@@ -290,14 +333,16 @@ fn first_cell(sheet: u32, core: &RefCore) -> Result<(u32, u32, u16), CalcError> 
 }
 
 /// `CELL(info_type, [reference])`: the info_types this engine can answer from
-/// a value grid alone — `"address"`, `"col"`, `"row"` come from reference
+/// a value grid alone. `"address"`, `"col"`, `"row"` come from reference
 /// geometry, `"contents"` is the cell's value (a blank reads as 0, matching
-/// Excel). Every other documented type (`"type"`, `"format"`, `"width"`,
-/// `"prefix"`, `"protect"`, `"filename"`, ...) needs cell metadata — number
-/// formats, column widths, a formula flag — that `CellResolver` does not
-/// expose, so it is `#VALUE!` rather than a guessed value. A formula cell in
-/// particular would make `"type"`'s `"c"` answer undecidable, so that type is
-/// not claimed either.
+/// Excel), and `"type"` classifies the cell by its value: `"b"` blank, `"l"`
+/// text constant, `"v"` any other constant. The info type is case-insensitive
+/// (`Cell("TYPE", A1)` works). Every other documented type (`"format"`,
+/// `"width"`, `"prefix"`, `"protect"`, `"filename"`, ...) needs cell metadata —
+/// number formats, column widths, a formula flag — that `CellResolver` does not
+/// expose, so it is `#VALUE!` rather than a guessed value. A formula cell is
+/// reported by its computed value, not as the `"c"` Excel would answer for a
+/// formula: that flag is not visible through the resolver.
 fn f_cell(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let key = coerce_text(&args[0].value(ctx)?)?;
     let key = key.trim().to_ascii_lowercase();
@@ -311,6 +356,18 @@ fn f_cell(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
         }))),
         "col" => Ok(CalcValue::Number(f64::from(col) + 1.0)),
         "row" => Ok(CalcValue::Number(f64::from(row) + 1.0)),
+        "type" => {
+            let v = ctx
+                .resolver
+                .cell(sheet, row, u32::from(col))
+                .unwrap_or(CalcValue::Blank);
+            let t = match v {
+                CalcValue::Blank => "b",
+                CalcValue::Text(_) => "l",
+                _ => "v",
+            };
+            Ok(CalcValue::text(t))
+        }
         "contents" => {
             let v = ctx
                 .resolver
@@ -345,8 +402,11 @@ fn f_info(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 
 // -- registry ----------------------------------------------------------------
 
-/// One-argument inspection spec. `array_aware` so a range argument is handed
-/// over whole instead of being implicitly intersected first.
+/// One-argument inspection spec. `array_aware` so an array argument is handed
+/// over whole and the predicate scalar-picks its top-left element — Excel's
+/// documented single-value semantics for this family — instead of being
+/// implicitly intersected first (which would make the answer depend on the
+/// formula cell's position).
 const fn spec1(name: &'static str, func: super::Func) -> FuncSpec {
     FuncSpec {
         name,
@@ -411,6 +471,17 @@ const SHEET: FuncSpec = FuncSpec {
     func: f_sheet,
 };
 
+const SHEETS: FuncSpec = FuncSpec {
+    name: "SHEETS",
+    min_args: 0,
+    max_args: Some(1),
+    volatile: false,
+    array_aware: true,
+    func: f_sheets,
+};
+
+const ISFORMULA: FuncSpec = spec1("ISFORMULA", f_isformula);
+
 // CELL and INFO are volatile in Excel (their output can change with the
 // environment), so they must never be cached.
 const CELL: FuncSpec = FuncSpec {
@@ -452,6 +523,8 @@ pub fn register(r: &mut Registry) {
     r.register(&ROWS);
     r.register(&COLUMNS);
     r.register(&SHEET);
+    r.register(&SHEETS);
+    r.register(&ISFORMULA);
     r.register(&CELL);
     r.register(&INFO);
 }
@@ -622,6 +695,10 @@ mod tests {
             Ok(CalcValue::Number(2.0))
         );
         assert_eq!(
+            call(&TYPE, vec![v(CalcValue::number(123.0))]),
+            Ok(CalcValue::Number(1.0))
+        );
+        assert_eq!(
             call(&TYPE, vec![v(CalcValue::bool(true))]),
             Ok(CalcValue::Number(4.0))
         );
@@ -686,8 +763,35 @@ mod tests {
         assert_eq!(g.num("=SHEET()"), 1.0);
         assert_eq!(g.num("=SHEET(Sheet1!A1)"), 1.0);
         assert_eq!(g.num("=SHEET(\"Sheet1\")"), 1.0);
-        assert_eq!(g.error("=SHEET(\"NoSuch\")"), CalcError::Ref);
-        assert_eq!(g.error("=SHEET(NoSuchSheet!A1)"), CalcError::Ref);
+        assert_eq!(g.num("=SHEET(A1)"), 1.0);
+        // Excel's SHEET returns #N/A for a value that is not a sheet reference.
+        assert_eq!(g.error("=SHEET(\"NoSuch\")"), CalcError::Na);
+        assert_eq!(g.error("=SHEET(\"工作表3\")"), CalcError::Na);
+        assert_eq!(g.error("=SHEET(NoSuchSheet!A1)"), CalcError::Na);
+    }
+
+    #[test]
+    fn sheets_reports_single_sheet_references_and_never_guesses_no_arg() {
+        let g = Grid::empty();
+        assert_eq!(g.num("=SHEETS(A1)"), 1.0);
+        assert_eq!(g.num("=SHEETS(Sheet1!A1:B2)"), 1.0);
+        assert_eq!(g.error("=SHEETS(\"x\")"), CalcError::Value);
+        assert_eq!(g.error("=SHEETS(1)"), CalcError::Value);
+        // The no-argument form cannot count the workbook's sheets through the
+        // resolver; it routes to the fallback path instead of guessing 1.
+        assert_eq!(g.error("=SHEETS()"), CalcError::Error);
+    }
+
+    #[test]
+    fn isformula_reports_false_for_value_grid_cells() {
+        let g = Grid::empty().set_num("A1", 42.0).set_text("B1", "x");
+        // The resolver exposes computed values only, so no cell is a formula.
+        assert_eq!(g.boolean("=ISFORMULA(A1)"), false);
+        assert_eq!(g.boolean("=ISFORMULA(B1)"), false);
+        assert_eq!(g.boolean("=ISFORMULA(Z99)"), false);
+        assert_eq!(g.error("=ISFORMULA(\"A1\")"), CalcError::Value);
+        assert_eq!(g.error("=ISFORMULA(5)"), CalcError::Value);
+        assert_eq!(Grid::empty().error("=ISFORMULA()"), CalcError::Value);
     }
 
     #[test]
@@ -716,13 +820,41 @@ mod tests {
     }
 
     #[test]
+    fn cell_type_classifies_by_value_kind() {
+        let g = Grid::empty()
+            .set_num("A1", 1.0)
+            .set_text("B1", "hi")
+            .set_bool("C1", true);
+        assert_eq!(g.text("=CELL(\"type\", A1)"), "v");
+        assert_eq!(g.text("=Cell(\"type\", A1)"), "v");
+        assert_eq!(g.text("=CELL(\"TYPE\", A1)"), "v");
+        assert_eq!(g.text("=CELL(\"type\", B1)"), "l");
+        assert_eq!(g.text("=CELL(\"type\", C1)"), "v");
+        assert_eq!(g.text("=CELL(\"type\", Z99)"), "b");
+        assert_eq!(
+            g.text("=Cell(\"type\", A1)"),
+            "v",
+            "info type is case-insensitive"
+        );
+    }
+
+    #[test]
     fn cell_unsupported_types_are_value() {
         let g = Grid::empty();
         assert_eq!(g.error("=CELL(\"format\")"), CalcError::Value);
         assert_eq!(g.error("=CELL(\"width\")"), CalcError::Value);
-        assert_eq!(g.error("=CELL(\"type\")"), CalcError::Value);
         assert_eq!(g.error("=CELL(\"filename\")"), CalcError::Value);
         assert_eq!(g.error("=CELL(\"bogus\")"), CalcError::Value);
+    }
+
+    #[test]
+    fn lane_g_pins_type_isref_and_address() {
+        let g = Grid::empty().set_num("A1", 1.0);
+        // round-2 fail-row pins: TYPE(123), ISREF(A1)
+        assert_eq!(g.num("=TYPE(123)"), 1.0);
+        assert_eq!(g.boolean("=ISREF(A1)"), true);
+        assert_eq!(g.boolean("=ISREF(A1:B2)"), true);
+        assert_eq!(g.boolean("=ISREF(\"A1\")"), false);
     }
 
     #[test]

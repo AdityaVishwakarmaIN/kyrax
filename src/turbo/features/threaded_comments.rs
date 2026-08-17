@@ -277,7 +277,7 @@ pub fn parse_threaded_comments(part: &[u8]) -> TurboResult<Vec<ThreadedComment>>
             String::new()
         } else {
             let end = find_close_local(part, te + 1, b"threadedComment").unwrap_or(n);
-            if te + 1 <= end && end <= n {
+            if te < end && end <= n {
                 first_elem_text(&part[te + 1..end], b"text", &mut scratch).unwrap_or_default()
             } else {
                 String::new()

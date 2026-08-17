@@ -845,7 +845,7 @@ fn concat_t_texts(region: &[u8], scratch: &mut Vec<u8>) -> String {
             continue;
         }
         let tclose = find_close_local(region, topen_end.saturating_add(1), b"t").unwrap_or(bn);
-        if topen_end + 1 <= tclose && tclose <= bn {
+        if topen_end < tclose && tclose <= bn {
             let raw = &region[topen_end + 1..tclose];
             text.push_str(&String::from_utf8_lossy(super::decode::decode_bytes(
                 raw, scratch,
@@ -1615,7 +1615,7 @@ pub fn parse_threaded_comments(xml: &[u8]) -> Vec<ThreadedComment> {
             String::new()
         } else {
             let end = find_close_local(xml, te + 1, b"threadedComment").unwrap_or(xml.len());
-            let body = if te + 1 <= end {
+            let body = if te < end {
                 &xml[te + 1..end]
             } else {
                 &xml[te..te]

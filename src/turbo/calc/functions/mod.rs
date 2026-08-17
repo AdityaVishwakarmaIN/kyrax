@@ -73,7 +73,7 @@
 // take the coordinates from the `RefExpr`, and fetch values cell-by-cell via
 // `ctx.cell(row, col)` — never by materializing a huge range.
 
-use crate::turbo::calc::ast::{RefCore, RefExpr};
+use crate::turbo::calc::ast::{Expr, RefCore, RefExpr};
 use crate::turbo::calc::value::{ArrayValue, CalcError, CalcValue};
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -89,6 +89,7 @@ mod lookup;
 mod math;
 mod statistical;
 mod text;
+mod web;
 
 /// Excel grid limits, used to bound whole-row/column materialization.
 pub const MAX_ROWS: u32 = 1_048_576;
@@ -111,6 +112,8 @@ const MAX_MATERIALIZED_CELLS: usize = 4_000_000;
 pub enum FuncArg {
     Value(CalcValue),
     Reference(RefExpr),
+    /// Unevaluated syntax for LAMBDA/LET and lambda helper functions.
+    Expr(Box<Expr>),
 }
 
 impl FuncArg {
@@ -122,6 +125,7 @@ impl FuncArg {
         match self {
             FuncArg::Value(v) => Ok(v.clone()),
             FuncArg::Reference(re) => ctx.resolve(re),
+            FuncArg::Expr(_) => Err(CalcError::Value),
         }
     }
 
@@ -131,7 +135,7 @@ impl FuncArg {
     pub fn as_reference(&self) -> Option<&RefExpr> {
         match self {
             FuncArg::Reference(re) => Some(re),
-            FuncArg::Value(_) => None,
+            FuncArg::Value(_) | FuncArg::Expr(_) => None,
         }
     }
 }
@@ -366,7 +370,9 @@ fn build() -> Registry {
     financial::register(&mut r);
     engineering::register(&mut r);
     dynamic::register(&mut r);
+    crate::turbo::calc::lambda::register(&mut r);
     database::register(&mut r);
+    web::register(&mut r);
     r
 }
 

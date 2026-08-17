@@ -37,6 +37,17 @@ fn arg_num(ctx: &FuncCtx, arg: &FuncArg) -> Result<f64, CalcError> {
     coerce_number(&arg.value(ctx)?)
 }
 
+/// Coerce to number but reject booleans outright — Excel's EFFECT, NOMINAL,
+/// DOLLARDE, DOLLARFR and FVSCHEDULE type their numeric arguments strictly and
+/// return #VALUE! for a TRUE/FALSE where a rate or fraction belongs.
+fn arg_num_typed(ctx: &FuncCtx, arg: &FuncArg) -> Result<f64, CalcError> {
+    let v = arg.value(ctx)?;
+    if matches!(v, CalcValue::Bool(_)) {
+        return Err(CalcError::Value);
+    }
+    coerce_number(&v)
+}
+
 fn opt_num(ctx: &FuncCtx, args: &[FuncArg], i: usize, d: f64) -> Result<f64, CalcError> {
     if i < args.len() {
         arg_num(ctx, &args[i])
@@ -215,43 +226,27 @@ fn days_360_eu(s1: f64, s2: f64, date1904: bool) -> i64 {
     (y2 * 360 + m2 * 30 + d2) - (y1 * 360 + m1 * 30 + d1)
 }
 
-/// Basis 1 days-in-year (ODF procedure E).
-fn actual_actual_days_in_year(s1: f64, s2: f64, date1904: bool) -> i64 {
-    let (y1, m1, d1) = serial_to_civil(s1, date1904);
-    let (y2, m2, d2) = serial_to_civil(s2, date1904);
-    let a = y1 != y2;
-    let b = y2 != y1 + 1;
-    let c = m1 < m2;
-    let d = m1 == m2;
-    let e = d1 < d2;
-    if (a && b) || (a && c) || (a && d && e) {
-        let mut sum = 0i64;
-        for y in y1..=y2 {
-            sum += if is_leap_system(y, date1904) {
-                366
-            } else {
-                365
-            };
-        }
-        return sum / (y2 - y1 + 1);
+/// Basis 1 days-in-year (Excel semantics). The average number of days per year
+/// over the span — `(last day of the end year − first day of the start year
+/// + 1) ÷ number of years spanned` — so a same-year span yields that year's
+/// full length (366 for a leap year even when the interval itself holds no
+/// 29-February). Truncating this to an integer misprices every basis-1
+/// security, and the "Feb 29 strictly between" rule is NOT what Excel uses.
+fn actual_actual_days_in_year(s1: f64, s2: f64, date1904: bool) -> f64 {
+    let (mut y1, _, _) = serial_to_civil(s1, date1904);
+    let (mut y2, _, _) = serial_to_civil(s2, date1904);
+    if y1 > y2 {
+        std::mem::swap(&mut y1, &mut y2);
     }
-    if a && is_leap_system(y1, date1904) {
-        return 366;
+    let total_year = (y2 - y1 + 1) as f64;
+    let mut start_first = civil_to_serial(y1, 1, 1, date1904);
+    let end_last = civil_to_serial(y2, 12, 31, date1904);
+    if !date1904 && y1 == 1900 {
+        // The 1900 system counts 1900 as 365 real days (the leap bug only
+        // invents 1900-02-29), so the serial arithmetic needs a one-day shave.
+        start_first += 1;
     }
-    let o1 = days_from_civil(y1, m1, d1);
-    let o2 = days_from_civil(y2, m2, d2);
-    for y in y1..=y2 {
-        if is_leap_system(y, date1904) {
-            let o = days_from_civil(y, 2, 29);
-            if o1 < o && o < o2 {
-                return 366;
-            }
-        }
-    }
-    if m2 == 2 && d2 == 29 {
-        return 366;
-    }
-    365
+    (end_last - start_first + 1) as f64 / total_year
 }
 
 /// Days between two serials under a basis. `s1 <= s2` for every internal call.
@@ -268,7 +263,25 @@ fn days_in_year(s1: f64, s2: f64, basis: u8, date1904: bool) -> f64 {
     match basis {
         0 | 2 | 4 => 360.0,
         3 => 365.0,
-        _ => actual_actual_days_in_year(s1, s2, date1904) as f64,
+        _ => actual_actual_days_in_year(s1, s2, date1904),
+    }
+}
+
+/// Days in the single calendar year that contains `serial` (the "B" factor for
+/// basis 1 in PRICEMAT / YIELDMAT / AMORLINC, which Excel anchors on the year
+/// of the settlement date, not the average over the whole span).
+fn days_in_year_of(serial: f64, basis: u8, date1904: bool) -> f64 {
+    match basis {
+        0 | 2 | 4 => 360.0,
+        3 => 365.0,
+        _ => {
+            let (y, _, _) = serial_to_civil(serial, date1904);
+            if is_leap_system(y, date1904) {
+                366.0
+            } else {
+                365.0
+            }
+        }
     }
 }
 
@@ -277,7 +290,7 @@ fn year_fraction(s1: f64, s2: f64, basis: u8, date1904: bool) -> f64 {
         0 => days_360_us(s1, s2, date1904) as f64 / 360.0,
         1 => {
             (clamp_serial(s2) - clamp_serial(s1)) as f64
-                / actual_actual_days_in_year(s1, s2, date1904) as f64
+                / actual_actual_days_in_year(s1, s2, date1904)
         }
         2 => (clamp_serial(s2) - clamp_serial(s1)) as f64 / 360.0,
         3 => (clamp_serial(s2) - clamp_serial(s1)) as f64 / 365.0,
@@ -424,6 +437,10 @@ fn fv_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let pmt = arg_num(ctx, &args[2])?;
     let pv = opt_num(ctx, args, 3, 0.0)?;
     let t = pay_type(opt_num(ctx, args, 4, 0.0)?)?;
+    // Excel guards the (1+rate)^nper degenerate case: FV(-1, 0, ...) is #NUM!.
+    if r == -1.0 && n == 0.0 {
+        return Err(CalcError::Num);
+    }
     let result = if r == 0.0 {
         -(pv + pmt * n)
     } else {
@@ -603,8 +620,22 @@ fn cumprinc_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> 
 }
 
 fn fvschedule_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
-    let principal = arg_num(ctx, &args[0])?;
-    let rates = collect_values(ctx, &args[1..])?;
+    let principal = arg_num_typed(ctx, &args[0])?;
+    let mut rates = Vec::new();
+    for arg in &args[1..] {
+        match arg.value(ctx)? {
+            CalcValue::Array(a) => {
+                for v in a.iter() {
+                    match v {
+                        CalcValue::Blank => {}
+                        CalcValue::Bool(_) => return Err(CalcError::Value),
+                        other => rates.push(coerce_number(other)?),
+                    }
+                }
+            }
+            v => rates.push(coerce_number(&v)?),
+        }
+    }
     let mut result = principal;
     for &r in &rates {
         result *= 1.0 + r;
@@ -686,8 +717,13 @@ fn mirr_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let fr = arg_num(ctx, &args[1])?;
     let rr = arg_num(ctx, &args[2])?;
     let n = values.len();
+    // Excel reports #DIV/0! when there is nothing to discount at the finance
+    // rate (no negative cash flows, too few flows) or reinvestment collapses.
     if n < 2 {
-        return Err(CalcError::Num);
+        return Err(CalcError::Div0);
+    }
+    if rr == -1.0 {
+        return Err(CalcError::Div0);
     }
     let mut pv_pos = 0.0;
     let mut pv_neg = 0.0;
@@ -700,7 +736,7 @@ fn mirr_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
         }
     }
     if pv_pos == 0.0 || pv_neg == 0.0 {
-        return Err(CalcError::Num);
+        return Err(CalcError::Div0);
     }
     ok_num((pv_pos / pv_neg).powf(1.0 / (n as f64 - 1.0)) - 1.0)
 }
@@ -810,7 +846,7 @@ fn syd_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let salvage = arg_num(ctx, &args[1])?;
     let life = arg_num(ctx, &args[2])?;
     let per = arg_num(ctx, &args[3])?;
-    if life <= 0.0 {
+    if life <= 0.0 || salvage < 0.0 || per < 1.0 || per > life {
         return Err(CalcError::Num);
     }
     let base = cost - salvage;
@@ -901,108 +937,92 @@ fn ddb_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     ok_num(get_ddb(cost, salvage, life, period, factor))
 }
 
-/// Per-period VDB core with the optional straight-line switch (LibreOffice's
-/// ScInterVDB). `life1` is the remaining life counter used for the switch.
-fn inter_vdb(cost: f64, salvage: f64, life: f64, life1: f64, period: f64, factor: f64) -> f64 {
-    let int_end = period.ceil();
-    let loop_end = int_end as i64;
-    let mut vdb = 0.0;
+/// Per-span VDB core (Excel's algorithm, as ported by Univer): depreciation
+/// over `[start_period, end_period]` with the SLN switch decided period by
+/// period. `start_period` doubles as the remaining-life counter in the SLN
+/// comparison — that coupling is what reproduces Excel's fractional-period
+/// results (e.g. VDB(24000,3000,10,6.1,6.2,2) = 123.3125376, not 125.83).
+fn vdb_core(
+    cost: f64,
+    salvage: f64,
+    life: f64,
+    start_period: f64,
+    end_period: f64,
+    factor: f64,
+) -> f64 {
+    let end = end_period.ceil();
+    let loop_end = end as i64;
+    let mut result = 0.0;
+    let mut rest = cost - salvage;
     let mut sln = 0.0;
-    let mut salvage_value = cost - salvage;
-    let mut now_sln = false;
+    let mut switched = false;
     for i in 1..=loop_end {
-        let term;
-        if !now_sln {
+        let temp;
+        if !switched {
             let ddb = get_ddb(cost, salvage, life, i as f64, factor);
-            sln = salvage_value / (life1 - (i as f64 - 1.0));
+            sln = rest / (start_period - (i as f64 - 1.0));
             if sln > ddb {
-                term = sln;
-                now_sln = true;
+                temp = sln;
+                switched = true;
             } else {
-                term = ddb;
-                salvage_value -= ddb;
+                temp = ddb;
+                rest -= ddb;
             }
         } else {
-            term = sln;
+            temp = sln;
         }
-        let term = if i == loop_end {
-            term * (period + 1.0 - int_end)
+        let temp = if (i as f64) == end {
+            temp * (end_period + 1.0 - end)
         } else {
-            term
+            temp
         };
-        vdb += term;
+        result += temp;
     }
-    vdb
+    result
 }
 
 fn vdb_value(
     cost: f64,
     salvage: f64,
     life: f64,
-    start: f64,
-    end: f64,
+    start_period: f64,
+    end_period: f64,
     factor: f64,
     no_switch: bool,
 ) -> f64 {
-    let int_start = start.floor();
-    let int_end = end.ceil();
-    let loop_start = int_start as i64;
-    let loop_end = int_end as i64;
+    let start = start_period.floor() as i64;
+    let end = end_period.ceil() as i64;
+    let mut result = 0.0;
+    if cost < salvage {
+        if start_period >= 1.0 || no_switch {
+            return result;
+        }
+        let temp_minus = (cost - salvage).abs();
+        let r = temp_minus * (end_period - start_period);
+        return -if r > temp_minus { temp_minus } else { r };
+    }
     if no_switch {
-        let mut vdb = 0.0;
-        for i in (loop_start + 1)..=loop_end {
-            let mut term = get_ddb(cost, salvage, life, i as f64, factor);
-            if i == loop_start + 1 {
-                term *= end.min(int_start + 1.0) - start;
-            } else if i == loop_end {
-                term *= end + 1.0 - int_end;
+        for i in (start + 1)..=end {
+            let mut ddb = get_ddb(cost, salvage, life, i as f64, factor);
+            if i == start + 1 {
+                ddb *= end_period.min(start as f64 + 1.0) - start_period;
+            } else if i == end {
+                ddb *= end_period + 1.0 - end as f64;
             }
-            vdb += term;
+            result += ddb;
         }
-        vdb
     } else {
-        let mut part = 0.0;
-        if start != int_start || end != int_end {
-            if start != int_start {
-                let temp_int_end = int_start + 1.0;
-                let temp_value = cost - inter_vdb(cost, salvage, life, life, int_start, factor);
-                part += (start - int_start)
-                    * inter_vdb(
-                        temp_value,
-                        salvage,
-                        life,
-                        life - int_start,
-                        temp_int_end - int_start,
-                        factor,
-                    );
-            }
-            if end != int_end {
-                let temp_int_start = int_end - 1.0;
-                let temp_value =
-                    cost - inter_vdb(cost, salvage, life, life, temp_int_start, factor);
-                part += (int_end - end)
-                    * inter_vdb(
-                        temp_value,
-                        salvage,
-                        life,
-                        life - temp_int_start,
-                        int_end - temp_int_start,
-                        factor,
-                    );
-            }
-        }
-        let cost2 = cost - inter_vdb(cost, salvage, life, life, int_start, factor);
-        let mut vdb = inter_vdb(
+        let cost2 = cost - vdb_core(cost, salvage, life, life, start_period, factor);
+        result = vdb_core(
             cost2,
             salvage,
             life,
-            life - int_start,
-            int_end - int_start,
+            life - start_period,
+            end_period - start_period,
             factor,
         );
-        vdb -= part;
-        vdb
     }
+    result
 }
 
 fn vdb_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
@@ -1015,14 +1035,16 @@ fn vdb_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let no_switch = opt_num(ctx, args, 6, 0.0)?;
     if cost < 0.0
         || salvage < 0.0
-        || salvage > cost
-        || life <= 0.0
-        || factor <= 0.0
+        || life < 0.0
+        || factor < 0.0
         || start < 0.0
         || end < start
         || end > life
     {
         return Err(CalcError::Num);
+    }
+    if life == 0.0 && start == 0.0 && end == 0.0 {
+        return Err(CalcError::Div0);
     }
     ok_num(vdb_value(
         cost,
@@ -1039,7 +1061,7 @@ fn vdb_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 
 fn effect_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let r = arg_num(ctx, &args[0])?;
-    let n = arg_num(ctx, &args[1])?.trunc();
+    let n = arg_num_typed(ctx, &args[1])?.trunc();
     if r < 0.0 || n < 1.0 {
         return Err(CalcError::Num);
     }
@@ -1051,7 +1073,7 @@ fn effect_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 
 fn nominal_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let r = arg_num(ctx, &args[0])?;
-    let n = arg_num(ctx, &args[1])?.trunc();
+    let n = arg_num_typed(ctx, &args[1])?.trunc();
     if r <= 0.0 || n < 1.0 {
         return Err(CalcError::Num);
     }
@@ -1060,11 +1082,11 @@ fn nominal_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 
 fn dollarde_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let d = arg_num(ctx, &args[0])?;
-    let f = arg_num(ctx, &args[1])?;
+    let f = arg_num_typed(ctx, &args[1])?.trunc();
     if f < 0.0 {
         return Err(CalcError::Num);
     }
-    if f == 0.0 {
+    if f < 1.0 {
         return Err(CalcError::Div0);
     }
     let int = d.floor();
@@ -1073,11 +1095,11 @@ fn dollarde_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> 
 
 fn dollarfr_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let d = arg_num(ctx, &args[0])?;
-    let f = arg_num(ctx, &args[1])?;
+    let f = arg_num_typed(ctx, &args[1])?.trunc();
     if f < 0.0 {
         return Err(CalcError::Num);
     }
-    if f == 0.0 {
+    if f < 1.0 {
         return Err(CalcError::Div0);
     }
     let int = d.floor();
@@ -1133,6 +1155,98 @@ fn shift_months_fwd(y: i64, m: i64, d: i64, months: i64, date1904: bool) -> (i64
     (ny, nm, nd)
 }
 
+/// The last coupon date on or before `settlement`, stepping back `12/freq`
+/// months from `maturity` (Excel's COUPPCD, used by the odd-coupon family).
+fn prev_coupon(settlement: i64, maturity: i64, freq: i64, date1904: bool) -> i64 {
+    let months = 12 / freq;
+    let (sy, sm, sd) = serial_to_civil(settlement as f64, date1904);
+    let s_days = days_from_civil(sy, sm, sd);
+    let (_, mut m, mut d) = serial_to_civil(maturity as f64, date1904);
+    let mut y = sy;
+    if days_from_civil(y, m, d) < s_days {
+        y += 1;
+    }
+    while days_from_civil(y, m, d) > s_days {
+        let (ny, nm, nd) = shift_months(y, m, d, months, date1904);
+        y = ny;
+        m = nm;
+        d = nd;
+    }
+    civil_to_serial(y, m, d, date1904)
+}
+
+/// The coupon date after `settlement` (Excel's COUPNCD).
+fn next_coupon(settlement: i64, maturity: i64, freq: i64, date1904: bool) -> i64 {
+    let months = 12 / freq;
+    let (sy, sm, sd) = serial_to_civil(settlement as f64, date1904);
+    let s_days = days_from_civil(sy, sm, sd);
+    let (_, mut m, mut d) = serial_to_civil(maturity as f64, date1904);
+    let mut y = sy;
+    if days_from_civil(y, m, d) < s_days {
+        y += 1;
+    }
+    while days_from_civil(y, m, d) > s_days {
+        let (ny, nm, nd) = shift_months(y, m, d, months, date1904);
+        y = ny;
+        m = nm;
+        d = nd;
+    }
+    let (ny, nm, nd) = shift_months_fwd(y, m, d, months, date1904);
+    civil_to_serial(ny, nm, nd, date1904)
+}
+
+/// Number of coupon dates strictly after `settlement` and up to `maturity`
+/// (Excel's COUPNUM).
+fn coupon_count(settlement: i64, maturity: i64, freq: i64, date1904: bool) -> i64 {
+    let months = 12 / freq;
+    let (sy, sm, sd) = serial_to_civil(settlement as f64, date1904);
+    let s_days = days_from_civil(sy, sm, sd);
+    let (mut y, mut m, mut d) = serial_to_civil(maturity as f64, date1904);
+    let mut n = 0i64;
+    while days_from_civil(y, m, d) > s_days {
+        let (ny, nm, nd) = shift_months(y, m, d, months, date1904);
+        y = ny;
+        m = nm;
+        d = nd;
+        n += 1;
+    }
+    n
+}
+
+/// Days in the coupon period containing `settlement` (Excel's COUPDAYS):
+/// actual days between consecutive coupon dates for basis 1, else 365/360
+/// scaled by frequency.
+fn coup_days(settlement: i64, maturity: i64, freq: i64, basis: u8, date1904: bool) -> f64 {
+    match basis {
+        1 => {
+            let before = prev_coupon(settlement, maturity, freq, date1904);
+            let after = add_coupon_months(before, 12 / freq, date1904);
+            if before < 0 && freq == 1 {
+                365.0
+            } else {
+                (after - before) as f64
+            }
+        }
+        3 => 365.0 / freq as f64,
+        _ => 360.0 / freq as f64,
+    }
+}
+
+/// `settlement` plus `months` coupon-steps with Excel's EDATE semantics: a
+/// month-end source date lands on the target month's last day (2/29 + 6 months
+/// is 8/31, not 8/29), which the odd-coupon and ACCRINT lattices rely on.
+fn add_coupon_months(serial: i64, months: i64, date1904: bool) -> i64 {
+    let (y, m, d) = serial_to_civil(serial as f64, date1904);
+    let is_last = d == days_in_month(y, m, date1904);
+    let (ny, nm, nd) = shift_months_fwd(y, m, d, months, date1904);
+    let (ny, nm, nd) = if is_last {
+        (ny, nm, days_in_month(ny, nm, date1904))
+    } else {
+        (ny, nm, nd)
+    };
+    civil_to_serial(ny, nm, nd, date1904)
+}
+
 fn coupdays_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let settlement = arg_num(ctx, &args[0])?;
     let maturity = arg_num(ctx, &args[1])?;
@@ -1184,10 +1298,11 @@ fn couppcd_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let freq = check_freq(arg_num(ctx, &args[2])?)?;
     check_basis(opt_num(ctx, args, 3, 0.0)?)?;
     let (_, prev, _) = coupon_period(settlement, maturity, freq, ctx.date1904)?;
-    ok_num(prev as f64)
+    // Excel clamps coupon dates that step before the 1900 origin to serial 0.
+    ok_num(if prev < 0 { 0.0 } else { prev as f64 })
 }
 
-fn accrint_total(
+fn accrint_value(
     issue: f64,
     first: f64,
     settlement: f64,
@@ -1195,40 +1310,78 @@ fn accrint_total(
     par: f64,
     freq: i64,
     basis: u8,
-    from_issue: bool,
+    calc_method: f64,
     date1904: bool,
-) -> f64 {
+) -> Result<f64, CalcError> {
+    let issue_s = issue.trunc() as i64;
+    let first_s = first.trunc() as i64;
+    let settlement_s = settlement.trunc() as i64;
     let months = 12 / freq;
-    let s = settlement.trunc() as i64;
-    let (fy, fm, fd) = serial_to_civil(first, date1904);
-    let (ps_y, ps_m, ps_d) = if from_issue {
-        serial_to_civil(issue, date1904)
-    } else {
-        (fy, fm, fd)
-    };
-    let (mut pe_y, mut pe_m, mut pe_d) = (fy, fm, fd);
-    let mut ps = civil_to_serial(ps_y, ps_m, ps_d, date1904);
-    let mut pe = civil_to_serial(fy, fm, fd, date1904);
-    let mut acc = 0.0;
-    let mut guard = 0;
-    loop {
-        if ps >= s {
-            break;
+
+    // Excel: the accrued fraction is built coupon period by coupon period, and
+    // every segment is `days in the partial period / days in the whole period`
+    // under the basis — never days/yearDays (that is what made basis 1 come out
+    // ~0.8% too high). A coupon date at/before the 1900 origin yields 0.
+    let pcd = prev_coupon(settlement_s, first_s, freq, date1904);
+    if pcd <= 0 {
+        return Ok(0.0);
+    }
+
+    let mut coup_date = add_coupon_months(first_s, -months, date1904);
+    if settlement_s > first_s && calc_method != 0.0 {
+        while coup_date < settlement_s {
+            coup_date = add_coupon_months(coup_date, months, date1904);
         }
-        let eff_end = pe.min(s);
-        acc += par * coupon * year_fraction(ps as f64, eff_end as f64, basis, date1904);
-        let (ny, nm, nd) = shift_months_fwd(pe_y, pe_m, pe_d, months, date1904);
-        ps = pe;
-        pe = civil_to_serial(ny, nm, nd, date1904);
-        pe_y = ny;
-        pe_m = nm;
-        pe_d = nd;
+    }
+
+    let mut first_date = issue_s.max(coup_date);
+    let mut days = day_count(first_date as f64, settlement_s as f64, basis, date1904);
+    if pcd >= issue_s {
+        // Fresh issue inside the first coupon period: Excel switches the
+        // accrued-day count to the 30/360 convention even under basis 1.
+        let dfs_basis = if basis == 0 { 0 } else { 4 };
+        days = day_count(first_date as f64, settlement_s as f64, dfs_basis, date1904);
+    }
+    if settlement_s < first_date {
+        days = -days;
+    }
+
+    let mut coupdays = coup_days(coup_date, first_s, freq, basis, date1904);
+    let mut accrued = days / coupdays;
+    let mut start = coup_date;
+    let mut guard = 0;
+    while start > issue_s {
+        let end = start;
+        start = add_coupon_months(start, -months, date1904);
+        first_date = issue_s.max(start);
+        let dfe = day_count(first_date as f64, end as f64, basis, date1904);
+        if basis == 0 {
+            days = if end >= first_date || issue_s <= start {
+                dfe
+            } else {
+                -dfe
+            };
+            coupdays = coup_days(start, end, freq, basis, date1904);
+        } else {
+            days = if end < first_date { -dfe } else { dfe };
+            if basis == 3 {
+                coupdays = 365.0 / freq as f64;
+            } else {
+                let dse = day_count(start as f64, end as f64, basis, date1904);
+                coupdays = if end < start { -dse } else { dse };
+            }
+        }
+        accrued += if issue_s <= start {
+            if calc_method != 0.0 { 1.0 } else { 0.0 }
+        } else {
+            days / coupdays
+        };
         guard += 1;
         if guard > 10000 {
             break;
         }
     }
-    acc
+    Ok(par * coupon / freq as f64 * accrued)
 }
 
 fn accrint_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
@@ -1240,7 +1393,7 @@ fn accrint_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let freq = arg_num(ctx, &args[5])?.trunc();
     let basis = check_basis(opt_num(ctx, args, 6, 0.0)?)?;
     let calc_method = opt_num(ctx, args, 7, 1.0)?;
-    if coupon <= 0.0 || par <= 0.0 || (freq != 1.0 && freq != 2.0 && freq != 4.0 && freq != 12.0) {
+    if coupon <= 0.0 || par <= 0.0 || (freq != 1.0 && freq != 2.0 && freq != 4.0) {
         return Err(CalcError::Num);
     }
     let i = issue.trunc();
@@ -1249,7 +1402,7 @@ fn accrint_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     if i >= f || i >= s {
         return Err(CalcError::Num);
     }
-    let total = accrint_total(
+    ok_num(accrint_value(
         issue,
         first,
         settlement,
@@ -1257,10 +1410,9 @@ fn accrint_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
         par,
         freq as i64,
         basis,
-        calc_method != 0.0,
+        calc_method,
         ctx.date1904,
-    );
-    ok_num(total)
+    )?)
 }
 
 fn accrintm_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
@@ -1393,15 +1545,37 @@ fn t_bill_eq_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError>
     if settlement.trunc() >= maturity.trunc() || discount <= 0.0 {
         return Err(CalcError::Num);
     }
-    let dsm = day_count(settlement, maturity, 2, ctx.date1904);
-    if dsm > 360.0 {
+    let dsm = (maturity.trunc() - settlement.trunc()) as f64;
+    let (y, _, _) = serial_to_civil(settlement, ctx.date1904);
+    let year_days = if is_leap_system(y, ctx.date1904) {
+        366.0
+    } else {
+        365.0
+    };
+    if dsm > year_days {
         return Err(CalcError::Num);
     }
     let denom = 360.0 - discount * dsm;
     if denom == 0.0 {
         return Err(CalcError::Div0);
     }
-    ok_num((365.0 * discount) / denom)
+    let mut result = (365.0 * discount) / denom;
+    // For maturities past 182 days Excel switches to the equivalent-yield
+    // form; without it TBILLEQ(DATE(2008,3,31),DATE(2008,11,1),0.0914) is
+    // ~0.0007 too high.
+    if dsm > 182.0 {
+        let price = 100.0 * (1.0 - discount * dsm / 360.0);
+        let fraction = dsm / 365.0;
+        let disc = fraction * fraction - (fraction * 2.0 - 1.0) * (1.0 - 100.0 / price);
+        result = (-fraction + disc.sqrt()) / (fraction - 0.5);
+        if !result.is_finite() {
+            return Err(CalcError::Num);
+        }
+    }
+    if result < 0.0 {
+        return Err(CalcError::Num);
+    }
+    ok_num(result)
 }
 
 fn price_impl(
@@ -1516,32 +1690,45 @@ fn duration_value(
     basis: u8,
     date1904: bool,
 ) -> Result<f64, CalcError> {
-    let (next, prev, n) = coupon_period(settlement, maturity, freq, date1904)?;
-    let a = day_count(prev as f64, settlement, basis, date1904);
-    let e = day_count(prev as f64, next as f64, basis, date1904);
-    let dsc = day_count(settlement, next as f64, basis, date1904);
-    if e == 0.0 {
+    let s = settlement.trunc() as i64;
+    let m = maturity.trunc() as i64;
+    if s >= m {
         return Err(CalcError::Num);
     }
-    let r = ann_yield / freq as f64;
+    // Excel: Macaulay duration weights each coupon and the redemption by its
+    // PV. The index of the first coupon is (coupdays - coupdaybs)/coupdays —
+    // the fraction of the coupon period remaining after settlement. Crucially
+    // the denominator is the plain sum of PVs (the dirty price): subtracting
+    // accrued interest here, as PRICE does, shifts the result by ~0.5 years.
+    let pcd = prev_coupon(s, m, freq, date1904);
+    let coupdaybs = day_count(pcd as f64, settlement, basis, date1904);
+    let coupdays = coup_days(s, m, freq, basis, date1904);
+    if coupdays == 0.0 {
+        return Err(CalcError::Num);
+    }
+    let n = coupon_count(s, m, freq, date1904);
+    if n == 0 {
+        return Err(CalcError::Num);
+    }
+    let base_shift = (coupdays - coupdaybs) / coupdays - 1.0;
+    let r = 1.0 + ann_yield / freq as f64;
     let c = 100.0 * coupon / freq as f64;
-    let base = dsc / e;
-    let mut price = -c * a / e;
-    let mut num = 0.0;
-    let mut t = base;
-    for _ in 0..n {
-        let pv = c / (1.0 + r).powf(t);
-        price += pv;
-        num += t * pv;
-        t += 1.0;
+    let mut duration = 0.0;
+    let mut den = 0.0;
+    for i in 1..=n {
+        let index = i as f64 + base_shift;
+        let pv = c / r.powf(index);
+        duration += index * pv;
+        den += pv;
     }
-    let pv_red = 100.0 / (1.0 + r).powf(t - 1.0);
-    num += (t - 1.0) * pv_red;
-    price += pv_red;
-    if price == 0.0 || !price.is_finite() {
+    let index = n as f64 + base_shift;
+    let pv = 100.0 / r.powf(index);
+    duration += index * pv;
+    den += pv;
+    if den == 0.0 || !den.is_finite() || !duration.is_finite() {
         return Err(CalcError::Num);
     }
-    Ok(num / price / freq as f64)
+    Ok(duration / den / freq as f64)
 }
 
 fn duration_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
@@ -1585,6 +1772,587 @@ fn mduration_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError>
         ctx.date1904,
     )?;
     ok_num(d / (1.0 + ann_yield / freq as f64))
+}
+
+// -- French linear amortization and interest-at-maturity securities -------------
+
+fn amorlinc_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    let cost = arg_num(ctx, &args[0])?;
+    let date_purchased = arg_num(ctx, &args[1])?;
+    let first_period = arg_num(ctx, &args[2])?;
+    let salvage = arg_num(ctx, &args[3])?;
+    let mut period = arg_num(ctx, &args[4])?;
+    let rate = arg_num(ctx, &args[5])?;
+    let basis = check_basis(opt_num(ctx, args, 6, 0.0)?)?;
+    if cost <= 0.0
+        || salvage < 0.0
+        || cost < salvage
+        || date_purchased.trunc() > first_period.trunc()
+        || period < 0.0
+        || rate <= 0.0
+        || basis == 2
+    {
+        return Err(CalcError::Num);
+    }
+    // Excel rounds periods above 1 down and period 0 stays 0.
+    period = if period > 1.0 {
+        period.floor()
+    } else {
+        period.ceil()
+    };
+    let total_dep = cost - salvage;
+    let base_dep = cost * rate;
+    let frac = day_count(date_purchased, first_period, basis, ctx.date1904)
+        / days_in_year(date_purchased, first_period, basis, ctx.date1904);
+    let life = (total_dep / base_dep - frac).ceil();
+    if life < 0.0 {
+        return ok_num(0.0);
+    }
+    let result = if period == 0.0 {
+        base_dep * frac
+    } else if period == life {
+        total_dep - base_dep * (frac + period - 1.0)
+    } else if period > life {
+        0.0
+    } else {
+        base_dep
+    };
+    ok_num(result)
+}
+
+fn pricemat_value(
+    settlement: f64,
+    maturity: f64,
+    issue: f64,
+    rate: f64,
+    yld: f64,
+    basis: u8,
+    date1904: bool,
+) -> Result<f64, CalcError> {
+    let b = days_in_year_of(settlement, basis, date1904);
+    let dsm = day_count(settlement, maturity, basis, date1904);
+    let dim = day_count(issue, maturity, basis, date1904);
+    let a = day_count(issue, settlement, basis, date1904);
+    if b == 0.0 {
+        return Err(CalcError::Num);
+    }
+    let denom = 1.0 + dsm / b * yld;
+    if denom == 0.0 {
+        return Err(CalcError::Num);
+    }
+    let price = (100.0 + dim / b * rate * 100.0) / denom - a / b * rate * 100.0;
+    if price.is_finite() {
+        Ok(price)
+    } else {
+        Err(CalcError::Num)
+    }
+}
+
+fn pricemat_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    let settlement = arg_num(ctx, &args[0])?;
+    let maturity = arg_num(ctx, &args[1])?;
+    let issue = arg_num(ctx, &args[2])?;
+    let rate = arg_num(ctx, &args[3])?;
+    let yld = arg_num(ctx, &args[4])?;
+    let basis = check_basis(opt_num(ctx, args, 5, 0.0)?)?;
+    if rate < 0.0 || yld < 0.0 {
+        return Err(CalcError::Num);
+    }
+    if settlement.trunc() >= maturity.trunc() || maturity.trunc() <= issue.trunc() {
+        return Err(CalcError::Num);
+    }
+    ok_num(pricemat_value(
+        settlement,
+        maturity,
+        issue,
+        rate,
+        yld,
+        basis,
+        ctx.date1904,
+    )?)
+}
+
+fn yieldmat_value(
+    settlement: f64,
+    maturity: f64,
+    issue: f64,
+    rate: f64,
+    price: f64,
+    basis: u8,
+    date1904: bool,
+) -> Result<f64, CalcError> {
+    let b = days_in_year_of(settlement, basis, date1904);
+    let dsm = day_count(settlement, maturity, basis, date1904);
+    let dim = day_count(issue, maturity, basis, date1904);
+    let a = day_count(issue, settlement, basis, date1904);
+    if b == 0.0 || dsm == 0.0 {
+        return Err(CalcError::Num);
+    }
+    let denom = price / 100.0 + a / b * rate;
+    if denom == 0.0 {
+        return Err(CalcError::Num);
+    }
+    let result = ((1.0 + dim / b * rate) / denom - 1.0) / (dsm / b);
+    if result.is_finite() {
+        Ok(result)
+    } else {
+        Err(CalcError::Num)
+    }
+}
+
+fn yieldmat_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    let settlement = arg_num(ctx, &args[0])?;
+    let maturity = arg_num(ctx, &args[1])?;
+    let issue = arg_num(ctx, &args[2])?;
+    let rate = arg_num(ctx, &args[3])?;
+    let price = arg_num(ctx, &args[4])?;
+    let basis = check_basis(opt_num(ctx, args, 5, 0.0)?)?;
+    if rate < 0.0 || price <= 0.0 {
+        return Err(CalcError::Num);
+    }
+    if settlement.trunc() >= maturity.trunc() || maturity.trunc() <= issue.trunc() {
+        return Err(CalcError::Num);
+    }
+    ok_num(yieldmat_value(
+        settlement,
+        maturity,
+        issue,
+        rate,
+        price,
+        basis,
+        ctx.date1904,
+    )?)
+}
+
+// -- odd first / last coupon securities -----------------------------------------
+
+/// Days between two serials under `basis`, forced to 0 when the start is after
+/// the end (Excel's getPositiveDaysBetween).
+fn positive_days(s1: f64, s2: f64, basis: u8, date1904: bool) -> f64 {
+    if s1 >= s2 {
+        0.0
+    } else {
+        day_count(s1, s2, basis, date1904)
+    }
+}
+
+fn oddfprice_value(
+    settlement: f64,
+    maturity: f64,
+    issue: f64,
+    first: f64,
+    rate: f64,
+    yld: f64,
+    redemption: f64,
+    freq: i64,
+    basis: u8,
+    date1904: bool,
+) -> Result<f64, CalcError> {
+    let s = settlement.trunc() as i64;
+    let m = maturity.trunc() as i64;
+    let i = issue.trunc() as i64;
+    let f = first.trunc() as i64;
+    if m <= f || f <= s || s <= i {
+        return Err(CalcError::Num);
+    }
+    // The odd first coupon period must align with the coupon lattice.
+    if !coupon_lattice_ok(m, f, freq, date1904) || prev_coupon(i, m, freq, date1904) < 0 {
+        return Err(CalcError::Num);
+    }
+    let dfc = positive_days(i as f64, f as f64, basis, date1904);
+    let e = coup_days(s, f, freq, basis, date1904);
+    if e == 0.0 {
+        return Err(CalcError::Num);
+    }
+    let price = if dfc < e {
+        oddf_short(
+            s, m, i, f, rate, yld, redemption, freq, basis, dfc, e, date1904,
+        )
+    } else {
+        oddf_long(s, m, i, f, rate, yld, redemption, freq, basis, e, date1904)
+    };
+    if price.is_finite() {
+        Ok(price)
+    } else {
+        Err(CalcError::Num)
+    }
+}
+
+/// The coupon lattice check: `date2` must fall on a coupon date counted back
+/// from `date1` (Excel's validDaysBetweenIsWholeFrequencyByTwoDate).
+fn coupon_lattice_ok(date1: i64, date2: i64, freq: i64, date1904: bool) -> bool {
+    let (y1, m1, d1) = serial_to_civil(date1 as f64, date1904);
+    let (y2, m2, d2) = serial_to_civil(date2 as f64, date1904);
+    let same_day = d1 == d2
+        || (d1 == days_in_month(y1, m1, date1904) && d2 == days_in_month(y2, m2, date1904));
+    if !same_day {
+        return false;
+    }
+    let months = (y2 - y1) * 12 + (m2 - m1);
+    months % (12 / freq) == 0
+}
+
+fn oddf_short(
+    s: i64,
+    m: i64,
+    i: i64,
+    f: i64,
+    rate: f64,
+    yld: f64,
+    redemption: f64,
+    freq: i64,
+    basis: u8,
+    dfc: f64,
+    e: f64,
+    date1904: bool,
+) -> f64 {
+    let n = coupon_count(s, m, freq, date1904);
+    let dsc = positive_days(s as f64, f as f64, basis, date1904);
+    let y = yld / freq as f64;
+    let c = 100.0 * rate / freq as f64;
+    let mut result = redemption / (1.0 + y).powf(n as f64 - 1.0 + dsc / e);
+    result += c * dfc / e / (1.0 + y).powf(dsc / e);
+    for k in 2..=n {
+        result += c / (1.0 + y).powf(k as f64 - 1.0 + dsc / e);
+    }
+    let a = positive_days(i as f64, s as f64, basis, date1904);
+    result - c * a / e
+}
+
+fn oddf_long(
+    s: i64,
+    m: i64,
+    i: i64,
+    f: i64,
+    rate: f64,
+    yld: f64,
+    redemption: f64,
+    freq: i64,
+    basis: u8,
+    e: f64,
+    date1904: bool,
+) -> f64 {
+    let n = coupon_count(f, m, freq, date1904);
+    let nq = quasi_coupon_count(f, s, 12 / freq, date1904);
+    let dsc = if basis == 2 || basis == 3 {
+        let cn = next_coupon(s, f, freq, date1904);
+        positive_days(s as f64, cn as f64, basis, date1904)
+    } else {
+        let cp = prev_coupon(s, f, freq, date1904);
+        e - day_count(cp as f64, s as f64, basis, date1904)
+    };
+    let y = yld / freq as f64;
+    let c = 100.0 * rate / freq as f64;
+    let mut result = redemption / (1.0 + y).powf(n as f64 + nq as f64 + dsc / e);
+    let nc = coupon_count(i, f, freq, date1904);
+    let mut late = f;
+    let mut dci_sum = 0.0;
+    let mut ai_sum = 0.0;
+    for idx in (1..=nc).rev() {
+        let early = add_coupon_months(late, -(12 / freq), date1904);
+        let nli = if basis == 1 { (late - early) as f64 } else { e };
+        let dci = if idx > 1 {
+            nli
+        } else {
+            positive_days(i as f64, late as f64, basis, date1904)
+        };
+        dci_sum += dci / nli;
+        let start = if i > early { i } else { early };
+        let end = if s < late { s } else { late };
+        let ai = positive_days(start as f64, end as f64, basis, date1904);
+        ai_sum += ai / nli;
+        late = early;
+    }
+    result += c * dci_sum / (1.0 + y).powf(nq as f64 + dsc / e);
+    for k in 1..=n {
+        result += c / (1.0 + y).powf(k as f64 + nq as f64 + dsc / e);
+    }
+    result - c * ai_sum
+}
+
+/// Number of whole quasi-coupon periods of `months` length that fit between
+/// `start` and `end` (Excel's getCouponsNumber).
+fn quasi_coupon_count(start: i64, end: i64, months: i64, date1904: bool) -> i64 {
+    let (sy, sm, sd) = serial_to_civil(start as f64, date1904);
+    let (ey, em, ed) = serial_to_civil(end as f64, date1904);
+    let end_of_month_start = sd == days_in_month(sy, sm, date1904);
+    let end_of_month =
+        if !end_of_month_start && sm != 1 && sd > 28 && sd < days_in_month(sy, sm, date1904) {
+            ed == days_in_month(ey, em, date1904)
+        } else {
+            end_of_month_start
+        };
+    // The anchor is `end` stepped 0 months, optionally clamped to month-end.
+    let mut new_date = end;
+    if end_of_month {
+        let (y, m, _) = serial_to_civil(end as f64, date1904);
+        new_date = civil_to_serial(y, m, days_in_month(y, m, date1904), date1904);
+    }
+    let mut coupons = 1i64 + i64::from(end < new_date);
+    let mut front = add_coupon_months(new_date, months, date1904);
+    while !(front >= end) {
+        front = add_coupon_months(front, months, date1904);
+        coupons += 1;
+    }
+    coupons
+}
+
+fn oddfprice_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    let settlement = arg_num(ctx, &args[0])?;
+    let maturity = arg_num(ctx, &args[1])?;
+    let issue = arg_num(ctx, &args[2])?;
+    let first = arg_num(ctx, &args[3])?;
+    let rate = arg_num(ctx, &args[4])?;
+    let yld = arg_num(ctx, &args[5])?;
+    let redemption = arg_num(ctx, &args[6])?;
+    let freq = check_freq(arg_num(ctx, &args[7])?)?;
+    let basis = check_basis(opt_num(ctx, args, 8, 0.0)?)?;
+    if rate < 0.0 || yld < 0.0 || redemption <= 0.0 {
+        return Err(CalcError::Num);
+    }
+    ok_num(oddfprice_value(
+        settlement,
+        maturity,
+        issue,
+        first,
+        rate,
+        yld,
+        redemption,
+        freq,
+        basis,
+        ctx.date1904,
+    )?)
+}
+
+fn oddfyield_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    let settlement = arg_num(ctx, &args[0])?;
+    let maturity = arg_num(ctx, &args[1])?;
+    let issue = arg_num(ctx, &args[2])?;
+    let first = arg_num(ctx, &args[3])?;
+    let rate = arg_num(ctx, &args[4])?;
+    let price = arg_num(ctx, &args[5])?;
+    let redemption = arg_num(ctx, &args[6])?;
+    let freq = check_freq(arg_num(ctx, &args[7])?)?;
+    let basis = check_basis(opt_num(ctx, args, 8, 0.0)?)?;
+    if rate < 0.0 || price <= 0.0 || redemption <= 0.0 {
+        return Err(CalcError::Num);
+    }
+    let s = settlement.trunc() as i64;
+    let m = maturity.trunc() as i64;
+    let i = issue.trunc() as i64;
+    let f = first.trunc() as i64;
+    if m <= f || f <= s || s <= i {
+        return Err(CalcError::Num);
+    }
+    if !coupon_lattice_ok(m, f, freq, ctx.date1904) || prev_coupon(i, m, freq, ctx.date1904) < 0 {
+        return Err(CalcError::Num);
+    }
+    let dsm = day_count(settlement, maturity, basis, ctx.date1904);
+    let guess = (rate * dsm * 100.0 - (price - 100.0))
+        / ((price - 100.0) * 0.25 * (1.0 + 2.0 * dsm) + dsm * 100.0);
+    let f = |x: f64| {
+        price
+            - oddfprice_value(
+                settlement,
+                maturity,
+                issue,
+                first,
+                rate,
+                x,
+                redemption,
+                freq,
+                basis,
+                ctx.date1904,
+            )
+            .unwrap_or(f64::NAN)
+    };
+    let df = |x: f64| {
+        let h = 1e-7 * x.abs().max(1.0);
+        (f(x + h) - f(x)) / h
+    };
+    let x = solve_robust(&f, &df, &[guess, 0.1, 0.05, 0.01, 0.5]).ok_or(CalcError::Num)?;
+    ok_num(x)
+}
+
+fn oddlprice_value(
+    settlement: f64,
+    maturity: f64,
+    last_interest: f64,
+    rate: f64,
+    yld: f64,
+    redemption: f64,
+    freq: i64,
+    basis: u8,
+    date1904: bool,
+) -> Result<f64, CalcError> {
+    let s = settlement.trunc() as i64;
+    let m = maturity.trunc() as i64;
+    let l = last_interest.trunc() as i64;
+    if m <= s || s <= l {
+        return Err(CalcError::Num);
+    }
+    if prev_coupon(l, m, freq, date1904) < 0 {
+        return Err(CalcError::Num);
+    }
+    let coup = last_coupon_anchor(m, l, freq, date1904);
+    let f_ai = odd_frac(l, s, coup, freq, basis, date1904);
+    let f_dci = odd_frac(l, m, coup, freq, basis, date1904);
+    let f_dsci = odd_frac(s, m, coup, freq, basis, date1904);
+    let denom = yld * f_dsci + freq as f64;
+    if denom == 0.0 {
+        return Err(CalcError::Num);
+    }
+    let result = (redemption * freq as f64
+        + 100.0 * rate * (f_dci - f_ai * (1.0 + yld * f_dsci / freq as f64)))
+        / denom;
+    if result.is_finite() {
+        Ok(result)
+    } else {
+        Err(CalcError::Num)
+    }
+}
+
+/// The anchor coupon date for the odd-last period: the coupon on/after
+/// `maturity` that shares the last interest date's day-of-month.
+fn last_coupon_anchor(maturity: i64, last: i64, freq: i64, date1904: bool) -> i64 {
+    let months = 12 / freq;
+    let (my, mm, md) = serial_to_civil(maturity as f64, date1904);
+    let (_, lm, ld) = serial_to_civil(last as f64, date1904);
+    // Set the last-interest date into the maturity year, then step forward to
+    // the first coupon on/after maturity.
+    let mut y = my;
+    let mut m = lm;
+    let mut d = ld;
+    if days_from_civil(y, m, d) > days_from_civil(my, mm, md) {
+        y -= 1;
+    }
+    let mut guard = 0;
+    while days_from_civil(y, m, d) < days_from_civil(my, mm, md) {
+        let (ny, nm, nd) = shift_months_fwd(y, m, d, months, date1904);
+        y = ny;
+        m = nm;
+        d = nd;
+        guard += 1;
+        if guard > 10000 {
+            break;
+        }
+    }
+    civil_to_serial(y, m, d, date1904)
+}
+
+/// Number of coupon periods (fraction included) between `start` and `end`,
+/// anchored on the odd-last coupon lattice (Excel's _getFrac).
+fn odd_frac(start: i64, end: i64, coup: i64, freq: i64, basis: u8, date1904: bool) -> f64 {
+    let months = 12 / freq;
+    let (sy, sm, sd) = serial_to_civil(start as f64, date1904);
+    // Step `coup` back to the coupon period containing `start`.
+    let (_, mut m, mut d) = serial_to_civil(coup as f64, date1904);
+    let mut y = sy;
+    if days_from_civil(y, m, d) < days_from_civil(sy, sm, sd) {
+        y += 1;
+    }
+    let mut guard = 0;
+    while days_from_civil(y, m, d) > days_from_civil(sy, sm, sd) {
+        let (ny, nm, nd) = shift_months(y, m, d, months, date1904);
+        y = ny;
+        m = nm;
+        d = nd;
+        guard += 1;
+        if guard > 10000 {
+            break;
+        }
+    }
+    let early = civil_to_serial(y, m, d, date1904);
+    let late_serial = add_coupon_months(early, months, date1904);
+    if late_serial >= end {
+        let days = day_count(start as f64, end as f64, basis, date1904);
+        let coupdays = coup_days(early, late_serial, freq, basis, date1904);
+        return if coupdays == 0.0 {
+            0.0
+        } else {
+            days / coupdays
+        };
+    }
+    let days_f = day_count(start as f64, late_serial as f64, basis, date1904);
+    let coupdays_f = coup_days(early, late_serial, freq, basis, date1904);
+    let mut result = if coupdays_f == 0.0 {
+        0.0
+    } else {
+        days_f / coupdays_f
+    };
+    let mut early_d = late_serial;
+    let mut late_d = add_coupon_months(late_serial, months, date1904);
+    while late_d < end {
+        early_d = add_coupon_months(early_d, months, date1904);
+        late_d = add_coupon_months(late_d, months, date1904);
+        result += 1.0;
+    }
+    let days_l = day_count(early_d as f64, end as f64, basis, date1904);
+    let coupdays_l = coup_days(early_d, late_d, freq, basis, date1904);
+    result
+        + if coupdays_l == 0.0 {
+            0.0
+        } else {
+            days_l / coupdays_l
+        }
+}
+
+fn oddlprice_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    let settlement = arg_num(ctx, &args[0])?;
+    let maturity = arg_num(ctx, &args[1])?;
+    let last_interest = arg_num(ctx, &args[2])?;
+    let rate = arg_num(ctx, &args[3])?;
+    let yld = arg_num(ctx, &args[4])?;
+    let redemption = arg_num(ctx, &args[5])?;
+    let freq = check_freq(arg_num(ctx, &args[6])?)?;
+    let basis = check_basis(opt_num(ctx, args, 7, 0.0)?)?;
+    if rate < 0.0 || yld < 0.0 || redemption <= 0.0 {
+        return Err(CalcError::Num);
+    }
+    ok_num(oddlprice_value(
+        settlement,
+        maturity,
+        last_interest,
+        rate,
+        yld,
+        redemption,
+        freq,
+        basis,
+        ctx.date1904,
+    )?)
+}
+
+fn oddlyield_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    let settlement = arg_num(ctx, &args[0])?;
+    let maturity = arg_num(ctx, &args[1])?;
+    let last_interest = arg_num(ctx, &args[2])?;
+    let rate = arg_num(ctx, &args[3])?;
+    let price = arg_num(ctx, &args[4])?;
+    let redemption = arg_num(ctx, &args[5])?;
+    let freq = check_freq(arg_num(ctx, &args[6])?)?;
+    let basis = check_basis(opt_num(ctx, args, 7, 0.0)?)?;
+    if rate < 0.0 || price <= 0.0 || redemption <= 0.0 {
+        return Err(CalcError::Num);
+    }
+    let s = settlement.trunc() as i64;
+    let m = maturity.trunc() as i64;
+    let l = last_interest.trunc() as i64;
+    if m <= s || s <= l {
+        return Err(CalcError::Num);
+    }
+    if prev_coupon(l, m, freq, ctx.date1904) < 0 {
+        return Err(CalcError::Num);
+    }
+    let coup = last_coupon_anchor(m, l, freq, ctx.date1904);
+    let f_ai = odd_frac(l, s, coup, freq, basis, ctx.date1904);
+    let f_dci = odd_frac(l, m, coup, freq, basis, ctx.date1904);
+    let f_dsci = odd_frac(s, m, coup, freq, basis, ctx.date1904);
+    let denom = f_dsci * price + 100.0 * rate * f_ai * f_dsci / freq as f64;
+    if denom == 0.0 {
+        return Err(CalcError::Num);
+    }
+    let result = (freq as f64 * (redemption - price) + 100.0 * rate * (f_dci - f_ai)) / denom;
+    ok_num(result)
 }
 
 // -- registration -------------------------------------------------------------
@@ -2012,6 +2780,69 @@ const YIELD: FuncSpec = FuncSpec {
     func: yield_fn,
 };
 
+const AMORLINC: FuncSpec = FuncSpec {
+    name: "AMORLINC",
+    min_args: 6,
+    max_args: Some(7),
+    volatile: false,
+    array_aware: false,
+    func: amorlinc_fn,
+};
+
+const PRICEMAT: FuncSpec = FuncSpec {
+    name: "PRICEMAT",
+    min_args: 5,
+    max_args: Some(6),
+    volatile: false,
+    array_aware: false,
+    func: pricemat_fn,
+};
+
+const YIELDMAT: FuncSpec = FuncSpec {
+    name: "YIELDMAT",
+    min_args: 5,
+    max_args: Some(6),
+    volatile: false,
+    array_aware: false,
+    func: yieldmat_fn,
+};
+
+const ODDFPRICE: FuncSpec = FuncSpec {
+    name: "ODDFPRICE",
+    min_args: 8,
+    max_args: Some(9),
+    volatile: false,
+    array_aware: false,
+    func: oddfprice_fn,
+};
+
+const ODDFYIELD: FuncSpec = FuncSpec {
+    name: "ODDFYIELD",
+    min_args: 8,
+    max_args: Some(9),
+    volatile: false,
+    array_aware: false,
+    func: oddfyield_fn,
+};
+
+const ODDLPRICE: FuncSpec = FuncSpec {
+    name: "ODDLPRICE",
+    min_args: 7,
+    max_args: Some(8),
+    volatile: false,
+    array_aware: false,
+    func: oddlprice_fn,
+};
+
+const ODDLYIELD: FuncSpec = FuncSpec {
+    name: "ODDLYIELD",
+    min_args: 7,
+    max_args: Some(8),
+    volatile: false,
+    array_aware: false,
+    func: oddlyield_fn,
+};
+
 pub fn register(r: &mut Registry) {
     r.register(&PV);
     r.register(&FV);
@@ -2060,6 +2891,13 @@ pub fn register(r: &mut Registry) {
     r.register(&MDURATION);
     r.register(&PRICE);
     r.register(&YIELD);
+    r.register(&AMORLINC);
+    r.register(&PRICEMAT);
+    r.register(&YIELDMAT);
+    r.register(&ODDFPRICE);
+    r.register(&ODDFYIELD);
+    r.register(&ODDLPRICE);
+    r.register(&ODDLYIELD);
 }
 
 #[cfg(test)]
@@ -2447,5 +3285,182 @@ mod tests {
             g.calc("=RATE(0, -200, 8000)"),
             crate::turbo::calc::testkit::Outcome::Err(CalcError::Num)
         );
+    }
+
+    // ---- Lane B round-2 oracle cases (Excel-measured values) ----------------
+
+    #[test]
+    fn lane_b_basis1_day_counts_match_excel() {
+        let g = Grid::empty();
+        // DISC: 2018-07-01 -> 2048-01-01, basis 1. The 365-day year would give
+        // 0.000685899; Excel keeps the 365.258-day average.
+        near(
+            g.num("=DISC(43282, 54058, 97.975, 100, 1)"),
+            0.000686384169,
+            1e-11,
+        );
+        near(
+            g.num("=PRICEDISC(39763, 44256, 0.0625, 100, 1)"),
+            23.1252444271,
+            1e-8,
+        );
+        near(
+            g.num("=YIELDDISC(39763, 44256, 98.45, 100, 1)"),
+            0.00128000671242,
+            1e-12,
+        );
+        near(
+            g.num("=ACCRINTM(40941, 44266, 0.1, 1000, 1)"),
+            910.210785655626,
+            1e-8,
+        );
+        near(
+            g.num("=ACCRINT(39507, 39691, 39569, 0.1, 1000, 2, 1)"),
+            16.847826086957,
+            1e-9,
+        );
+        near(
+            g.num("=DURATION(43282, 54058, 0.08, 0.09, 1, 1)"),
+            10.8778775299,
+            1e-7,
+        );
+        near(
+            g.num("=MDURATION(43282, 54058, 0.08, 0.09, 1, 1)"),
+            9.97970415591,
+            1e-7,
+        );
+    }
+
+    #[test]
+    fn lane_b_error_typing_matches_excel() {
+        let g = Grid::empty();
+        // DOLLARDE/DOLLARFR: a fraction in (0,1) truncates to 0 -> #DIV/0!.
+        assert_eq!(
+            g.calc("=DOLLARDE(1.02, 0.1)"),
+            crate::turbo::calc::testkit::Outcome::Err(CalcError::Div0)
+        );
+        assert_eq!(
+            g.calc("=DOLLARFR(1.02, 0.1)"),
+            crate::turbo::calc::testkit::Outcome::Err(CalcError::Div0)
+        );
+        // EFFECT/NOMINAL reject a boolean compounding argument.
+        assert_eq!(
+            g.calc("=EFFECT(0.0525, TRUE)"),
+            crate::turbo::calc::testkit::Outcome::Err(CalcError::Value)
+        );
+        assert_eq!(
+            g.calc("=NOMINAL(0.053543, TRUE)"),
+            crate::turbo::calc::testkit::Outcome::Err(CalcError::Value)
+        );
+        // FVSCHEDULE rejects a boolean principal.
+        assert_eq!(
+            g.calc("=FVSCHEDULE(TRUE, 0.1)"),
+            crate::turbo::calc::testkit::Outcome::Err(CalcError::Value)
+        );
+        // FV(-1, 0, ...) is the degenerate (1+rate)^nper case.
+        assert_eq!(
+            g.calc("=FV(-1, 0, -200, -500, 0)"),
+            crate::turbo::calc::testkit::Outcome::Err(CalcError::Num)
+        );
+        // MIRR with no negative cash flows: Excel reports #DIV/0!.
+        let g2 = Grid::empty().row(
+            "A1",
+            &[700000.0, 120000.0, 150000.0, 180000.0, 210000.0, 260000.0],
+        );
+        assert_eq!(
+            g2.calc("=MIRR(A1:F1, 0.1, 0.12)"),
+            crate::turbo::calc::testkit::Outcome::Err(CalcError::Div0)
+        );
+        // SYD: per beyond life is #NUM!.
+        assert_eq!(
+            g.calc("=SYD(300000, 75000, 10, 11)"),
+            crate::turbo::calc::testkit::Outcome::Err(CalcError::Num)
+        );
+        // VDB fractional period matches Excel (not 125.82912).
+        near(
+            g.num("=VDB(24000, 3000, 10, 6.1, 6.2, 2, 0)"),
+            123.3125376,
+            1e-8,
+        );
+        // COUPPCD clamps pre-1900 coupon dates to serial 0.
+        near(g.num("=COUPPCD(1, 40862, 2, 1)"), 0.0, 1e-9);
+        // TBILLEQ over 182 days switches to the equivalent-yield form.
+        near(g.num("=TBILLEQ(39538, 39753, 0.0914)"), 0.09730435852, 1e-9);
+        // FVSCHEDULE with a blank principal compounds from 0.
+        near(g.num("=FVSCHEDULE(0, {0.09;0.11;0.1})"), 0.0, 1e-12);
+    }
+
+    #[test]
+    fn lane_b_new_functions_match_excel() {
+        let g = Grid::empty();
+        // AMORLINC (French linear amortization).
+        near(
+            g.num("=AMORLINC(2400, DATE(2008,8,19), DATE(2008,12,31), 300, 1, 0.15, 0)"),
+            360.0,
+            1e-9,
+        );
+        near(
+            g.num("=AMORLINC(2400, DATE(2008,8,19), DATE(2008,12,31), 300, 0, 0.15, 0)"),
+            132.0,
+            1e-9,
+        );
+        near(
+            g.num("=AMORLINC(2400, DATE(2008,8,19), DATE(2008,12,31), 300, 6, 0.15, 0)"),
+            168.0,
+            1e-7,
+        );
+        near(
+            g.num("=AMORLINC(2400, DATE(2008,8,19), DATE(2008,12,31), 300, 7, 0.15, 0)"),
+            0.0,
+            1e-9,
+        );
+        near(
+            g.num("=AMORLINC(2400, DATE(2008,8,19), DATE(2008,12,31), 300, 0, 0.15, 1)"),
+            131.803278688525,
+            1e-8,
+        );
+        near(
+            g.num("=AMORLINC(2400, DATE(2008,8,19), DATE(2008,12,31), 300, 0, 0.15, 3)"),
+            132.164383561644,
+            1e-8,
+        );
+        near(
+            g.num("=AMORLINC(2400, DATE(2008,8,19), DATE(2008,12,31), 300, 0, 0.15, 4)"),
+            131.0,
+            1e-8,
+        );
+        // PRICEMAT / YIELDMAT (interest at maturity).
+        near(
+            g.num(
+                "=PRICEMAT(DATE(2008,11,11), DATE(2021,3,1), DATE(2008,10,15), 0.0785, 0.0625, 1)",
+            ),
+            110.862780081706,
+            1e-9,
+        );
+        near(
+            g.num(
+                "=PRICEMAT(DATE(2008,11,11), DATE(2021,3,1), DATE(2008,10,15), 0.0785, 0.0625, 0)",
+            ),
+            110.882869098244,
+            1e-9,
+        );
+        near(
+            g.num(
+                "=YIELDMAT(DATE(2008,11,11), DATE(2021,3,1), DATE(2008,10,15), 0.0785, 98.45, 1)",
+            ),
+            0.080544639989,
+            1e-10,
+        );
+        // ODDFPRICE / ODDFYIELD (irregular first coupon).
+        near(g.num("=ODDFPRICE(DATE(2008,11,11), DATE(2021,3,1), DATE(2008,10,15), DATE(2009,3,1), 0.0785, 0.0625, 100, 2, 1)"), 113.597717474, 1e-8);
+        near(g.num("=ODDFPRICE(DATE(2008,11,11), DATE(2021,3,1), DATE(2008,10,15), DATE(2009,3,1), 0.0785, 0.0625, 100, 1, 1)"), 113.494585545507, 1e-8);
+        near(g.num("=ODDFPRICE(DATE(2008,11,11), DATE(2021,3,1), DATE(2008,10,15), DATE(2009,3,1), 0.0785, 0.0625, 100, 4, 1)"), 113.650021611, 1e-8);
+        near(g.num("=ODDFYIELD(DATE(2008,11,11), DATE(2021,3,1), DATE(2008,10,15), DATE(2009,3,1), 0.0785, 84.5, 100, 2, 1)"), 0.100766449804, 1e-8);
+        near(g.num("=ODDFYIELD(DATE(2008,11,11), DATE(2021,3,1), DATE(2008,10,15), DATE(2009,3,1), 0.0785, 84.5, 100, 1, 1)"), 0.101169886094, 1e-8);
+        // ODDLPRICE / ODDLYIELD (irregular last coupon).
+        near(g.num("=ODDLPRICE(DATE(2008,11,11), DATE(2021,3,1), DATE(2008,10,15), 0.0785, 0.0625, 100, 2, 1)"), 110.8745242842, 1e-8);
+        near(g.num("=ODDLPRICE(DATE(2008,11,11), DATE(2021,3,1), DATE(2008,10,15), 0.0785, 0.0625, 100, 1, 1)"), 110.87480393587, 1e-8);
+        near(g.num("=ODDLYIELD(DATE(2008,11,11), DATE(2021,3,1), DATE(2008,10,15), 0.0785, 84.5, 100, 2, 1)"), 0.107072088907, 1e-8);
+        near(g.num("=ODDLYIELD(DATE(2008,11,11), DATE(2021,3,1), DATE(2008,10,15), 0.0785, 84.5, 100, 1, 1)"), 0.107075093237, 1e-8);
     }
 }

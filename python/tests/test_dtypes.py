@@ -230,9 +230,7 @@ def test_dtype_coercion_behavior__strict_sampling_limit(eager: bool) -> None:
         if eager:
             excel_reader.load_sheet_eager(0, dtype_coercion="strict", schema_sample_rows=5)
         else:
-            excel_reader.load_sheet(
-                0, dtype_coercion="strict", schema_sample_rows=5
-            ).to_arrow()
+            excel_reader.load_sheet(0, dtype_coercion="strict", schema_sample_rows=5).to_arrow()
 
 
 def test_one_dtype_for_all() -> None:
@@ -548,4 +546,3 @@ def test_no_silent_data_loss_contract() -> None:
         df = sheet.to_pandas()
 
     assert df[col_name].iloc[1200] == "late_string_value"
-

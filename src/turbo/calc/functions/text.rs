@@ -11,15 +11,18 @@
 // mid-character. Unimplementable cases return the honest CalcError::Value
 // rather than a guessed string.
 //
-// The `*B` functions (LEFTB, RIGHTB, MIDB, LENB, FINDB, SEARCHB) are
-// byte-oriented in a double-byte code page. This engine is UTF-8 and has no
-// DBCS locale concept, so they are implemented as their non-B equivalents,
-// which is exactly correct for single-byte (ASCII/Latin-1) text and diverges
-// only for multi-byte text in a DBCS locale — the documented, honest choice
-// rather than half-implemented byte semantics. ASC/DBCS are deliberately NOT
-// registered: their full-width/half-width katakana conversion needs locale
-// tables this engine does not carry, and a Latin-only partial would silently
-// mishandle the primary Japanese use case.
+// The `*B` functions (LEFTB, RIGHTB, MIDB, LENB, FINDB, SEARCHB) follow the
+// measured en-IN (non-DBCS) byte policy: each UTF-16 code unit counts as 1
+// byte and a surrogate pair (emoji) counts as 2, so LEN/LENB report code-unit
+// counts while the positional `*B` functions return whole characters exactly
+// like their non-B siblings (verified: LEFTB("😊Hello",3)="😊He",
+// MIDB("中文测试",1,2)="中文", RIGHTB("中文测试",2)="测试",
+// FINDB/SEARCHB("欢迎","你好，欢迎")=4, LENB(",。、；：{}")=7). DBCS-locale
+// double-byte semantics would need a code page this engine does not carry;
+// the divergence is documented, not guessed. ASC/DBCS convert only the
+// full-width ASCII block (U+FF01–U+FF5E ↔ U+0021–U+007E and the ideographic
+// space U+3000 ↔ U+0020); the full/half-width katakana tables are not
+// carried, so katakana passes through untouched.
 
 use super::{FuncArg, FuncCtx, FuncSpec, Registry};
 use crate::turbo::calc::coerce::{coerce_number, coerce_text, number_to_general};
@@ -228,9 +231,13 @@ fn mid(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     Ok(CalcValue::text(chars[from..to].iter().collect::<String>()))
 }
 
+/// LEN counts UTF-16 code units, not characters: every BMP character is 1 and
+/// a surrogate pair (emoji) is 2 — the measured en-IN Excel behavior
+/// (`LEN("😊") = 2`). LENB shares this implementation (non-DBCS byte policy:
+/// one byte per code unit).
 fn len(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let text = coerce_text(&args[0].value(ctx)?)?;
-    ok_num(text.chars().count() as f64)
+    ok_num(text.encode_utf16().count() as f64)
 }
 
 fn trim(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
@@ -325,27 +332,207 @@ fn replace(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     Ok(CalcValue::text(out))
 }
 
-fn value_from_text(t: &str) -> Result<CalcValue, CalcError> {
+/// Days from 1970-01-01 for a civil date (proleptic Gregorian; Hinnant's
+/// `days_from_civil`, mirrored here so VALUE can share the datetime family's
+/// serial arithmetic without reaching into its private helpers).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = y - if m <= 2 { 1 } else { 0 };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+fn days_in_month_value(y: i64, m: i64) -> i64 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 30,
+    }
+}
+
+/// Excel serial for a civil date: the 1900 system includes the phantom
+/// 1900-02-29 as serial 60, so every real day on/after 1900-03-01 is one
+/// ahead of the proleptic day count; the 1904 system has serial 0 = 1904-01-01.
+fn civil_to_serial_value(y: i64, m: i64, d: i64, date1904: bool) -> i64 {
+    if !date1904 && (y, m, d) == (1900, 2, 29) {
+        return 60;
+    }
+    const DAYS_1899_TO_1970: i64 = 25568;
+    const DAYS_1899_TO_1904: i64 = 1461;
+    let real_day = days_from_civil(y, m, d) + DAYS_1899_TO_1970;
+    if date1904 {
+        real_day - DAYS_1899_TO_1904
+    } else if real_day <= 59 {
+        real_day
+    } else {
+        real_day + 1
+    }
+}
+
+/// Parse a bare time `H:MM[:SS]` (whole string, 2-digit minutes/seconds) into
+/// a fraction of a day. `24:00` is exactly one day; hours above 24 are refused
+/// and `H:MM:SS` must be well-formed. Matches `VALUE("16:48:00") = 0.7`.
+fn parse_time_value(s: &str) -> Option<f64> {
+    let b = s.as_bytes();
+    let mut i = 0;
+    let mut h = 0i64;
+    let mut hd = 0;
+    while i < b.len() && b[i].is_ascii_digit() && hd < 2 {
+        h = h * 10 + (b[i] - b'0') as i64;
+        hd += 1;
+        i += 1;
+    }
+    if hd == 0 || i >= b.len() || b[i] != b':' {
+        return None;
+    }
+    i += 1;
+    let mut m = 0i64;
+    let mut md = 0;
+    while i < b.len() && b[i].is_ascii_digit() && md < 2 {
+        m = m * 10 + (b[i] - b'0') as i64;
+        md += 1;
+        i += 1;
+    }
+    if md != 2 {
+        return None;
+    }
+    let mut sec = 0i64;
+    if i < b.len() && b[i] == b':' {
+        i += 1;
+        let mut sd = 0;
+        while i < b.len() && b[i].is_ascii_digit() && sd < 2 {
+            sec = sec * 10 + (b[i] - b'0') as i64;
+            sd += 1;
+            i += 1;
+        }
+        if sd != 2 {
+            return None;
+        }
+    }
+    if i != b.len() {
+        return None;
+    }
+    if m > 59 || sec > 59 || h > 24 {
+        return None;
+    }
+    if h == 24 && (m != 0 || sec != 0) {
+        return None;
+    }
+    Some(h as f64 / 24.0 + m as f64 / 1440.0 + sec as f64 / 86400.0)
+}
+
+/// Parse a year-first date `YYYY-MM-DD` / `YYYY/M/D` with an optional time,
+/// returning the full serial (mirrors the datetime family's accepted forms;
+/// locale month-first forms are not guessed).
+fn parse_date_value(s: &str, date1904: bool) -> Option<f64> {
+    let b = s.as_bytes();
+    let mut i = 0;
+    let mut year = 0i64;
+    for _ in 0..4 {
+        if i >= b.len() || !b[i].is_ascii_digit() {
+            return None;
+        }
+        year = year * 10 + (b[i] - b'0') as i64;
+        i += 1;
+    }
+    if i >= b.len() || (b[i] != b'-' && b[i] != b'/') {
+        return None;
+    }
+    let sep = b[i];
+    i += 1;
+    let mut month = 0i64;
+    let mut md = 0;
+    while i < b.len() && b[i].is_ascii_digit() && md < 2 {
+        month = month * 10 + (b[i] - b'0') as i64;
+        md += 1;
+        i += 1;
+    }
+    if md == 0 || i >= b.len() || b[i] != sep {
+        return None;
+    }
+    i += 1;
+    let mut day = 0i64;
+    let mut dd = 0;
+    while i < b.len() && b[i].is_ascii_digit() && dd < 2 {
+        day = day * 10 + (b[i] - b'0') as i64;
+        dd += 1;
+        i += 1;
+    }
+    if dd == 0 {
+        return None;
+    }
+    // The 1900 system's phantom 1900-02-29 (serial 60) is a valid day even
+    // though it does not exist in the proleptic Gregorian calendar.
+    let leap_day = !date1904 && year == 1900 && month == 2 && day == 29;
+    if !(1..=12).contains(&month)
+        || day < 1
+        || (!leap_day && day > days_in_month_value(year, month))
+    {
+        return None;
+    }
+    let serial = civil_to_serial_value(year, month, day, date1904) as f64;
+    if i < b.len() {
+        if b[i] == b'T' {
+            i += 1;
+        } else if b[i].is_ascii_whitespace() {
+            while i < b.len() && b[i].is_ascii_whitespace() {
+                i += 1;
+            }
+        } else {
+            return None;
+        }
+        Some(serial + parse_time_value(&s[i..])?)
+    } else {
+        Some(serial)
+    }
+}
+
+/// VALUE parses plain numbers, percents, times and year-first dates; anything
+/// else — including a locale currency-prefixed amount like "₹ 1,000" — is
+/// `#VALUE!`.
+fn value_from_text(t: &str, date1904: bool) -> Result<CalcValue, CalcError> {
     let s = t.trim();
     if s.is_empty() {
         return Err(CalcError::Value);
     }
-    let n = if let Some(stripped) = s.strip_suffix('%') {
-        let base = stripped
-            .trim()
-            .parse::<f64>()
-            .map_err(|_| CalcError::Value)?;
-        base / 100.0
-    } else {
-        s.parse::<f64>().map_err(|_| CalcError::Value)?
-    };
+    let mut pct = 0usize;
+    let mut mant = s;
+    while let Some(stripped) = mant.strip_suffix('%') {
+        pct += 1;
+        mant = stripped;
+    }
+    if pct > 0 {
+        let mant = mant.trim();
+        if mant.is_empty() {
+            return Err(CalcError::Value);
+        }
+        let n: f64 = mant.parse().map_err(|_| CalcError::Value)?;
+        return ok_num(n / 100f64.powi(pct as i32));
+    }
+    if let Some(t) = parse_time_value(s) {
+        return ok_num(t);
+    }
+    if let Some(d) = parse_date_value(s, date1904) {
+        return ok_num(d);
+    }
+    let n: f64 = s.parse().map_err(|_| CalcError::Value)?;
     ok_num(n)
 }
 
 fn value_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     match args[0].value(ctx)? {
         CalcValue::Number(n) => ok_num(n),
-        CalcValue::Text(t) => value_from_text(&t),
+        CalcValue::Text(t) => value_from_text(&t, ctx.date1904),
         CalcValue::Error(e) => Err(e),
         _ => Err(CalcError::Value),
     }
@@ -475,61 +662,167 @@ fn group_digits(s: &str) -> String {
     out
 }
 
-/// TEXT formatting for the format codes this engine reproduces exactly:
-/// `0`/`0.00`-style digit patterns (`0` mandatory, `#` optional), a comma
-/// thousands-grouping pattern, a trailing `%` (each `%` scales by 100), and
-/// `General` via `number_to_general`. Anything else returns `#VALUE!`.
-fn text_format(n: f64, format: &str) -> Result<String, CalcError> {
-    if !n.is_finite() {
-        return Err(CalcError::Num);
+/// One parsed TEXT-format segment. A `Lit` is emitted verbatim; a `Num` is a
+/// digit pattern (`0` mandatory, `#` optional, `,` grouping, `.` point) with a
+/// trailing percentage multiplier, and re-formats the whole number each time it
+/// appears (so `"0-0"` renders `5-5`, as Excel does).
+enum TextSeg {
+    Lit(String),
+    Num(NumPat),
+}
+
+struct NumPat {
+    int: String,
+    frac: String,
+    in_frac: bool,
+    percent: usize,
+}
+
+fn flush_lit(segs: &mut Vec<TextSeg>, lit: &mut String) {
+    if !lit.is_empty() {
+        segs.push(TextSeg::Lit(std::mem::take(lit)));
     }
-    let f = format.trim();
-    if f.eq_ignore_ascii_case("general") {
-        return Ok(number_to_general(n));
+}
+
+fn flush_num(segs: &mut Vec<TextSeg>, num: &mut Option<NumPat>) {
+    if let Some(p) = num.take() {
+        segs.push(TextSeg::Num(p));
     }
-    let mut percent = 0usize;
-    let mut int_pat = String::new();
-    let mut frac_pat = String::new();
-    let mut in_frac = false;
-    for ch in f.chars() {
+}
+
+/// Parse a TEXT format string into segments. Digit placeholders and their
+/// grouping/decimal/percent markers form `Num` segments; everything else
+/// (`"..."` quoted runs, `\x` escapes, currency symbols and ordinary text)
+/// becomes literal output. Unsupported format machinery — scientific `E±`,
+/// `@`, `?`, fraction `/`, section `;`, fill `*`, skip `_`, and `[..]` — is
+/// `#VALUE!` rather than a guessed rendering.
+fn parse_text_format(f: &str) -> Result<Vec<TextSeg>, CalcError> {
+    let chars: Vec<char> = f.chars().collect();
+    let mut segs: Vec<TextSeg> = Vec::new();
+    let mut lit = String::new();
+    let mut num: Option<NumPat> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
         match ch {
-            '%' => percent += 1,
             '0' | '#' => {
-                if in_frac {
-                    frac_pat.push(ch);
+                flush_lit(&mut segs, &mut lit);
+                let p = num.get_or_insert_with(|| NumPat {
+                    int: String::new(),
+                    frac: String::new(),
+                    in_frac: false,
+                    percent: 0,
+                });
+                if p.in_frac {
+                    p.frac.push(ch);
                 } else {
-                    int_pat.push(ch);
+                    p.int.push(ch);
                 }
-            }
-            ',' => {
-                if in_frac {
-                    return Err(CalcError::Value);
-                }
-                int_pat.push(ch);
+                i += 1;
             }
             '.' => {
-                if in_frac {
+                flush_lit(&mut segs, &mut lit);
+                let p = num.get_or_insert_with(|| NumPat {
+                    int: String::new(),
+                    frac: String::new(),
+                    in_frac: false,
+                    percent: 0,
+                });
+                if p.in_frac {
                     return Err(CalcError::Value);
                 }
-                in_frac = true;
+                p.in_frac = true;
+                i += 1;
             }
-            _ => return Err(CalcError::Value),
+            ',' => {
+                flush_lit(&mut segs, &mut lit);
+                let p = num.get_or_insert_with(|| NumPat {
+                    int: String::new(),
+                    frac: String::new(),
+                    in_frac: false,
+                    percent: 0,
+                });
+                if p.in_frac {
+                    return Err(CalcError::Value);
+                }
+                p.int.push(',');
+                i += 1;
+            }
+            '%' => {
+                flush_lit(&mut segs, &mut lit);
+                let p = num.get_or_insert_with(|| NumPat {
+                    int: String::new(),
+                    frac: String::new(),
+                    in_frac: false,
+                    percent: 0,
+                });
+                p.percent += 1;
+                i += 1;
+            }
+            '"' => {
+                flush_num(&mut segs, &mut num);
+                i += 1;
+                let mut closed = false;
+                while i < chars.len() {
+                    if chars[i] == '"' {
+                        if i + 1 < chars.len() && chars[i + 1] == '"' {
+                            lit.push('"');
+                            i += 2;
+                            continue;
+                        }
+                        closed = true;
+                        i += 1;
+                        break;
+                    }
+                    lit.push(chars[i]);
+                    i += 1;
+                }
+                if !closed {
+                    return Err(CalcError::Value);
+                }
+            }
+            '\\' => {
+                flush_num(&mut segs, &mut num);
+                i += 1;
+                if i >= chars.len() {
+                    return Err(CalcError::Value);
+                }
+                lit.push(chars[i]);
+                i += 1;
+            }
+            'E' | 'e' => {
+                // scientific notation is not reproduced; a literal e followed
+                // by a sign would be misread as an exponent, so reject it.
+                if i + 1 < chars.len() && (chars[i + 1] == '+' || chars[i + 1] == '-') {
+                    return Err(CalcError::Value);
+                }
+                flush_num(&mut segs, &mut num);
+                lit.push(ch);
+                i += 1;
+            }
+            '@' | '?' | ';' | '[' | ']' | '*' | '_' | '/' => {
+                return Err(CalcError::Value);
+            }
+            _ => {
+                flush_num(&mut segs, &mut num);
+                lit.push(ch);
+                i += 1;
+            }
         }
     }
-    let has_digit = int_pat.contains('0')
-        || int_pat.contains('#')
-        || frac_pat.contains('0')
-        || frac_pat.contains('#');
-    if !has_digit {
-        return Err(CalcError::Value);
-    }
+    flush_lit(&mut segs, &mut lit);
+    flush_num(&mut segs, &mut num);
+    Ok(segs)
+}
 
-    let min_int = int_pat.chars().filter(|&c| c == '0').count();
-    let grouped = int_pat.contains(',');
-    let frac_max = frac_pat.chars().count();
-    let frac_min = frac_pat.chars().filter(|&c| c == '0').count();
+/// Render one digit-pattern segment for `n`.
+fn render_num(n: f64, p: &NumPat) -> Result<String, CalcError> {
+    let min_int = p.int.chars().filter(|&c| c == '0').count();
+    let grouped = p.int.contains(',');
+    let frac_max = p.frac.chars().count();
+    let frac_min = p.frac.chars().filter(|&c| c == '0').count();
 
-    let value = n.abs() * 100f64.powi(percent as i32);
+    let value = n.abs() * 100f64.powi(p.percent as i32);
     if !value.is_finite() {
         return Err(CalcError::Num);
     }
@@ -577,16 +870,50 @@ fn text_format(n: f64, format: &str) -> Result<String, CalcError> {
     }
 
     let mut out = String::new();
-    if n < 0.0 {
-        out.push('-');
-    }
     out.push_str(&int);
     if !frac_out.is_empty() {
         out.push('.');
         out.push_str(&frac_out);
     }
-    for _ in 0..percent {
+    for _ in 0..p.percent {
         out.push('%');
+    }
+    Ok(out)
+}
+
+/// TEXT formatting for the format codes this engine reproduces exactly:
+/// `0`/`0.00`-style digit patterns (`0` mandatory, `#` optional), a comma
+/// thousands-grouping pattern, a trailing `%` (each `%` scales by 100), and
+/// `General` via `number_to_general`. Literal text (currency symbols, quoted
+/// runs, `\x` escapes) passes through unchanged — measured:
+/// `TEXT(111, "$#,##0.00") = "$111.00"`. Anything else returns `#VALUE!`.
+fn text_format(n: f64, format: &str) -> Result<String, CalcError> {
+    if !n.is_finite() {
+        return Err(CalcError::Num);
+    }
+    let f = format.trim();
+    if f.eq_ignore_ascii_case("general") {
+        return Ok(number_to_general(n));
+    }
+    let segs = parse_text_format(f)?;
+    let has_digit = segs.iter().any(|s| match s {
+        TextSeg::Num(p) => !p.int.is_empty() || !p.frac.is_empty(),
+        TextSeg::Lit(_) => false,
+    });
+    if !has_digit {
+        return Err(CalcError::Value);
+    }
+    let mut out = String::new();
+    for seg in &segs {
+        match seg {
+            TextSeg::Lit(s) => out.push_str(s),
+            TextSeg::Num(p) => out.push_str(&render_num(n, p)?),
+        }
+    }
+    // A negative number's minus sign precedes the whole formatted string,
+    // currency symbols and all: TEXT(-111, "$#,##0.00") = "-$111.00".
+    if n < 0.0 {
+        out.insert(0, '-');
     }
     Ok(out)
 }
@@ -925,10 +1252,13 @@ fn numbervalue(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> 
         Some(r) => (true, r.trim()),
         None => (false, t.strip_prefix('+').unwrap_or(t).trim()),
     };
-    let (mant, percent) = match rest.strip_suffix('%') {
-        Some(r) => (r.trim(), true),
-        None => (rest, false),
-    };
+    // Every trailing `%` divides by 100 once — NUMBERVALUE("20%%") = 0.002.
+    let mut pct = 0usize;
+    let mut mant = rest;
+    while let Some(r) = mant.strip_suffix('%') {
+        pct += 1;
+        mant = r.trim();
+    }
     if mant.is_empty() {
         return Err(CalcError::Value);
     }
@@ -987,20 +1317,26 @@ fn numbervalue(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> 
         num_str.push_str(frac);
     }
     let n: f64 = num_str.parse().map_err(|_| CalcError::Value)?;
-    ok_num(if percent { n / 100.0 } else { n })
+    ok_num(if pct > 0 {
+        n / 100f64.powi(pct as i32)
+    } else {
+        n
+    })
 }
 
 /// The FIXED/DOLLAR formatter: round `n` to `decimals` places (a negative
 /// `decimals` rounds to the left of the decimal point), then emit a fixed
 /// string with exactly `decimals` fraction digits and thousands separators
 /// unless `no_commas`. Reuses the TEXT machinery so rounding agrees with
-/// `TEXT`. Excel's format codes are length-bounded, so `decimals` is clamped
-/// to 127 on the display side.
+/// `TEXT`. Excel's format codes are length-bounded, so `decimals` outside
+/// ±127 is `#VALUE!` (measured: `FIXED(1234.567, 128)` and `DOLLAR(x, 128)`).
 fn fixed_impl(n: f64, decimals: i32, no_commas: bool) -> Result<String, CalcError> {
     if !n.is_finite() {
         return Err(CalcError::Num);
     }
-    let decimals = decimals.clamp(-308, 127);
+    if !(-127..=127).contains(&decimals) {
+        return Err(CalcError::Value);
+    }
     let value = if decimals < 0 {
         let scale = 10f64.powi((-decimals) as i32);
         let r = (n / scale).round() * scale;
@@ -1041,6 +1377,25 @@ fn fixed(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     Ok(CalcValue::text(fixed_impl(n, decimals as i32, no_commas)?))
 }
 
+/// Currency-prefix table for DOLLAR, keyed by locale. kyrax targets the
+/// measured en-IN locale (Indian Rupee, a trailing-space separator), so that
+/// is the default entry. The function never assumes a US dollar sign — a
+/// future locale binding only adds a row to this table.
+const CURRENCY_BY_LOCALE: &[(&str, &str)] = &[("en-IN", "₹ ")];
+
+/// The active locale for currency rendering. The engine is measured against
+/// en-IN Excel, so that is the default; the lookup exists so a locale-aware
+/// front-end can select another row of `CURRENCY_BY_LOCALE` later.
+const DEFAULT_LOCALE: &str = "en-IN";
+
+fn currency_prefix() -> &'static str {
+    CURRENCY_BY_LOCALE
+        .iter()
+        .find(|(loc, _)| *loc == DEFAULT_LOCALE)
+        .map(|(_, s)| *s)
+        .unwrap_or("₹ ")
+}
+
 fn dollar(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let n = coerce_number(&args[0].value(ctx)?)?;
     let decimals = if args.len() >= 2 {
@@ -1049,11 +1404,278 @@ fn dollar(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
         2.0
     };
     let body = fixed_impl(n, decimals as i32, false)?;
+    let prefix = currency_prefix();
     let out = match body.strip_prefix('-') {
-        Some(rest) => format!("-${rest}"),
-        None => format!("${body}"),
+        Some(rest) => format!("-{prefix}{rest}"),
+        None => format!("{prefix}{body}"),
     };
     Ok(CalcValue::text(out))
+}
+
+// -- ASC / DBCS (full-width ⇄ half-width) -------------------------------------
+
+/// ASC converts full-width ASCII-range characters to half-width: the
+/// ideographic space U+3000 to a normal space and the full-width ASCII block
+/// U+FF01–U+FF5E down to U+0021–U+007E. Double-byte katakana conversion needs
+/// locale tables this engine does not carry, so katakana passes through
+/// untouched — the documented partial, not a guessed table.
+fn asc(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\u{3000}' => ' ',
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+            _ => c,
+        })
+        .collect()
+}
+
+fn asc_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    let text = coerce_text(&args[0].value(ctx)?)?;
+    Ok(CalcValue::text(asc(&text)))
+}
+
+/// DBCS is ASC's inverse: a half-width space and the ASCII block U+0021–U+007E
+/// widen to U+3000 / U+FF01–U+FF5E. Katakana conversion is likewise not
+/// carried.
+fn dbcs_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    let text = coerce_text(&args[0].value(ctx)?)?;
+    let out: String = text
+        .chars()
+        .map(|c| match c {
+            ' ' => '\u{3000}',
+            '\u{0021}'..='\u{007E}' => char::from_u32(c as u32 + 0xFEE0).unwrap_or(c),
+            _ => c,
+        })
+        .collect();
+    Ok(CalcValue::text(out))
+}
+
+// -- BAHTTEXT (Thai) ----------------------------------------------------------
+
+/// Thai digit words for 0..10.
+const THAI_DIGITS: [&str; 10] = [
+    "ศูนย์",
+    "หนึ่ง",
+    "สอง",
+    "สาม",
+    "สี่",
+    "ห้า",
+    "หก",
+    "เจ็ด",
+    "แปด",
+    "เก้า",
+];
+
+/// Place words for a 6-digit group (units, tens, hundreds, thousands,
+/// ten-thousands, hundred-thousands).
+const THAI_PLACE: [&str; 6] = ["", "สิบ", "ร้อย", "พัน", "หมื่น", "แสน"];
+
+/// Render one 6-digit group (0..999999) in Thai. Tens digit 1 reads "สิบ"
+/// without "หนึ่ง", tens digit 2 reads "ยี่สิบ", and a ones digit 1 with any
+/// higher non-zero digit reads "เอ็ด".
+fn thai_group(g: i64) -> String {
+    if g == 0 {
+        return String::new();
+    }
+    let digits: [i64; 6] = [
+        g % 10,
+        (g / 10) % 10,
+        (g / 100) % 10,
+        (g / 1000) % 10,
+        (g / 10000) % 10,
+        (g / 100000) % 10,
+    ];
+    let higher = digits[1..].iter().any(|&d| d != 0);
+    let mut out = String::new();
+    for i in (0..6).rev() {
+        let d = digits[i];
+        if d == 0 {
+            continue;
+        }
+        match i {
+            1 => {
+                if d == 1 {
+                    out.push_str("สิบ");
+                } else if d == 2 {
+                    out.push_str("ยี่สิบ");
+                } else {
+                    out.push_str(THAI_DIGITS[d as usize]);
+                    out.push_str("สิบ");
+                }
+            }
+            0 => {
+                if d == 1 && higher {
+                    out.push_str("เอ็ด");
+                } else {
+                    out.push_str(THAI_DIGITS[d as usize]);
+                }
+            }
+            _ => {
+                out.push_str(THAI_DIGITS[d as usize]);
+                out.push_str(THAI_PLACE[i]);
+            }
+        }
+    }
+    out
+}
+
+/// Convert a non-negative integer to Thai words. Groups of six digits each
+/// carry one "ล้าน" per level above the first (10^6, 10^12, ...).
+fn thai_num(mut n: u64) -> String {
+    if n == 0 {
+        return "ศูนย์".to_string();
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut level = 0usize;
+    while n > 0 {
+        let g = (n % 1_000_000) as i64;
+        n /= 1_000_000;
+        if g > 0 {
+            let mut s = thai_group(g);
+            for _ in 0..level {
+                s.push_str("ล้าน");
+            }
+            parts.push(s);
+        }
+        level += 1;
+    }
+    parts.reverse();
+    parts.concat()
+}
+
+/// BAHTTEXT renders an amount in Thai words: the integer part with "บาท"
+/// (baht) and, when the rounded two-decimal fraction is non-zero, the satang
+/// part with "สตางค์". Negative amounts carry a "ลบ" prefix (Thai "minus").
+fn bahttext(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    let n = coerce_number(&args[0].value(ctx)?)?;
+    if !n.is_finite() {
+        return Err(CalcError::Num);
+    }
+    let neg = n < 0.0;
+    let scaled = (n.abs() * 100.0).round();
+    let mut baht = (scaled / 100.0).floor() as u64;
+    let mut satang = (scaled % 100.0) as u64;
+    if satang == 100 {
+        satang = 0;
+        baht += 1;
+    }
+    let mut out = String::new();
+    if neg {
+        out.push_str("ลบ");
+    }
+    out.push_str(&thai_num(baht));
+    out.push_str("บาท");
+    if satang > 0 {
+        out.push_str(&thai_num(satang));
+        out.push_str("สตางค์");
+    }
+    Ok(CalcValue::text(out))
+}
+
+// -- NUMBERSTRING (Chinese) ---------------------------------------------------
+
+/// NUMBERSTRING renders an integer in one of three Chinese forms: type 1 is
+/// the ordinary lower-case numerals ("一百二十三"), type 2 the financial
+/// upper-case numerals ("壹佰贰拾叁"), type 3 one digit word per digit
+/// ("一二三").
+///
+/// `leading_one` controls whether a leading "10" reads "十" (type 1) or keeps
+/// the digit "壹拾" (type 2, financial).
+fn chinese_number(digits: &[u32], upper: bool, leading_one: bool) -> String {
+    const LOW: [&str; 10] = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+    const UPP: [&str; 10] = ["零", "壹", "贰", "叁", "肆", "伍", "陆", "柒", "捌", "玖"];
+    // Place words within a 4-digit group, indexed by `pos % 4`.
+    const WITHIN_LOW: [&str; 4] = ["", "十", "百", "千"];
+    const WITHIN_UPP: [&str; 4] = ["", "拾", "佰", "仟"];
+    // Group names after each full 4-digit group, indexed by `pos / 4`.
+    const GROUP_LOW: [&str; 5] = ["", "万", "亿", "兆", "京"];
+    const GROUP_UPP: [&str; 5] = ["", "萬", "億", "兆", "京"];
+
+    let (d, within, group): (&[&str; 10], &[&str; 4], &[&str; 5]) = if upper {
+        (&UPP, &WITHIN_UPP, &GROUP_UPP)
+    } else {
+        (&LOW, &WITHIN_LOW, &GROUP_LOW)
+    };
+
+    if digits.iter().all(|&x| x == 0) {
+        return d[0].to_string();
+    }
+    let n = digits.len();
+    let mut hi = 0usize;
+    for (i, &digit) in digits.iter().enumerate() {
+        if digit != 0 {
+            hi = n - 1 - i;
+            break;
+        }
+    }
+    // A leading "10" / "10万" / "10亿" drops the "一" in the lower form only:
+    // 12 reads 十二 but the financial form keeps 壹拾贰.
+    let leading_tens = leading_one && hi % 4 == 1 && digits[n - 1 - hi] == 1;
+    let mut lowest = [usize::MAX; 5];
+    for (i, &digit) in digits.iter().enumerate() {
+        if digit != 0 {
+            let pos = n - 1 - i;
+            lowest[pos / 4] = lowest[pos / 4].min(pos);
+        }
+    }
+    let mut out = String::new();
+    let mut pending_zero = false;
+    for i in 0..n {
+        let pos = n - 1 - i;
+        let digit = digits[i];
+        if digit == 0 {
+            if !out.is_empty() {
+                pending_zero = true;
+            }
+            continue;
+        }
+        if pending_zero {
+            out.push_str(d[0]);
+            pending_zero = false;
+        }
+        if pos == hi && leading_tens {
+            out.push_str(within[1]);
+        } else {
+            out.push_str(d[digit as usize]);
+            out.push_str(within[pos % 4]);
+        }
+        if lowest[pos / 4] == pos {
+            out.push_str(group[pos / 4]);
+        }
+    }
+    out
+}
+
+fn numberstring(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
+    let n = coerce_number(&args[0].value(ctx)?)?;
+    let kind = trunc_arg(&args[1].value(ctx)?)?;
+    if kind < 1.0 || kind > 3.0 {
+        return Err(CalcError::Value);
+    }
+    if !n.is_finite() {
+        return Err(CalcError::Num);
+    }
+    let i = n.trunc();
+    let neg = i < 0.0;
+    let digits: Vec<u32> = i
+        .abs()
+        .to_string()
+        .chars()
+        .map(|c| c.to_digit(10).unwrap_or(0))
+        .collect();
+    let out = match kind as i32 {
+        1 => chinese_number(&digits, false, true),
+        2 => chinese_number(&digits, true, false),
+        _ => digits
+            .iter()
+            .map(|&d| chinese_digit_raw(d))
+            .collect::<String>(),
+    };
+    Ok(CalcValue::text(if neg { format!("-{out}") } else { out }))
+}
+
+fn chinese_digit_raw(d: u32) -> &'static str {
+    ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"][d as usize]
 }
 
 // -- CLEAN / UNICHAR / UNICODE -----------------------------------------------
@@ -1138,9 +1760,11 @@ fn valuetotext(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> 
     Ok(CalcValue::text(value_to_text(&v, format == 1.0)))
 }
 
-/// ARRAYTOTEXT wraps the array in `{...}`, joins elements with `,` and rows
-/// with `;`; a scalar becomes a 1-element array. Same 0/1 format argument as
-/// VALUETOTEXT (strict quotes strings and doubles internal quotes).
+/// ARRAYTOTEXT joins every element (row-major for a 2-D array, a scalar as a
+/// 1-element array) with `", "` — measured en-IN Excel:
+/// `ARRAYTOTEXT({1," ",1.23,TRUE,FALSE}) = "1,  , 1.23, TRUE, FALSE"`. The 0/1
+/// format argument is the same as VALUETOTEXT (strict quotes strings and
+/// doubles internal quotes).
 fn arraytotext(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let format = if args.len() >= 2 {
         trunc_arg(&args[1].value(ctx)?)?
@@ -1152,21 +1776,18 @@ fn arraytotext(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> 
     }
     let strict = format == 1.0;
     let v = args[0].value(ctx)?;
-    let out = match &v {
+    let mut parts: Vec<String> = Vec::new();
+    match &v {
         CalcValue::Array(a) => {
-            let mut rows = Vec::with_capacity(a.rows as usize);
             for r in 0..a.rows {
-                let mut cols = Vec::with_capacity(a.cols as usize);
                 for c in 0..a.cols {
-                    cols.push(value_to_text(a.get(r, c), strict));
+                    parts.push(value_to_text(a.get(r, c), strict));
                 }
-                rows.push(cols.join(","));
             }
-            format!("{{{}}}", rows.join(";"))
         }
-        other => format!("{{{}}}", value_to_text(other, strict)),
-    };
-    Ok(CalcValue::text(out))
+        other => parts.push(value_to_text(other, strict)),
+    }
+    Ok(CalcValue::text(parts.join(", ")))
 }
 
 const LEFT: FuncSpec = FuncSpec {
@@ -1275,6 +1896,55 @@ const REPLACE: FuncSpec = FuncSpec {
     volatile: false,
     array_aware: false,
     func: replace,
+};
+
+/// REPLACEB is byte-oriented in a double-byte code page; under the engine's
+/// non-DBCS byte policy (one byte per UTF-16 code unit) it equals REPLACE,
+/// operating on whole characters — the documented divergence for a DBCS
+/// locale, not a guessed byte split.
+const REPLACEB: FuncSpec = FuncSpec {
+    name: "REPLACEB",
+    min_args: 4,
+    max_args: Some(4),
+    volatile: false,
+    array_aware: false,
+    func: replace,
+};
+
+const ASC: FuncSpec = FuncSpec {
+    name: "ASC",
+    min_args: 1,
+    max_args: Some(1),
+    volatile: false,
+    array_aware: false,
+    func: asc_fn,
+};
+
+const DBCS: FuncSpec = FuncSpec {
+    name: "DBCS",
+    min_args: 1,
+    max_args: Some(1),
+    volatile: false,
+    array_aware: false,
+    func: dbcs_fn,
+};
+
+const BAHTTEXT: FuncSpec = FuncSpec {
+    name: "BAHTTEXT",
+    min_args: 1,
+    max_args: Some(1),
+    volatile: false,
+    array_aware: false,
+    func: bahttext,
+};
+
+const NUMBERSTRING: FuncSpec = FuncSpec {
+    name: "NUMBERSTRING",
+    min_args: 2,
+    max_args: Some(2),
+    volatile: false,
+    array_aware: false,
+    func: numberstring,
 };
 
 const VALUE: FuncSpec = FuncSpec {
@@ -1527,6 +2197,11 @@ pub fn register(r: &mut Registry) {
     r.register(&SEARCH);
     r.register(&SUBSTITUTE);
     r.register(&REPLACE);
+    r.register(&REPLACEB);
+    r.register(&ASC);
+    r.register(&DBCS);
+    r.register(&BAHTTEXT);
+    r.register(&NUMBERSTRING);
     r.register(&VALUE);
     r.register(&TEXT);
     r.register(&CONCAT);
@@ -1559,6 +2234,7 @@ pub fn register(r: &mut Registry) {
 mod tests {
     use super::*;
     use crate::turbo::calc::functions::CellResolver;
+    use crate::turbo::calc::functions::registry;
     use crate::turbo::calc::testkit::Grid;
     use crate::turbo::calc::value::ArrayValue;
 
@@ -1846,6 +2522,25 @@ mod tests {
     }
 
     #[test]
+    fn value_parses_times_and_dates() {
+        // Measured en-IN Excel: VALUE("16:48:00") = 0.7.
+        assert_eq!(call(&VALUE, vec![txt("16:48:00")]), Ok(num(0.7)));
+        assert_eq!(call(&VALUE, vec![txt("16:48")]), Ok(num(0.7)));
+        assert_eq!(call(&VALUE, vec![txt("12:00:00")]), Ok(num(0.5)));
+        assert_eq!(call(&VALUE, vec![txt("24:00")]), Ok(num(1.0)));
+        // a currency-prefixed number is #VALUE! in this locale, not parsed
+        assert_eq!(call(&VALUE, vec![txt("₹ 1,000")]), Err(CalcError::Value));
+        // year-first dates with an optional time resolve to a serial
+        assert_eq!(call(&VALUE, vec![txt("1900-01-01")]), Ok(num(1.0)));
+        assert_eq!(call(&VALUE, vec![txt("1900-02-29")]), Ok(num(60.0)));
+        assert_eq!(call(&VALUE, vec![txt("1900-03-01")]), Ok(num(61.0)));
+        let d = call(&VALUE, vec![txt("2026-08-16 16:48:00")]).unwrap();
+        let whole = d.as_number().unwrap().floor();
+        assert_eq!(whole, 46250.0);
+        assert!((d.as_number().unwrap() - whole - 0.7).abs() < 1e-9);
+    }
+
+    #[test]
     fn text_formats_digit_patterns() {
         assert_eq!(call(&TEXT, vec![num(1234.5), txt("0")]), Ok(txt("1235")));
         assert_eq!(call(&TEXT, vec![num(2.5), txt("0")]), Ok(txt("3")));
@@ -1864,6 +2559,37 @@ mod tests {
         assert_eq!(call(&TEXT, vec![num(1.2), txt("0.0#")]), Ok(txt("1.2")));
         assert_eq!(call(&TEXT, vec![num(0.0), txt("0.00")]), Ok(txt("0.00")));
         assert_eq!(call(&TEXT, vec![num(0.05), txt("0.00")]), Ok(txt("0.05")));
+    }
+
+    #[test]
+    fn text_format_passes_literal_currency_symbols_through() {
+        // Measured en-IN Excel: TEXT(111, "$#,##0.00") = "$111.00" — a literal
+        // currency symbol in the format is emitted as-is.
+        assert_eq!(
+            call(&TEXT, vec![num(111.0), txt("$#,##0.00")]),
+            Ok(txt("$111.00"))
+        );
+        assert_eq!(
+            call(&TEXT, vec![num(111.0), txt("₹#,##0.00")]),
+            Ok(txt("₹111.00"))
+        );
+        assert_eq!(
+            call(&TEXT, vec![num(-111.0), txt("$#,##0.00")]),
+            Ok(txt("-$111.00"))
+        );
+        assert_eq!(
+            call(&TEXT, vec![num(5.0), txt("0 \"units\"")]),
+            Ok(txt("5 units"))
+        );
+        assert_eq!(
+            call(&TEXT, vec![num(12.5), txt("0.00 $")]),
+            Ok(txt("12.50 $"))
+        );
+        assert_eq!(
+            call(&TEXT, vec![num(5.0), txt("Rate: 0.0")]),
+            Ok(txt("Rate: 5.0"))
+        );
+        assert_eq!(call(&TEXT, vec![num(5.0), txt("0\\$")]), Ok(txt("5$")));
     }
 
     #[test]
@@ -1901,7 +2627,19 @@ mod tests {
         );
         assert_eq!(call(&TEXT, vec![num(5.0), txt("@")]), Err(CalcError::Value));
         assert_eq!(
-            call(&TEXT, vec![num(5.0), txt("0 \"units\"")]),
+            call(&TEXT, vec![num(5.0), txt("0.0?")]),
+            Err(CalcError::Value)
+        );
+        assert_eq!(
+            call(&TEXT, vec![num(5.0), txt("0/4")]),
+            Err(CalcError::Value)
+        );
+        assert_eq!(
+            call(&TEXT, vec![num(5.0), txt("0;0")]),
+            Err(CalcError::Value)
+        );
+        assert_eq!(
+            call(&TEXT, vec![num(5.0), txt("0*#")]),
             Err(CalcError::Value)
         );
         assert_eq!(
@@ -2190,16 +2928,22 @@ mod tests {
         assert_eq!(g.text("=FIXED(-2.5, 0)"), "-3");
         assert_eq!(g.text("=FIXED(0.1+0.2, 2)"), "0.30");
         assert_eq!(g.error("=FIXED(\"abc\", 2)"), CalcError::Value);
+        // decimals beyond ±127 is #VALUE! (measured: FIXED(1234.567,128)).
+        assert_eq!(g.error("=FIXED(1234.567, 128)"), CalcError::Value);
+        assert_eq!(g.error("=FIXED(1234.567, -128)"), CalcError::Value);
     }
 
     #[test]
-    fn dollar_formats_with_currency_sign() {
+    fn dollar_formats_with_locale_currency_symbol() {
         let g = Grid::empty();
-        assert_eq!(g.text("=DOLLAR(1234.567)"), "$1,234.57");
-        assert_eq!(g.text("=DOLLAR(1234.567, 0)"), "$1,235");
-        assert_eq!(g.text("=DOLLAR(-1234.567, -2)"), "-$1,200");
-        assert_eq!(g.text("=DOLLAR(0)"), "$0.00");
+        // Measured en-IN Excel: ₹ (rupee) symbol + space, two decimals,
+        // thousands separator — never a hardcoded US dollar sign.
+        assert_eq!(g.text("=DOLLAR(1234.567)"), "₹ 1,234.57");
+        assert_eq!(g.text("=DOLLAR(1234.567, 0)"), "₹ 1,235");
+        assert_eq!(g.text("=DOLLAR(-1234.567, -2)"), "-₹ 1,200");
+        assert_eq!(g.text("=DOLLAR(0)"), "₹ 0.00");
         assert_eq!(g.error("=DOLLAR(\"abc\")"), CalcError::Value);
+        assert_eq!(g.error("=DOLLAR(1, 128)"), CalcError::Value);
     }
 
     // -- CLEAN / UNICHAR / UNICODE --------------------------------------------
@@ -2246,6 +2990,28 @@ mod tests {
         assert_eq!(g.error("=FINDB(\"x\", \"hello\")"), CalcError::Value);
     }
 
+    #[test]
+    fn non_dbcs_byte_semantics_match_measured_excel() {
+        let g = Grid::empty();
+        // each UTF-16 code unit counts 1; a surrogate pair (emoji) counts 2
+        assert_eq!(g.num("=LEN(\"😊\")"), 2.0);
+        assert_eq!(g.num("=LENB(\"😊\")"), 2.0);
+        assert_eq!(g.num("=LEN(\"😊Hello\")"), 7.0);
+        assert_eq!(g.num("=LENB(\"😊Hello\")"), 7.0);
+        // LEFTB(emoji+Hello,3) = emoji+He (the chars Excel returns)
+        assert_eq!(g.text("=LEFTB(\"😊Hello\", 3)"), "😊He");
+        assert_eq!(g.text("=MIDB(\"中文测试\", 1, 2)"), "中文");
+        assert_eq!(g.text("=RIGHTB(\"中文测试\", 2)"), "测试");
+        assert_eq!(g.num("=LENB(\"，。、；：{}\")"), 7.0);
+        // a Chinese substring is found at byte position 4 (chars == bytes in a
+        // non-DBCS locale; emoji would be 2)
+        assert_eq!(g.num("=FINDB(\"欢迎\", \"你好，欢迎\")"), 4.0);
+        assert_eq!(g.num("=SEARCHB(\"欢迎\", \"你好，欢迎\")"), 4.0);
+        // REPLACEB = REPLACE on whole characters
+        assert_eq!(g.text("=REPLACEB(\"abcdef\", 2, 3, \"XY\")"), "aXYef");
+        assert_eq!(g.text("=REPLACEB(\"中文测试\", 1, 2, \"好\")"), "好测试");
+    }
+
     // -- VALUETOTEXT / ARRAYTOTEXT --------------------------------------------
 
     #[test]
@@ -2262,14 +3028,96 @@ mod tests {
     }
 
     #[test]
-    fn arraytotext_wraps_and_joins() {
+    fn arraytotext_joins_with_comma_space() {
         let g = Grid::empty();
-        assert_eq!(g.text("=ARRAYTOTEXT({1,2,3})"), "{1,2,3}");
-        assert_eq!(g.text("=ARRAYTOTEXT({1,2;3,4})"), "{1,2;3,4}");
-        assert_eq!(g.text("=ARRAYTOTEXT({\"a\",\"b\"})"), "{a,b}");
-        assert_eq!(g.text("=ARRAYTOTEXT({\"a\",\"b\"}, 1)"), "{\"a\",\"b\"}");
-        assert_eq!(g.text("=ARRAYTOTEXT(123)"), "{123}");
-        assert_eq!(g.text("=ARRAYTOTEXT(1/0)"), "{#DIV/0!}");
+        // Measured en-IN Excel: elements are joined with ", " (comma + space),
+        // no braces; the blank-string element contributes an empty field.
+        assert_eq!(g.text("=ARRAYTOTEXT({1,2,3})"), "1, 2, 3");
+        assert_eq!(g.text("=ARRAYTOTEXT({1,2;3,4})"), "1, 2, 3, 4");
+        assert_eq!(g.text("=ARRAYTOTEXT({\"a\",\"b\"})"), "a, b");
+        assert_eq!(
+            g.text("=ARRAYTOTEXT({1,\" \",1.23,TRUE,FALSE})"),
+            "1,  , 1.23, TRUE, FALSE"
+        );
+        assert_eq!(g.text("=ARRAYTOTEXT({\"a\",\"b\"}, 1)"), "\"a\", \"b\"");
+        assert_eq!(g.text("=ARRAYTOTEXT(123)"), "123");
+        assert_eq!(g.text("=ARRAYTOTEXT(1/0)"), "#DIV/0!");
         assert_eq!(g.error("=ARRAYTOTEXT({1,2}, 2)"), CalcError::Value);
+    }
+
+    #[test]
+    fn numbervalue_applies_each_percent_sign() {
+        let g = Grid::empty();
+        // Measured en-IN Excel: NUMBERVALUE("20%%") = 0.002 — every % divides
+        // by 100.
+        assert_eq!(g.num("=NUMBERVALUE(\"20%%\")"), 0.002);
+        assert_eq!(g.num("=NUMBERVALUE(\"3.5%\")"), 0.035);
+        assert_eq!(g.num("=NUMBERVALUE(\"3.5%%\")"), 0.00035);
+        // three percent signs divide by 100 three times
+        assert_eq!(g.num("=NUMBERVALUE(\"100%%%\", \"%\", \",\")"), 0.0001);
+    }
+
+    #[test]
+    fn asc_and_dbcs_convert_the_fullwidth_ascii_block() {
+        let g = Grid::empty();
+        assert_eq!(g.text("=ASC(\"ＡＢＣ１２３\")"), "ABC123");
+        assert_eq!(g.text("=ASC(\"　\")"), " ");
+        assert_eq!(g.text("=ASC(\"abc\")"), "abc");
+        // katakana is not carried by this engine; it passes through untouched
+        assert_eq!(g.text("=ASC(\"アイウ\")"), "アイウ");
+        assert_eq!(g.text("=DBCS(\"ABC123\")"), "ＡＢＣ１２３");
+        assert_eq!(g.text("=DBCS(\" \")"), "　");
+        assert_eq!(g.text("=DBCS(\"已全角\")"), "已全角");
+        assert_eq!(g.error("=ASC()"), CalcError::Value);
+        assert_eq!(g.error("=ASC(\"a\", \"b\")"), CalcError::Value);
+    }
+
+    #[test]
+    fn bahttext_renders_thai_words() {
+        let g = Grid::empty();
+        assert_eq!(g.text("=BAHTTEXT(0)"), "ศูนย์บาท");
+        assert_eq!(g.text("=BAHTTEXT(1)"), "หนึ่งบาท");
+        assert_eq!(g.text("=BAHTTEXT(21)"), "ยี่สิบเอ็ดบาท");
+        assert_eq!(g.text("=BAHTTEXT(123.45)"), "หนึ่งร้อยยี่สิบสามบาทสี่สิบห้าสตางค์");
+        assert_eq!(g.text("=BAHTTEXT(1.05)"), "หนึ่งบาทห้าสตางค์");
+        assert_eq!(g.text("=BAHTTEXT(1000001)"), "หนึ่งล้านหนึ่งบาท");
+        assert_eq!(
+            g.text("=BAHTTEXT(1234567)"),
+            "หนึ่งล้านสองแสนสามหมื่นสี่พันห้าร้อยหกสิบเจ็ดบาท"
+        );
+        assert_eq!(g.error("=BAHTTEXT(\"abc\")"), CalcError::Value);
+        assert_eq!(g.error("=BAHTTEXT(1, 2)"), CalcError::Value);
+    }
+
+    #[test]
+    fn numberstring_renders_chinese_forms() {
+        let g = Grid::empty();
+        assert_eq!(g.text("=NUMBERSTRING(123, 1)"), "一百二十三");
+        assert_eq!(g.text("=NUMBERSTRING(123, 2)"), "壹佰贰拾叁");
+        assert_eq!(g.text("=NUMBERSTRING(123, 3)"), "一二三");
+        assert_eq!(g.text("=NUMBERSTRING(0, 1)"), "零");
+        assert_eq!(g.text("=NUMBERSTRING(12, 1)"), "十二");
+        assert_eq!(g.text("=NUMBERSTRING(12, 2)"), "壹拾贰");
+        assert_eq!(g.text("=NUMBERSTRING(1005, 1)"), "一千零五");
+        assert_eq!(
+            g.text("=NUMBERSTRING(1234567, 1)"),
+            "一百二十三万四千五百六十七"
+        );
+        assert_eq!(g.text("=NUMBERSTRING(1000001, 1)"), "一百万零一");
+        assert_eq!(g.error("=NUMBERSTRING(123, 0)"), CalcError::Value);
+        assert_eq!(g.error("=NUMBERSTRING(123, 4)"), CalcError::Value);
+        assert_eq!(g.error("=NUMBERSTRING(123)"), CalcError::Value);
+    }
+
+    #[test]
+    fn new_functions_are_registered() {
+        for name in ["ASC", "DBCS", "BAHTTEXT", "NUMBERSTRING", "REPLACEB"] {
+            let r = registry();
+            assert!(
+                r.get(name).is_some(),
+                "{name} must be registered (a missing registration silently \
+                 routes every call to the fallback path)"
+            );
+        }
     }
 }
