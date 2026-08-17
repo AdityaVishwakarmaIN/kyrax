@@ -178,7 +178,7 @@ pub fn py_rich_data_parts<'py>(py: Python<'py>, path: &str) -> PyResult<Bound<'p
     let parts = py
         .detach(move || rich_data_part_names(&zip))
         .map_err(turbo_err_to_py)?;
-    Ok(PyList::new(py, parts.iter().map(String::as_str))?)
+    PyList::new(py, parts.iter().map(String::as_str))
 }
 
 // ---------------------------------------------------------------------------
@@ -290,7 +290,7 @@ pub fn py_signature_info<'py>(py: Python<'py>, path: &str) -> PyResult<Bound<'py
     for s in &sigs {
         items.push(signature_to_dict(py, s)?);
     }
-    Ok(PyList::new(py, items)?)
+    PyList::new(py, items)
 }
 
 // ---------------------------------------------------------------------------
@@ -309,7 +309,7 @@ pub fn py_control_parts<'py>(py: Python<'py>, path: &str) -> PyResult<Bound<'py,
     let parts = py
         .detach(move || control_part_names(&zip))
         .map_err(turbo_err_to_py)?;
-    Ok(PyList::new(py, parts.iter().map(String::as_str))?)
+    PyList::new(py, parts.iter().map(String::as_str))
 }
 
 // ---------------------------------------------------------------------------
@@ -375,7 +375,7 @@ pub fn py_external_links<'py>(py: Python<'py>, path: &str) -> PyResult<Bound<'py
     for b in &books {
         items.push(book_to_dict(py, b)?);
     }
-    Ok(PyList::new(py, items)?)
+    PyList::new(py, items)
 }
 
 // ---------------------------------------------------------------------------

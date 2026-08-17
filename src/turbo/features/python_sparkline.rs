@@ -97,8 +97,8 @@ fn parse_sparkline(obj: &Bound<'_, PyAny>) -> PyResult<Sparkline> {
         .cast::<PyDict>()
         .map_err(|_| PyValueError::new_err("each sparkline must be a dict {source, location}"))?;
     Ok(Sparkline {
-        source: opt_str(&d, "source")?.unwrap_or_default(),
-        location: opt_str(&d, "location")?.unwrap_or_default(),
+        source: opt_str(d, "source")?.unwrap_or_default(),
+        location: opt_str(d, "location")?.unwrap_or_default(),
     })
 }
 
@@ -122,12 +122,12 @@ fn parse_group(obj: &Bound<'_, PyAny>) -> PyResult<SparklineGroup> {
     Ok(SparklineGroup {
         kind: parse_kind(&kind_s)?,
         sparklines,
-        color_series: opt_str(&d, "color_series")?,
-        color_negative: opt_str(&d, "color_negative")?,
-        markers: opt_bool(&d, "markers")?.unwrap_or(false),
-        high: opt_bool(&d, "high")?.unwrap_or(false),
-        low: opt_bool(&d, "low")?.unwrap_or(false),
-        display_empty_as: opt_str(&d, "display_empty_as")?.unwrap_or_else(|| "gap".into()),
+        color_series: opt_str(d, "color_series")?,
+        color_negative: opt_str(d, "color_negative")?,
+        markers: opt_bool(d, "markers")?.unwrap_or(false),
+        high: opt_bool(d, "high")?.unwrap_or(false),
+        low: opt_bool(d, "low")?.unwrap_or(false),
+        display_empty_as: opt_str(d, "display_empty_as")?.unwrap_or_else(|| "gap".into()),
     })
 }
 
@@ -169,7 +169,7 @@ pub fn py_read_sparklines<'py>(
     for g in &groups {
         items.push(group_to_dict(py, g)?);
     }
-    Ok(PyList::new(py, items)?)
+    PyList::new(py, items)
 }
 
 fn read_sparklines_impl(path: &str, sheet_index: usize) -> TurboResult<Vec<SparklineGroup>> {
@@ -302,7 +302,7 @@ pub fn py_dependency_query<'py>(
     for k in &keys {
         items.push(PyTuple::new(py, [k.sheet, k.row, u32::from(k.col)])?);
     }
-    Ok(PyList::new(py, items)?)
+    PyList::new(py, items)
 }
 
 // No unit tests here: these bindings take `Bound` values that need an

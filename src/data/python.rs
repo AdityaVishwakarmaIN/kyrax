@@ -427,9 +427,7 @@ fn build_array_checked<CT: CellType + DataType + Debug>(
         ($ArrTy:ty, $extract:path) => {{
             let mut lossy = false;
             let arr = Arc::new(<$ArrTy>::from_iter(row_selector.iter().map(|row| {
-                let Some(cell) = data.get((row, col)) else {
-                    return None;
-                };
+                let cell = data.get((row, col))?;
                 let value = $extract(cell);
                 if detect_lossy && value.is_none() && !cell_is_nullish(cell, whitespace_as_null) {
                     lossy = true;

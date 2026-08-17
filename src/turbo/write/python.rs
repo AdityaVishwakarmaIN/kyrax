@@ -197,7 +197,7 @@ fn parse_fill(obj: &Bound<'_, PyAny>) -> PyResult<FillDesc> {
         || d.get_item("stops")?.is_some()
         || d.get_item("stop")?.is_some();
     if is_gradient {
-        return parse_gradient_fill(&d);
+        return parse_gradient_fill(d);
     }
     let pattern = opt_str(d, "patternType")?
         .or(opt_str(d, "pattern_type")?)
@@ -474,10 +474,12 @@ fn parse_run_font(obj: &Bound<'_, PyAny>) -> PyResult<RunFont> {
     let d = obj
         .cast::<PyDict>()
         .map_err(|_| PyValueError::new_err("run font must be a dict"))?;
-    let mut rf = RunFont::default();
-    rf.r_font = opt_str(d, "rFont")?
-        .or(opt_str(d, "r_font")?)
-        .or(opt_str(d, "name")?);
+    let mut rf = RunFont {
+        r_font: opt_str(d, "rFont")?
+            .or(opt_str(d, "r_font")?)
+            .or(opt_str(d, "name")?),
+        ..Default::default()
+    };
     rf.sz = opt_f64(d, "sz")?.or(opt_f64(d, "size")?);
     rf.bold = opt_bool(d, "bold")?.or(opt_bool(d, "b")?);
     rf.italic = opt_bool(d, "italic")?.or(opt_bool(d, "i")?);
@@ -933,7 +935,7 @@ fn py_to_cell_value_flagged(
                     y, m, d, hour, minute, second, micros,
                 )));
             }
-            if let Some(f) = style_flag.as_deref_mut() {
+            if let Some(f) = style_flag {
                 *f = true;
             }
             return Ok(CellValue::DateSerial(date_to_serial(y, m, d)));
@@ -1535,10 +1537,8 @@ fn parse_sheet_dict(sheet_obj: &Bound<'_, PyAny>, opts: &WriteOptions) -> PyResu
         .or(d.get_item("data")?)
         .or(d.get_item("table")?)
     {
-        if !cols.is_none() {
-            if columns_to_sheet(&mut sheet, &cols, opts.date1904)? {
-                style_work = true;
-            }
+        if !cols.is_none() && columns_to_sheet(&mut sheet, &cols, opts.date1904)? {
+            style_work = true;
         }
     }
 
@@ -1697,14 +1697,14 @@ fn parse_filter_column(obj: &Bound<'_, PyAny>) -> PyResult<FilterColumnMeta> {
     let hidden_button: bool = d
         .get_item("hidden_button")?
         .or(d.get_item("hiddenButton")?)
-        .and_then(|v| if v.is_none() { None } else { Some(v) })
+        .filter(|v| !v.is_none())
         .map(|v| v.extract::<bool>())
         .transpose()?
         .unwrap_or(false);
     let show_button: bool = d
         .get_item("show_button")?
         .or(d.get_item("showButton")?)
-        .and_then(|v| if v.is_none() { None } else { Some(v) })
+        .filter(|v| !v.is_none())
         .map(|v| v.extract::<bool>())
         .transpose()?
         .unwrap_or(true);
@@ -2298,7 +2298,7 @@ fn parse_series(obj: &Bound<'_, PyAny>) -> PyResult<Series> {
     let d = obj
         .cast::<PyDict>()
         .map_err(|_| PyValueError::new_err("series must be a dict"))?;
-    let (marker_symbol, marker_size) = parse_marker(&d)?;
+    let (marker_symbol, marker_size) = parse_marker(d)?;
     let smooth = d
         .get_item("smooth")?
         .map(|v| {
@@ -2343,7 +2343,7 @@ fn parse_series(obj: &Bound<'_, PyAny>) -> PyResult<Series> {
             .or(d.get_item("bubble")?)
             .map(|v| v.extract())
             .transpose()?,
-        colour: parse_series_colour(&d)?,
+        colour: parse_series_colour(d)?,
         marker_symbol,
         marker_size,
         smooth,
@@ -2409,18 +2409,18 @@ fn parse_anchor(obj: &Bound<'_, PyAny>) -> PyResult<Anchor> {
                 .or(d.get_item("from_cell")?)
                 .ok_or_else(|| PyValueError::new_err("twoCell needs from"))?
                 .extract()?,
-            from_off: opt_off_pair(&d, "from_off")?,
+            from_off: opt_off_pair(d, "from_off")?,
             to_cell: d
                 .get_item("to")?
                 .or(d.get_item("to_cell")?)
                 .ok_or_else(|| PyValueError::new_err("twoCell needs to"))?
                 .extract()?,
-            to_off: opt_off_pair(&d, "to_off")?,
+            to_off: opt_off_pair(d, "to_off")?,
             edit_as: d.get_item("edit_as")?.map(|v| v.extract()).transpose()?,
         }),
         "absolute" => Ok(Anchor::Absolute {
-            x_emu: opt_emu(&d, "x")?,
-            y_emu: opt_emu(&d, "y")?,
+            x_emu: opt_emu(d, "x")?,
+            y_emu: opt_emu(d, "y")?,
             cx_emu: d
                 .get_item("cx")?
                 .map(|v| v.extract())
@@ -2452,8 +2452,8 @@ fn parse_anchor(obj: &Bound<'_, PyAny>) -> PyResult<Anchor> {
                 .unwrap_or(7.5);
             Ok(Anchor::OneCell {
                 cell,
-                col_off: opt_emu(&d, "col_off")?,
-                row_off: opt_emu(&d, "row_off")?,
+                col_off: opt_emu(d, "col_off")?,
+                row_off: opt_emu(d, "row_off")?,
                 width_cm,
                 height_cm,
             })
@@ -2700,7 +2700,7 @@ fn try_parse_numeric_grid(
                     data_any.cast::<PyTuple>(),
                 ) {
                     let is_c_contiguous =
-                        strides.is_none() || strides.as_ref().map_or(false, |s| s.is_none());
+                        strides.is_none() || strides.as_ref().is_some_and(|s| s.is_none());
                     if shape.len() == 2 && is_c_contiguous {
                         let nrows: usize = shape.get_item(0)?.extract()?;
                         let ncols: usize = shape.get_item(1)?.extract()?;
@@ -2740,6 +2740,7 @@ fn try_parse_numeric_grid(
     Ok(None)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_workbook_from_py(
     sheets: &Bound<'_, PyAny>,
     string_mode: &str,
@@ -2972,6 +2973,7 @@ fn build_workbook_from_py(
     macro_enabled = false,
     recalculate = false,
 ))]
+#[allow(clippy::too_many_arguments)]
 pub fn py_write_excel_turbo(
     py: Python<'_>,
     path: &str,
@@ -3033,6 +3035,7 @@ pub fn py_write_excel_turbo(
     macro_enabled = false,
     recalculate = false,
 ))]
+#[allow(clippy::too_many_arguments)]
 pub fn py_write_excel_turbo_stream(
     py: Python<'_>,
     path: &str,
@@ -3097,6 +3100,7 @@ pub fn py_write_excel_turbo_stream(
     macro_enabled = false,
     recalculate = false,
 ))]
+#[allow(clippy::too_many_arguments)]
 pub fn py_write_excel_turbo_bytes<'py>(
     py: Python<'py>,
     sheets: &Bound<'_, PyAny>,

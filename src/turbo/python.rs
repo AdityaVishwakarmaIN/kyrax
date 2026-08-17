@@ -127,13 +127,7 @@ fn font_to_dict<'py>(py: Python<'py>, font: &Font) -> PyResult<Bound<'py, PyDict
     d.set_item("size", font.sz as f64)?;
     d.set_item("bold", font.bold)?;
     d.set_item("italic", font.italic)?;
-    d.set_item(
-        "underline",
-        font.underline
-            .as_ref()
-            .map(|s| s.as_str())
-            .unwrap_or("none"),
-    )?;
+    d.set_item("underline", font.underline.as_deref().unwrap_or("none"))?;
     d.set_item("color", color_to_dict(py, &font.color)?)?;
     Ok(d)
 }
@@ -238,7 +232,7 @@ fn defined_name_to_dict<'py>(py: Python<'py>, dn: &DefinedName) -> PyResult<Boun
         Scope::Sheet(idx) => d.set_item("scope", *idx)?,
     }
     d.set_item("value", &dn.value)?;
-    d.set_item("reserved", dn.reserved.as_ref().map(|s| s.as_str()))?;
+    d.set_item("reserved", dn.reserved.as_deref())?;
     d.set_item("hidden", dn.hidden)?;
     d.set_item("external", dn.external)?;
     let kind = match dn.kind {
@@ -558,7 +552,7 @@ impl PyTurboSheet {
                 }
                 RecordBatch::try_from_iter_with_nullable(names.into_iter().zip(cols).map(
                     |(name, arr)| {
-                        let nullable = arr.null_count() > 0 || arr.len() == 0;
+                        let nullable = arr.null_count() > 0 || arr.is_empty();
                         (name, arr, nullable)
                     },
                 ))

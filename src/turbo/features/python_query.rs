@@ -92,12 +92,12 @@ fn parse_comment_obj(obj: &Bound<'_, PyAny>) -> PyResult<ThreadedComment> {
         .cast::<PyDict>()
         .map_err(|_| PyValueError::new_err("each threaded comment must be a dict"))?;
     Ok(ThreadedComment {
-        cell: req_str(&d, "cell")?,
-        text: req_str(&d, "text")?,
-        author_id: req_str(&d, "author_id")?,
-        id: req_str(&d, "id")?,
-        created: opt_str(&d, "created")?,
-        parent_id: opt_str(&d, "parent_id")?,
+        cell: req_str(d, "cell")?,
+        text: req_str(d, "text")?,
+        author_id: req_str(d, "author_id")?,
+        id: req_str(d, "id")?,
+        created: opt_str(d, "created")?,
+        parent_id: opt_str(d, "parent_id")?,
     })
 }
 
@@ -106,8 +106,8 @@ fn parse_person_obj(obj: &Bound<'_, PyAny>) -> PyResult<Person> {
         .cast::<PyDict>()
         .map_err(|_| PyValueError::new_err("each person must be a dict"))?;
     Ok(Person {
-        id: req_str(&d, "id")?,
-        display_name: req_str(&d, "display_name")?,
+        id: req_str(d, "id")?,
+        display_name: req_str(d, "display_name")?,
     })
 }
 
@@ -139,7 +139,7 @@ pub fn py_diff_parts<'py>(
         d.set_item("kind", change_kind_to_str(p.kind))?;
         items.push(d);
     }
-    Ok(PyList::new(py, items)?)
+    PyList::new(py, items)
 }
 
 /// Diff two workbook files at part and cell level.

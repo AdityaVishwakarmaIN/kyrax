@@ -821,6 +821,7 @@ pub fn py_recalculate<'py>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     fn parse(s: &str) -> Expr {
         parse_formula(s).unwrap_or_else(|e| panic!("parse {s:?} failed: {e:?}"))

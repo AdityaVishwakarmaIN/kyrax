@@ -33,8 +33,8 @@ impl TryFrom<&ExcelTable> for RecordBatch {
         .with_context(|| {
             format!(
                 "could not convert table {table} in sheet {sheet} to RecordBatch",
-                table = &table.name,
-                sheet = &table.sheet_name
+                table = table.name,
+                sheet = table.sheet_name
             )
         })
     }
