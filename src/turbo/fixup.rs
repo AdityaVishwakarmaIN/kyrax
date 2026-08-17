@@ -207,9 +207,7 @@ pub fn fixup_table_part_xml<'a>(
     match axis {
         Axis::Row => {
             let r0 = parts.iter().filter_map(part_row).min()?;
-            if shift_index(Axis::Row, r0, at, delta).is_none() {
-                return None; // header row deleted -> corrupt table
-            }
+            shift_index(Axis::Row, r0, at, delta)?;
         }
         Axis::Col => {
             let c0 = parts.iter().filter_map(part_col).min()?;
@@ -347,10 +345,7 @@ pub fn fixup_workbook_xml<'a>(
     let mut changed = false;
     let mut started = false;
     let mut last = 0usize;
-    loop {
-        let Some(srel) = find_element(&block[pos..], b"definedName", 0) else {
-            break;
-        };
+    while let Some(srel) = find_element(&block[pos..], b"definedName", 0) {
         let s = pos + srel;
         let Some(gt_rel) = memchr::memchr(b'>', &block[s..]) else {
             break;
@@ -463,20 +458,14 @@ fn rewrite_selection(elem: &[u8], axis: Axis, at: u32, delta: i64) -> ElemEdit {
 // ----------------------------------------------------------------------------
 
 fn fixup_merge_cells(tail: &[u8], axis: Axis, at: u32, delta: i64) -> Option<Vec<u8>> {
-    let Some(s) = find_element(tail, b"mergeCells", 0) else {
-        return None;
-    };
-    let Some(gt_rel) = memchr::memchr(b'>', &tail[s..]) else {
-        return None;
-    };
+    let s = find_element(tail, b"mergeCells", 0)?;
+    let gt_rel = memchr::memchr(b'>', &tail[s..])?;
     let gt = s + gt_rel;
     if gt > s && tail[gt - 1] == b'/' {
         return None; // <mergeCells/> empty
     }
     let close_tag = b"</mergeCells>";
-    let Some(close_rel) = memchr::memmem::find(&tail[gt..], close_tag) else {
-        return None;
-    };
+    let close_rel = memchr::memmem::find(&tail[gt..], close_tag)?;
     let close = gt + close_rel;
     let block = &tail[gt + 1..close];
 
@@ -770,20 +759,14 @@ fn fixup_breaks(tail: &[u8], axis: Axis, at: u32, delta: i64) -> Option<Vec<u8>>
         Axis::Row => b"rowBreaks",
         Axis::Col => b"colBreaks",
     };
-    let Some(s) = find_element(tail, name, 0) else {
-        return None;
-    };
-    let Some(gt_rel) = memchr::memchr(b'>', &tail[s..]) else {
-        return None;
-    };
+    let s = find_element(tail, name, 0)?;
+    let gt_rel = memchr::memchr(b'>', &tail[s..])?;
     let gt = s + gt_rel;
     if gt > s && tail[gt - 1] == b'/' {
         return None;
     }
     let close_tag = closing_tag(name);
-    let Some(close_rel) = memchr::memmem::find(&tail[gt..], &close_tag) else {
-        return None;
-    };
+    let close_rel = memchr::memmem::find(&tail[gt..], &close_tag)?;
     let close = gt + close_rel;
     let block = &tail[gt + 1..close];
 
@@ -880,9 +863,7 @@ fn fixup_breaks(tail: &[u8], axis: Axis, at: u32, delta: i64) -> Option<Vec<u8>>
 // ----------------------------------------------------------------------------
 
 fn fixup_table_inner_auto_filter(body: &[u8], axis: Axis, at: u32, delta: i64) -> Option<Vec<u8>> {
-    let Some(s) = find_element(body, b"autoFilter", 0) else {
-        return None;
-    };
+    let s = find_element(body, b"autoFilter", 0)?;
     let gt_rel = memchr::memchr(b'>', &body[s..])?;
     let gt = s + gt_rel;
     let self_close = gt > s && body[gt - 1] == b'/';
@@ -942,7 +923,7 @@ fn shift_defined_name_value(
 /// Extract the leading `'Sheet'!` or `Sheet!` qualifier. Returns the byte index
 /// of `!` and the raw qualifier bytes (excluding the `!`).
 fn extract_qualifier(value: &[u8]) -> Option<(usize, &[u8])> {
-    if value.get(0) == Some(&b'\'') {
+    if value.first() == Some(&b'\'') {
         let mut i = 1;
         while i < value.len() {
             if value[i] == b'\'' {
@@ -1525,10 +1506,7 @@ fn rewrite_elements(
     let mut changed = false;
     let mut started = false;
     let mut last = 0usize;
-    loop {
-        let Some(rel) = find_element(&xml[pos..], name, 0) else {
-            break;
-        };
+    while let Some(rel) = find_element(&xml[pos..], name, 0) {
         let s = pos + rel;
         let Some(gt_rel) = memchr::memchr(b'>', &xml[s..]) else {
             break;
@@ -1626,6 +1604,7 @@ fn apply<'a>(cur: &mut Cow<'a, [u8]>, f: impl Fn(&[u8]) -> Option<Vec<u8>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     /// A worksheet whose header/tail carry arbitrary metadata; sheetData is a
     /// single row so the pass has a grid to anchor on.
@@ -2303,7 +2282,7 @@ mod tests {
         let x = cache_xml("A1:C5", "Data");
         let once = set_pivot_cache_refresh_on_load(x.as_bytes()).unwrap();
         let twice = set_pivot_cache_refresh_on_load(&once);
-        assert!(matches!(twice, None));
+        assert!(twice.is_none());
         assert!(String::from_utf8_lossy(&once).contains(r#"refreshOnLoad="1""#));
     }
 }

@@ -21,6 +21,7 @@ use kyrax::turbo::write::{
     CachedValue, Cell, CellValue, FormulaKind, Row, SstBuilder, Workbook, write_workbook_bytes,
     write_worksheet,
 };
+use pretty_assertions::assert_eq;
 
 use std::io::Read;
 
@@ -549,6 +550,7 @@ fn every_brief_family_persists_anchor_and_spill() {
 ///   * the reference-result family (INDEX/INDIRECT/OFFSET) IS computable by
 ///     `eval` but `calc/deps.rs` marks address functions unresolved, so the
 ///     dependency graph excludes them from the hydration order.
+///
 /// Both end in `fallback`, no cache is fabricated, and `fullCalcOnLoad` makes
 /// Excel fill them on open. These are calc-engine/graph files outside Lane H's
 /// ownership; this test pins the current (correct, non-fabricated) behaviour.
@@ -626,11 +628,7 @@ fn every_spilled_family_saves_into_a_readable_package() {
             .read_to_string(&mut sheet_xml)
             .expect("inflates");
         let cells = parse_cells(&sheet_xml);
-        assert!(
-            cells.len() >= 1 + c.spill.len(),
-            "{}: too few cells",
-            c.name
-        );
+        assert!(cells.len() > c.spill.len(), "{}: too few cells", c.name);
         let anchor = cells
             .iter()
             .find(|x| x.r == coord(c.anchor.0, c.anchor.1))

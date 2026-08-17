@@ -422,7 +422,7 @@ impl<W: Write + Seek> StreamingZipWriter<W> {
         let entry = self
             .current
             .as_mut()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no active entry"))?;
+            .ok_or_else(|| io::Error::other("no active entry"))?;
 
         entry.crc32 = update_crc32(entry.crc32, chunk);
         entry.uncomp_size += chunk.len() as u64;
@@ -726,6 +726,7 @@ const fn make_crc_table() -> [u32; 256] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn crc_known() {
@@ -915,8 +916,8 @@ mod coordinator_level_race {
                 raw / 1e6
             );
             println!(
-                "{:>4} {:>9} {:>9} {:>8}  {}",
-                "lvl", "ms", "MB out", "ratio", "vs level 6"
+                "{:>4} {:>9} {:>9} {:>8}  vs level 6",
+                "lvl", "ms", "MB out", "ratio"
             );
             let mut base_ms = 0f64;
             let mut base_sz = 0f64;

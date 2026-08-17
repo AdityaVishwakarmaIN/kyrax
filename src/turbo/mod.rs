@@ -365,10 +365,7 @@ fn read_workbook_turbo_filtered(
     let zip = open_package_bytes(path, password)?;
 
     // Shared strings (optional part)
-    let shared = match read_entry(&zip, "xl/sharedStrings.xml")? {
-        Some(sx) => Some(parse_shared_strings(&sx)),
-        None => None,
-    };
+    let shared = read_entry(&zip, "xl/sharedStrings.xml")?.map(|sx| parse_shared_strings(&sx));
 
     // Styles: STYLES needs full table; COND_FORMAT needs dxfs (same parse is fine)
     let need_styles =
@@ -771,7 +768,7 @@ fn read_workbook_turbo_filtered(
         ) = if features.contains(Features::SHEET_META) {
             let auto_filter = meta::scan_auto_filter(tail);
             let protection = Some(meta::scan_protection(tail).unwrap_or_default());
-            let sheet_view = sheet_view.or_else(|| {
+            let sheet_view = sheet_view.or({
                 Some(SheetViewMeta {
                     show_grid_lines: None,
                     zoom_scale: None,
@@ -790,7 +787,7 @@ fn read_workbook_turbo_filtered(
             (
                 Some(row_dims_from_scan),
                 Some(col_dims),
-                sheet_format.or_else(|| {
+                sheet_format.or({
                     Some(SheetFormat {
                         base_col_width: Some(8),
                         default_col_width: None,

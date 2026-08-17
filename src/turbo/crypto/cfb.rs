@@ -443,6 +443,7 @@ fn u64_at(data: &[u8], off: usize) -> Result<u64, CfbError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
     use std::collections::HashMap;
 
     const FREESECT: u32 = 0xFFFFFFFF;
@@ -590,9 +591,7 @@ mod tests {
         let full_start = root_start + r;
 
         let mut fat: Vec<u32> = vec![FREESECT; f * per];
-        for s in 0..f {
-            fat[s] = FATSECT;
-        }
+        fat[..f].fill(FATSECT);
         let dir_sectors: Vec<u32> = (0..d).map(|i| (dir_start + i) as u32).collect();
         let mf_sectors: Vec<u32> = (0..m).map(|i| (minifat_start + i) as u32).collect();
         let root_sectors: Vec<u32> = (0..r).map(|i| (root_start + i) as u32).collect();

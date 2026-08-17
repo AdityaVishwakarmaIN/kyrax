@@ -259,6 +259,7 @@ fn is_worksheet_part(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     fn w_u16(out: &mut Vec<u8>, v: u16) {
         out.extend_from_slice(&v.to_le_bytes());

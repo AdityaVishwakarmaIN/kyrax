@@ -20,6 +20,7 @@ use kyrax::turbo::features::provenance::Provenance;
 use kyrax::turbo::write::{
     CachedValue, Cell, CellValue, FormulaKind, Row, Sheet, Workbook, write_workbook_bytes,
 };
+use pretty_assertions::assert_eq;
 
 /// Local single-sheet resolver: `Sheet1` maps to sheet id 0, everything else
 /// (names / tables / other sheets) resolves `Unknown` -> safe fallback, never

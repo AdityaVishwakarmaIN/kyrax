@@ -5,6 +5,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use kyrax::turbo::{Features, read_workbook_turbo};
+use pretty_assertions::assert_eq;
 
 /// Minimal store-only (method 0) ZIP with the given entries.
 fn write_store_zip(path: &std::path::Path, entries: &[(&str, &[u8])]) {
@@ -132,7 +133,7 @@ fn truncated_sheet_xml_no_panic() {
     );
 
     // Either Ok (partial degrade) or Err — never panic.
-    let _ = std::panic::catch_unwind(|| {
+    std::panic::catch_unwind(|| {
         let _ = read_workbook_turbo(path.to_str().unwrap(), Features::ALL);
     })
     .expect("truncated sheet XML must not panic");
@@ -235,7 +236,7 @@ fn orphan_shared_formula_si_no_panic() {
     let wb = read_workbook_turbo(path.to_str().unwrap(), Features::ALL)
         .expect("orphan shared si should degrade");
     let f = wb.sheets[0].formulas.as_ref().expect("formulas flag on");
-    assert!(f.len() >= 1);
+    assert!(!f.is_empty());
     let texts = f.materialize_all();
     // Orphan si → empty string, not panic.
     assert!(
@@ -441,7 +442,7 @@ fn truncated_chart_xml_no_panic() {
         ],
     );
 
-    let _ = std::panic::catch_unwind(|| {
+    std::panic::catch_unwind(|| {
         let _ = read_workbook_turbo(path.to_str().unwrap(), Features::ALL);
     })
     .expect("truncated chart XML must not panic");
@@ -795,7 +796,7 @@ fn image_truncated_drawing_no_panic() {
         Some(("xl/media/image1.png", b"PNGDATA")),
     );
     let path = tmp_xlsx("hop_trunc_drawing");
-    let _ = std::panic::catch_unwind(|| {
+    std::panic::catch_unwind(|| {
         let _ = read_workbook_turbo(path.to_str().unwrap(), Features::IMAGES);
     })
     .expect("truncated drawing XML must not panic");

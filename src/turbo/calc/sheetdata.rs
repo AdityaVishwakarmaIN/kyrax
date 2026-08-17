@@ -508,6 +508,7 @@ mod tests {
     use crate::turbo::calc::ast::{ColumnRef, RefExpr};
     use crate::turbo::calc::functions::FuncCtx;
     use crate::turbo::write::model::{Cell, FormulaKind, Row, Sheet};
+    use pretty_assertions::assert_eq;
 
     /// Sales sheet: A1=10, B1=20, C1 =A1+B1 (cached 30), A2=5, C2 formula
     /// with no cache, C3=7. Used region = rows 1..3, cols A..C.

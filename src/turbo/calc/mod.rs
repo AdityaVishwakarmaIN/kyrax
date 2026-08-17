@@ -54,7 +54,7 @@ pub use parser::{ParseError, parse_formula};
 pub use value::{ArrayValue, CalcError, CalcValue};
 
 /// Options controlling one hydration pass.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct CalcOptions {
     /// Excel 1904 date system (affects date-serial arithmetic only).
     pub date1904: bool,
@@ -62,16 +62,6 @@ pub struct CalcOptions {
     pub force_recalc: bool,
     /// Circular-reference iteration cap (0 = none).
     pub max_iterations: u32,
-}
-
-impl Default for CalcOptions {
-    fn default() -> Self {
-        Self {
-            date1904: false,
-            force_recalc: false,
-            max_iterations: 0,
-        }
-    }
 }
 
 /// Result counters for one hydration pass.

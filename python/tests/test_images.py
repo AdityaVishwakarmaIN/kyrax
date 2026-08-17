@@ -191,7 +191,7 @@ def test_kyrax_reader_matches_openpyxl_on_openpyxl_written_file(tmp_path) -> Non
     ]
     for data, anchor in zip([PNG, JPEG, PNG], anchors):
         im = OpxImage(io.BytesIO(data))
-        im.anchor = anchor
+        im.anchor = anchor  # ty: ignore[invalid-assignment]
         ws.add_image(im)
 
     path = tmp_path / "opx_images.xlsx"

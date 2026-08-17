@@ -58,6 +58,7 @@ use kyrax::turbo::write::{
     save_workbook,
 };
 use kyrax::turbo::{Features, read_workbook_turbo};
+use pretty_assertions::assert_eq;
 
 // ---------------------------------------------------------------------------
 // Fixed-seed PRNG (xorshift64, deterministic — a failure reproduces).
@@ -122,7 +123,7 @@ const EDGE_NUMS: &[f64] = &[
     1e-9,
     1e20,
     123_456.789,
-    3.141_592_653_589_793,
+    std::f64::consts::PI,
     2.5e-7,
     9_999_999_999.0,
 ];
@@ -251,13 +252,7 @@ impl Plan {
     fn number_value(&self) -> f64 {
         match self {
             Plan::Num(x) | Plan::Date(x) | Plan::FormulaNum(x) => *x,
-            Plan::Bool(b) | Plan::FormulaBool(b) => {
-                if *b {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
+            Plan::Bool(b) | Plan::FormulaBool(b) if *b => 1.0,
             _ => 0.0,
         }
     }
@@ -710,7 +705,9 @@ fn sparse_promoter_in_ten_thousand() {
     // One number among strings: start / middle / end.
     gs.data[0][3] = Plan::Num(1.5);
     gs.data[5_000][4] = Plan::Num(-42.25);
-    gs.data[9_999][5] = Plan::Num(3.14);
+    #[allow(clippy::approx_constant)]
+    let end_num = 3.14;
+    gs.data[9_999][5] = Plan::Num(end_num);
     run_case("sparse 10k", &gs);
 }
 

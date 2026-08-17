@@ -50,7 +50,8 @@ pub fn register(r: &mut Registry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::turbo::calc::testkit::{Grid, Outcome};
+    use crate::turbo::calc::testkit::Grid;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn unreserved_characters_pass_through_untouched() {

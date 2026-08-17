@@ -626,8 +626,8 @@ impl WorkbookOverlay {
                     &signature_removal,
                     Some(sr) if sr.drop.iter().any(|d| d == entry_name)
                 )
-                || (matches!(&signature_removal, Some(_)) && entry_name == "_rels/.rels")
-                || (matches!(&signature_removal, Some(_)) && entry_name == "[Content_Types].xml")
+                || (signature_removal.is_some() && entry_name == "_rels/.rels")
+                || (signature_removal.is_some() && entry_name == "[Content_Types].xml")
             {
                 continue;
             }
@@ -911,12 +911,9 @@ fn insert_calc_pr(xml: &[u8]) -> TurboResult<Vec<u8>> {
         }
         match at {
             Some(p) => p,
-            None => {
-                let p = memchr::memmem::find(xml, b"</workbook>").ok_or_else(|| {
-                    TurboError::Format("xl/workbook.xml is missing </workbook>".into())
-                })?;
-                p
-            }
+            None => memchr::memmem::find(xml, b"</workbook>").ok_or_else(|| {
+                TurboError::Format("xl/workbook.xml is missing </workbook>".into())
+            })?,
         }
     };
     let mut out = Vec::with_capacity(xml.len() + TAG.len());
@@ -1868,7 +1865,7 @@ pub fn hydrate_sheet_from_xml(
     Ok(sheet)
 }
 
-fn find_cell_mut<'a>(sheet: &'a mut Sheet, row: u32, col: u32) -> Option<&'a mut Cell> {
+fn find_cell_mut(sheet: &mut Sheet, row: u32, col: u32) -> Option<&mut Cell> {
     let r = sheet.rows.iter_mut().find(|r| r.row == row)?;
     r.cells.iter_mut().find(|c| c.col == col)
 }
@@ -2174,6 +2171,7 @@ fn emit_xf_with_offsets(
 ///   1. Find `</pool_tag>` closing tag
 ///   2. Insert new records before it
 ///   3. Update `count="N"` to `count="N+new_count"`
+#[allow(clippy::too_many_arguments)]
 fn splice_styles_xml_pools(
     xml: &[u8],
     new_fonts: &[u8],
@@ -2251,6 +2249,7 @@ fn splice_styles_xml_pools(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
     // Test-only: the fixtures build a Workbook and wrap bytes in an Arc; the
     // non-test path takes both from its caller.
     use crate::turbo::write::model::StringMode;
@@ -2337,7 +2336,7 @@ mod tests {
         .unwrap()
     }
 
-    fn cell_at<'a>(sheet: &'a Sheet, row: u32, col: u32) -> Option<&'a Cell> {
+    fn cell_at(sheet: &Sheet, row: u32, col: u32) -> Option<&Cell> {
         let r = sheet.rows.iter().find(|r| r.row == row)?;
         r.cells.iter().find(|c| c.col == col)
     }

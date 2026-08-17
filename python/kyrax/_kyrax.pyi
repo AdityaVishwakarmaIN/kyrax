@@ -345,6 +345,28 @@ def write_excel_turbo(
     ``min``/``product``/``stdDev``/``stdDevp``/``var``/``varp``.
     """
 
+def write_excel_turbo_stream(
+    path: str,
+    sheets: list,
+    *,
+    string_mode: str = "inline",
+    emit_cached_values: bool = True,
+    date1904: bool = False,
+    features: list[str] | str | None = None,
+    active_tab: int = 0,
+    named_styles: list | None = None,
+    props: dict | None = None,
+    defined_names: list | None = None,
+    chartsheets: list | None = None,
+    lock_structure: bool = False,
+    external_links: list | None = None,
+    creator: str | None = None,
+    macro_enabled: bool = False,
+    recalculate: bool = False,
+) -> None:
+    """Write an XLSX streaming to disk (openpyxl ``write_only`` analogue);
+    same options and sheet-dict schema as :func:`write_excel_turbo`."""
+
 def is_encrypted(path: str) -> bool:
     """Detect an ECMA-376 encrypted workbook without a password"""
 
@@ -387,8 +409,153 @@ class _TurboReader:
     @property
     def has_vba(self) -> bool: ...
     def vba_project(self) -> bytes | None: ...
+    def __repr__(self) -> str: ...
 
-class _TurboSheet: ...
+class _TurboSheet:
+    """One worksheet loaded via the turbo fast path.
+
+    Values come from :meth:`to_arrow`; the other methods expose the features
+    requested through ``features=`` on :meth:`_TurboReader.load_sheet`
+    (``None`` when a feature was not requested).
+    """
+
+    @property
+    def name(self) -> str: ...
+    @property
+    def nrows(self) -> int: ...
+    @property
+    def ncols(self) -> int: ...
+    @property
+    def column_names(self) -> list[str]: ...
+    def to_arrow(self) -> pa.RecordBatch:
+        """Values as a pyarrow `RecordBatch` (dictionary-encoded strings OK).
+
+        Cached formula results are present in value columns (both-not-XOR with
+        formula text). Typed cell errors surface via :meth:`cell_errors`.
+
+        Requires the `pyarrow` extra to be installed.
+        """
+
+    def style_indices(self) -> list[list[int]] | None:
+        """Per-column uint32 xf indices (length=ncols, each list length=nrows).
+
+        Returns `None` if styles were not requested.
+        """
+
+    def style_table(self) -> list[dict] | None:
+        """Resolved cellXfs (one dict per xf). `None` if styles not loaded."""
+
+    def formulas(self) -> pa.RecordBatch | None:
+        """Sparse formulas with shared text translated as a `RecordBatch`.
+
+        Columns: ``row``, ``col`` (uint32, 0-based data indices, header
+        excluded), ``kind`` (plain|shared|array|dataTable), ``text`` (utf8,
+        shared translated), ``ref`` (utf8, null unless array). `None` if not
+        requested. Requires the `pyarrow` extra.
+        """
+
+    def cell_errors(self) -> pa.RecordBatch:
+        """Sparse typed error caches from ``t="e"`` cells as a `RecordBatch`.
+
+        Columns: ``row``, ``col`` (uint32, 0-based data indices, header
+        excluded), ``code`` (utf8). Always available (empty batch when the
+        sheet has no error cells). Requires the `pyarrow` extra.
+        """
+
+    def merges(self) -> list[str] | None:
+        """Merged ranges as A1 strings (``"A1:B2"``). `None` if not requested."""
+
+    def hyperlinks(self) -> list[dict] | None:
+        """Hyperlinks as dicts. `None` if not requested."""
+
+    def comments(self) -> pa.RecordBatch | None:
+        """Comments as a `RecordBatch` (ref, author, text). `None` if not
+        requested. Requires the `pyarrow` extra.
+        """
+
+    def comment_authors(self) -> list[str] | None:
+        """Comment author list (when comments were requested); else `None`."""
+
+    @property
+    def legacy_is_mirror(self) -> bool:
+        """True when legacy comments are Excel mirrors of threaded comments."""
+
+    def threaded_comments(self) -> list[dict] | None:
+        """Threaded comments (Office 2018+). `None` if comments not requested."""
+
+    def charts(self) -> list[dict] | None:
+        """Chart metadata on this sheet. `None` if charts not requested."""
+
+    def images(self) -> list[dict] | None:
+        """Images on this sheet (``data`` bytes + ``anchor`` dict).
+        `None` if images not requested.
+        """
+
+    def pivots(self) -> list[dict] | None:
+        """Pivot table metadata on this sheet. `None` if pivots not requested."""
+
+    def tables(self) -> list[dict] | None:
+        """Tables on this sheet. `None` if tables not requested."""
+
+    @property
+    def sheet_state(self) -> str:
+        """Sheet visibility: ``visible`` | ``hidden`` | ``veryHidden``."""
+
+    @property
+    def sheet_kind(self) -> str:
+        """``worksheet`` or ``chartsheet``."""
+
+    def row_dimensions(self) -> dict | None:
+        """Explicitly-set row dimensions ``{row: {height, hidden, ...}}`` (1-based keys)."""
+
+    def column_dimensions(self) -> list[dict] | None:
+        """Column dimension records (min/max/width/hidden/...)."""
+
+    def sheet_format(self) -> dict | None:
+        """Default row/col format props from ``sheetFormatPr``."""
+
+    def auto_filter(self) -> dict | None:
+        """AutoFilter ref + filter columns, or `None`."""
+
+    def sheet_view(self) -> dict | None:
+        """Active sheetView props + optional pane."""
+
+    def freeze_panes(self) -> str | None:
+        """Freeze panes top-left cell A1 (when frozen), else `None`."""
+
+    def protection(self) -> dict | None:
+        """Sheet protection flags + password hash fields."""
+
+    def page_setup(self) -> dict | None:
+        """Print page setup (orientation, paper size, scale, fit...)."""
+
+    def page_margins(self) -> dict | None:
+        """Page margins in inches."""
+
+    def print_options(self) -> dict | None:
+        """Print options (centered, headings, grid lines)."""
+
+    def header_footer(self) -> dict | None:
+        """Header/footer raw strings (unescaped, with ``&L``/``&C``/``&R``)."""
+
+    @property
+    def code_name(self) -> str | None:
+        """VBA sheet code name from ``sheetPr``."""
+
+    @property
+    def tab_color(self) -> str | None:
+        """Tab color (rgb hex or ``theme:N``)."""
+
+    def data_validations(self) -> list[dict] | None:
+        """Data validation records (sheet-level). `None` if not requested."""
+
+    def conditional_formatting(self) -> list[dict] | None:
+        """Flat CF rule list with resolved dxf when available."""
+
+    def named_styles(self) -> list[dict] | None:
+        """Named styles from styles.xml (when styles loaded)."""
+
+    def __repr__(self) -> str: ...
 
 class EditableSheet:
     """A live sheet handle on an :class:`EditableWorkbook`.
@@ -561,6 +728,69 @@ def dependencies(formula: str) -> list[str]:
 def recalculate(sheets: list) -> bytes:
     """Recalculate a workbook (same sheet-dict schema as write_excel_turbo)
     and return it as XLSX bytes with computed formula caches."""
+
+# --- Phase 3 feature inspection / query API ---
+
+def slicer_inventory(path: str) -> dict:
+    """Inventory slicer/timeline parts: ``{slicers, timelines,
+    slicer_caches, timeline_cache_names, sheet_slicer_refs}``."""
+
+def rich_data_parts(path: str) -> list[str]:
+    """List the ``xl/richData/*`` pass-through parts (plus ``xl/metadata.xml``)."""
+
+def power_query_inventory(path: str) -> dict:
+    """Inventory Power Query / data-model parts: ``{connections,
+    has_data_mashup, custom_xml_parts, query_table_parts, model_parts}``."""
+
+def is_signed_workbook(path: str) -> bool:
+    """True when the workbook has digital-signature parts."""
+
+def signature_info(path: str) -> list[dict]:
+    """Detect every digital-signature part as ``{part_name, signed_at,
+    signer_hint}`` dicts."""
+
+def control_parts(path: str) -> list[str]:
+    """List the form-control / ActiveX / embedded-OLE part names."""
+
+def external_links(path: str) -> list[dict]:
+    """Load every external book: ``{index, target, sheet_names,
+    defined_names, cached}`` dicts."""
+
+def feature_parts(path: str) -> dict:
+    """One-call part inventory mapping category -> list of part names:
+    ``{slicers, rich_data, power_query, signatures, controls,
+    external_links}``."""
+
+def diff_parts(a_path: str, b_path: str) -> list[dict]:
+    """Compare two workbooks' part lists; ``{name, kind}`` where kind is
+    "added" | "removed" | "value_changed" (a is BEFORE, b is AFTER)."""
+
+def diff_workbooks(a_path: str, b_path: str) -> dict:
+    """Diff two workbooks at part and cell level: ``{identical, parts,
+    cells}`` (a is BEFORE, b is AFTER)."""
+
+def read_threaded_comments(path: str) -> dict:
+    """Read threaded comments and persons: ``{comments, persons}``."""
+
+def write_threaded_comments(comments: list, persons: list) -> dict:
+    """Serialize threaded comments and persons to
+    ``{threaded_comments_xml, persons_xml}`` bytes."""
+
+def read_sparklines(path: str, sheet_index: int) -> list[dict]:
+    """Read sparkline groups on one worksheet (0-based ``sheet_index``)."""
+
+def splice_sparklines(sheet_xml: bytes, groups: list) -> bytes:
+    """Splice sparkline groups into a worksheet part, returning new bytes."""
+
+def dependency_query(
+    path: str,
+    cells: list[tuple[int, int, int]],
+    mode: str,
+) -> list[tuple[int, int, int]]:
+    """Answer a dependency query over the formula graph. ``cells`` are
+    ``(sheet_index, row, col)`` seeds (all 0-based); ``mode`` is one of
+    "precedents" | "dependents" | "precedents_deep" | "dependents_deep" |
+    "impact" | "roots"."""
 
 __version__: str
 

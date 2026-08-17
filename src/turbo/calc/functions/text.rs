@@ -1071,7 +1071,7 @@ fn char_to_code(ch: char) -> u32 {
 
 fn char_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let code = trunc_arg(&args[0].value(ctx)?)?;
-    if code < 1.0 || code > 255.0 {
+    if !(1.0..=255.0).contains(&code) {
         return Err(CalcError::Value);
     }
     Ok(CalcValue::text(cp1252_to_char(code as u8).to_string()))
@@ -1338,7 +1338,7 @@ fn fixed_impl(n: f64, decimals: i32, no_commas: bool) -> Result<String, CalcErro
         return Err(CalcError::Value);
     }
     let value = if decimals < 0 {
-        let scale = 10f64.powi((-decimals) as i32);
+        let scale = 10f64.powi(-decimals);
         let r = (n / scale).round() * scale;
         if !r.is_finite() {
             return Err(CalcError::Num);
@@ -1620,9 +1620,8 @@ fn chinese_number(digits: &[u32], upper: bool, leading_one: bool) -> String {
     }
     let mut out = String::new();
     let mut pending_zero = false;
-    for i in 0..n {
+    for (i, &digit) in digits.iter().enumerate() {
         let pos = n - 1 - i;
-        let digit = digits[i];
         if digit == 0 {
             if !out.is_empty() {
                 pending_zero = true;
@@ -1649,7 +1648,7 @@ fn chinese_number(digits: &[u32], upper: bool, leading_one: bool) -> String {
 fn numberstring(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let n = coerce_number(&args[0].value(ctx)?)?;
     let kind = trunc_arg(&args[1].value(ctx)?)?;
-    if kind < 1.0 || kind > 3.0 {
+    if !(1.0..=3.0).contains(&kind) {
         return Err(CalcError::Value);
     }
     if !n.is_finite() {
@@ -2231,12 +2230,14 @@ pub fn register(r: &mut Registry) {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
     use crate::turbo::calc::functions::CellResolver;
     use crate::turbo::calc::functions::registry;
     use crate::turbo::calc::testkit::Grid;
     use crate::turbo::calc::value::ArrayValue;
+    use pretty_assertions::assert_eq;
 
     struct EmptyResolver;
     impl CellResolver for EmptyResolver {

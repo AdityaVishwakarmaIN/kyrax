@@ -16,7 +16,7 @@ fn esc_text(s: &str, out: &mut Vec<u8>) {
     write_escaped_text(out, s);
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct RunFont {
     pub r_font: Option<String>,
     pub sz: Option<f64>,
@@ -26,21 +26,6 @@ pub struct RunFont {
     pub strike: Option<bool>,
     pub color: Option<ColorSpec>,
     pub vert_align: Option<String>,
-}
-
-impl Default for RunFont {
-    fn default() -> Self {
-        RunFont {
-            r_font: None,
-            sz: None,
-            bold: None,
-            italic: None,
-            underline: None,
-            strike: None,
-            color: None,
-            vert_align: None,
-        }
-    }
 }
 
 impl RunFont {

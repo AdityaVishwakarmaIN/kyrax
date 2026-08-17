@@ -231,6 +231,7 @@ impl SpillMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     fn empty(_r: u32, _c: u32) -> bool {
         false

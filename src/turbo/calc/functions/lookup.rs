@@ -982,6 +982,7 @@ mod tests {
     use super::*;
     use crate::turbo::calc::ast::{CellRef, RangeRef, RefCore, RefExpr};
     use crate::turbo::calc::functions::CellResolver;
+    use pretty_assertions::assert_eq;
     use std::collections::HashMap;
 
     struct GridResolver {
@@ -1012,7 +1013,7 @@ mod tests {
         }
     }
 
-    fn ctx(resolver: &dyn CellResolver) -> FuncCtx {
+    fn ctx(resolver: &dyn CellResolver) -> FuncCtx<'_> {
         FuncCtx {
             date1904: false,
             sheet: 0,
@@ -1771,6 +1772,7 @@ mod tests {
     mod ref_build {
         use super::*;
         use crate::turbo::calc::testkit::{Grid, Outcome, error, num, text};
+        use pretty_assertions::assert_eq;
 
         #[test]
         fn offset_returns_a_single_cell_value() {
@@ -1980,7 +1982,8 @@ mod tests {
     // -----------------------------------------------------------------------
     mod round2_additions {
         use super::*;
-        use crate::turbo::calc::testkit::{Grid, Outcome, error, text};
+        use crate::turbo::calc::testkit::{Grid, Outcome, text};
+        use pretty_assertions::assert_eq;
 
         #[test]
         fn areas_reports_one_area_for_any_reference() {

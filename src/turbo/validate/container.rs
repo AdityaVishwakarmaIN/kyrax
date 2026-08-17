@@ -156,6 +156,7 @@ fn cfb_stream_names(bytes: &[u8]) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     /// Build a minimal OLE/CFB skeleton: 512-byte header, one FAT sector,
     /// one directory sector carrying the given stream names.

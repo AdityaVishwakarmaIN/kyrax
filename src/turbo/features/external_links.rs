@@ -291,7 +291,7 @@ fn external_index_from_name(name: &str) -> usize {
     let rest = name.strip_prefix("xl/externalLinks/").unwrap_or(name);
     let rest = rest.strip_prefix("externalLink").unwrap_or(rest);
     let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
-    crate::turbo::decode::atoi(rest[..digits].as_bytes()).unwrap_or(0) as usize
+    crate::turbo::decode::atoi(&rest.as_bytes()[..digits]).unwrap_or(0) as usize
 }
 
 /// Rels path for an external link part: `xl/externalLinks/_rels/<file>.rels`.
@@ -426,6 +426,7 @@ pub fn parse_external_ref_prefix(formula: &str) -> Option<(usize, Option<&str>)>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     const PART: &[u8] = br#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><externalBook r:id="rId1"><sheetNames><sheetName val="Sheet1"/><sheetName val="2024"/></sheetNames><definedNames><definedName name="Foo" refersTo="Sheet1!$A$1"/></definedNames><sheetDataSet><sheetData sheetId="0"><row r="1"><cell r="A1" t="str"><v>cached</v></cell></row><row r="2"><cell r="A2"><v>42</v></cell></row></sheetData><sheetData sheetId="1"><row r="1"><cell r="B1" t="str"><v>second sheet</v></cell></row></sheetData></sheetDataSet></externalBook></externalLink>"#;
 

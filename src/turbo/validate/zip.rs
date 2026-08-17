@@ -30,6 +30,7 @@ pub fn check_duplicate_names(entries: &[ZipEntryMeta], report: &mut ValidateRepo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn duplicate_names_flagged_once_each() {

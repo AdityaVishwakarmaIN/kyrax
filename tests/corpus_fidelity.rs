@@ -239,12 +239,12 @@ fn build_huffman(lengths: &[u8]) -> Option<Huff> {
     count[0] = 0;
     let mut left: i64 = 1;
     let mut maxlen = 0u32;
-    for len in 1..=15usize {
-        left = (left << 1) - count[len] as i64;
+    for (len, &count_len) in count.iter().enumerate().skip(1).take(15) {
+        left = (left << 1) - count_len as i64;
         if left < 0 {
             return None;
         }
-        if count[len] > 0 {
+        if count_len > 0 {
             maxlen = len as u32;
         }
     }
@@ -357,12 +357,8 @@ static FIXED_TABLES: std::sync::OnceLock<(Huff, Huff)> = std::sync::OnceLock::ne
 fn fixed_tables() -> &'static (Huff, Huff) {
     FIXED_TABLES.get_or_init(|| {
         let mut lit = vec![8u8; 288];
-        for i in 144..=255 {
-            lit[i] = 9;
-        }
-        for i in 256..=279 {
-            lit[i] = 7;
-        }
+        lit[144..256].fill(9);
+        lit[256..280].fill(7);
         let dist = vec![5u8; 32];
         (
             build_huffman(&lit).expect("fixed litlen table"),
@@ -458,15 +454,11 @@ fn inflate_deflate(data: &[u8]) -> Option<Vec<u8>> {
                         }
                         17 => {
                             let rep = br.read(3)? + 3;
-                            for _ in 0..rep {
-                                lens.push(0);
-                            }
+                            lens.resize(lens.len() + rep as usize, 0);
                         }
                         18 => {
                             let rep = br.read(7)? + 11;
-                            for _ in 0..rep {
-                                lens.push(0);
-                            }
+                            lens.resize(lens.len() + rep as usize, 0);
                         }
                         _ => return None,
                     }
@@ -936,11 +928,12 @@ fn pick_sheet(map: &ArchiveMap) -> Option<String> {
     names
         .into_iter()
         .find(|n| map.sheet_name_map[n.as_str()].starts_with("xl/worksheets/"))
-        .map(|n| n.clone())
+        .cloned()
         .or_else(|| map.sheet_name_map.keys().next().cloned())
 }
 
 /// Outcome of opening one corpus file.
+#[allow(clippy::large_enum_variant)]
 enum OpenOutcome {
     /// File could not be parsed as a zip / has no sheets.
     Skipped,

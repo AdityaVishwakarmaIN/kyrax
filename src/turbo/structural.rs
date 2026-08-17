@@ -781,7 +781,7 @@ fn find_close_local(xml: &[u8], from: usize, local: &[u8]) -> Option<usize> {
 }
 
 /// Local name of an open tag at `pos` (points at `<`).
-fn open_tag_local<'a>(xml: &'a [u8], pos: usize) -> Option<&'a [u8]> {
+fn open_tag_local(xml: &[u8], pos: usize) -> Option<&[u8]> {
     if !xml.get(pos).copied().eq(&Some(b'<')) {
         return None;
     }
@@ -1313,7 +1313,7 @@ pub fn parse_chart(xml: &[u8], sheet: u32, part: String, anchor: ChartAnchor) ->
             i = pos + 1;
             continue;
         };
-        if CHART_TYPE_LOCALS.iter().any(|c| *c == local) {
+        if CHART_TYPE_LOCALS.contains(&local) {
             let local_str = String::from_utf8_lossy(local).into_owned();
             chart_types.push(ChartType::from_tag_local(&local_str));
             let te = pos + memchr::memchr(b'>', &plot[pos..]).unwrap_or(plot.len() - pos);

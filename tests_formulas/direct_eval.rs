@@ -1,22 +1,25 @@
 //! Stage -1 direct-evaluator classification harness.
 //!
-//! For every fail row in `formula-validation/round2/fail_rows.csv` (one row per
-//! function flagged `fail` in `formula-validation/matrix.csv`), evaluate the
-//! formula DIRECTLY in the kyrax calc engine — parse → dependency order → eval
-//! → cache — against an in-memory single-sheet workbook built from the row's
-//! context, and NEVER through the Excel write path (no XML, no file, no
-//! round-trip).
+//! For every fail row in the in-repo fixture `tests_formulas/fail_rows.csv`
+//! (a small, hermetic slice of the round-2 fail set; one row per function
+//! flagged `fail` in the external `formula-validation/matrix.csv`), evaluate
+//! the formula DIRECTLY in the kyrax calc engine — parse → dependency order →
+//! eval → cache — against an in-memory single-sheet workbook built from the
+//! row's context, and NEVER through the Excel write path (no XML, no file, no
+//! round-trip). The fixture is owned by this harness and must never be replaced
+//! by a path outside the crate: the external `formula-validation/` directory is
+//! git-ignored and absent in clean CI.
 //!
 //! The verdict splits matrix failures into:
 //!   * `MATCH`     — the engine computes exactly the oracle `expected` value;
-//!                   the matrix failure was a write/hydration artifact, not a
-//!                   calc-engine defect.
+//!     the matrix failure was a write/hydration artifact, not a
+//!     calc-engine defect.
 //!   * `MISMATCH`  — the engine computes something else; candidate calc-engine
-//!                   defect (or, for rows evaluated against a blank context, a
-//!                   missing-input artifact — see `context_kind`).
+//!     defect (or, for rows evaluated against a blank context, a
+//!     missing-input artifact — see `context_kind`).
 //!   * `EVAL_ERROR`— the engine could not produce a cacheable scalar at all
-//!                   (unparseable, uncached/fallback, or an array result the
-//!                   cache layer cannot hold).
+//!     (unparseable, uncached/fallback, or an array result the
+//!     cache layer cannot hold).
 //!
 //! Evaluation drives the same public surface the write path drives
 //! (`kyrax::turbo::calc::hydrate_workbook` on a `write::model::Workbook`); the
@@ -25,19 +28,25 @@
 //! used purely as the in-memory grid container — nothing is ever serialized.
 //!
 //! Rerunnable: `cargo test --test direct_eval` from `nextexcel/` re-reads the
-//! input and overwrites `direct_eval_results.csv` with one result row per input
-//! row. No external crates: CSV and the small JSON payloads are parsed by the
-//! minimal readers below (the crate's dev-dependencies expose no `csv`/`serde`).
+//! fixture and overwrites `target/direct_eval_results.csv` with one result row
+//! per input row. No external crates: CSV and the small JSON payloads are
+//! parsed by the minimal readers below (the crate's dev-dependencies expose no
+//! `csv`/`serde`). The fixture's classification is pinned by the assertion in
+//! `direct_eval_classification`, so a clean CI run is self-checking.
 
 use kyrax::turbo::calc::{CalcOptions, hydrate_workbook};
 use kyrax::turbo::write::{CachedValue, Cell, CellValue, FormulaKind, Row, Sheet, Workbook};
+use pretty_assertions::assert_eq;
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-const INPUT_REL: &str = "../formula-validation/round2/fail_rows.csv";
-const OUTPUT_REL: &str = "../formula-validation/round2/direct_eval_results.csv";
+// The input fixture lives inside the crate so `cargo test` is hermetic.
+const INPUT_REL: &str = "tests_formulas/fail_rows.csv";
+// The result CSV is a generated report, so it goes to the gitignored build dir
+// (always present by the time the test binary runs) rather than into the tree.
+const OUTPUT_REL: &str = "target/direct_eval_results.csv";
 
 // ---------------------------------------------------------------------------
 // Minimal RFC-4180 CSV reader (quoted fields, doubled quotes, CRLF tolerant)
@@ -776,6 +785,15 @@ fn direct_eval_classification() {
     let mat = counts.get("MATCH").copied().unwrap_or(0);
     let mis = counts.get("MISMATCH").copied().unwrap_or(0);
     let evl = counts.get("EVAL_ERROR").copied().unwrap_or(0);
+
+    // Hermetic regression pin: the fixture is a fixed slice of the round-2 fail
+    // set, and its classification must not drift. MATCH = ACCRINT, ARABIC,
+    // ARRAYTOTEXT; MISMATCH = CHISQ.TEST, CHOOSE; EVAL_ERROR = MUNIT (array
+    // marker), ADDRESS (no cached value).
+    assert_eq!(mat, 3, "fixture MATCH count drifted");
+    assert_eq!(mis, 2, "fixture MISMATCH count drifted");
+    assert_eq!(evl, 2, "fixture EVAL_ERROR count drifted");
+
     println!(
         "direct_eval: {} input rows -> MATCH={} MISMATCH={} EVAL_ERROR={}",
         inputs.len(),

@@ -464,6 +464,7 @@ fn u64le(b: &[u8], o: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     const CONNECTIONS_XML: &[u8] = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><connections xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><connection id="1" name="Query - foo" type="5"><dbPr connection="Provider=Microsoft.Mashup.OleDb.1;Data Source=$workbook$;Location=foo;Extended Properties=&quot;&quot;" command="SELECT * FROM [foo]"/></connection><connection id="2" name="ODBC DSN" type="2"><dbPr connection="DSN=MyDSN;UID=u;PWD=p" command="SELECT * FROM [table]"/></connection></connections>"#;
 

@@ -443,6 +443,7 @@ pub fn splice_sparklines(sheet_xml: &[u8], groups: &[SparklineGroup]) -> TurboRe
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     const EXT: &[u8] = b"<ext uri=\"{05C60535-1F16-4fd2-B633-F4F36F0B64E0}\" xmlns:x14=\"http://schemas.microsoft.com/office/spreadsheetml/2009/9/main\"><x14:sparklineGroups xmlns:xm=\"http://schemas.microsoft.com/office/excel/2006/main\"><x14:sparklineGroup type=\"line\" displayEmptyCellsAs=\"gap\" markers=\"1\" high=\"1\" low=\"1\"><x14:colorSeries rgb=\"FF376092\"/><x14:colorNegative rgb=\"FFD00000\"/><x14:sparklines><x14:sparkline><xm:f>Sheet1!B1:F1</xm:f><xm:sqref>A1</xm:sqref></x14:sparkline></x14:sparklines></x14:sparklineGroup></x14:sparklineGroups></ext>";
 
@@ -498,7 +499,7 @@ mod tests {
     #[test]
     fn spark_write_is_deterministic() {
         let g = sample_group();
-        let a = write_sparkline_ext(&[g.clone()]);
+        let a = write_sparkline_ext(std::slice::from_ref(&g));
         let b = write_sparkline_ext(&[g]);
         assert_eq!(a, EXT);
         assert_eq!(b, EXT);

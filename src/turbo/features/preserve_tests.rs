@@ -1,15 +1,15 @@
 //! End-to-end proof of the round-trip preservation claim.
 //!
 //! The public claim: "a workbook with slicers, rich values, Power Query or
-//! embedded controls now survives a kyrax round trip instead of losing them —
+//! embedded controls now survives a kyrax round trip instead of losing them �
 //! which is the openpyxl data-loss bug closed." This module is where that claim
 //! is actually tested rather than assumed.
 //!
 //! The mechanism under test is `overlay.rs` Phase 2 (`save()`): every part NOT
 //! in the modified set is copied verbatim from the `ArchiveMap` by slicing the
 //! original compressed payload and re-adding it with its original method, CRC
-//! and sizes. If that is true, exotic parts — slicers, rich values, Power
-//! Query, controls, external links, a binary OLE object — survive a real edit
+//! and sizes. If that is true, exotic parts � slicers, rich values, Power
+//! Query, controls, external links, a binary OLE object � survive a real edit
 //! byte-identically. If any part is dropped, reordered into loss, re-compressed
 //! differently, or silently rewritten, the byte-equality assertions below fail.
 //! A failing test here is a SUCCESS: it reports the claim as false. The tests
@@ -18,6 +18,8 @@
 //! WIRING: add `#[cfg(test)] mod preserve_tests;` to src/turbo/features/mod.rs.
 
 use std::sync::Arc;
+
+use pretty_assertions::assert_eq;
 
 use crate::turbo::features::external_links::{ExternalBook, load_external_books};
 use crate::turbo::features::power_query::inventory_power_query;
@@ -311,7 +313,7 @@ fn preserve_part_count_does_not_shrink() {
 }
 
 /// The feature inventories must agree before and after the round trip. This
-/// tests the claim at the level a user experiences it — not at the level of
+/// tests the claim at the level a user experiences it � not at the level of
 /// zip mechanics.
 #[test]
 fn preserve_feature_inventories_agree_before_and_after() {
@@ -342,7 +344,7 @@ fn preserve_feature_inventories_agree_before_and_after() {
     );
 }
 
-/// Malformed input must degrade to an error, never panic — the overlay cannot
+/// Malformed input must degrade to an error, never panic � the overlay cannot
 /// even be constructed from bytes that are not a zip.
 #[test]
 fn preserve_garbage_input_degrades_not_panics() {

@@ -736,6 +736,7 @@ pub(crate) fn find_tag(hay: &[u8], name: &[u8], from: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
     use std::hint::black_box;
     use std::time::Instant;
 

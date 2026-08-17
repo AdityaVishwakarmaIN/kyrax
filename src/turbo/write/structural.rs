@@ -658,6 +658,7 @@ pub fn sheet_has_structural(sheet: &Sheet) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn password_hash_secret() {

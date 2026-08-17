@@ -266,7 +266,7 @@ const BIT_LIMIT: f64 = 281_474_976_710_655.0; // 2^48 - 1
 
 fn bit_integer(v: &CalcValue) -> Result<u64, CalcError> {
     let n = coerce_number(v)?;
-    if n.fract() != 0.0 || n < 0.0 || n > BIT_LIMIT {
+    if n.fract() != 0.0 || !(0.0..=BIT_LIMIT).contains(&n) {
         return Err(CalcError::Num);
     }
     Ok(n as u64)
@@ -377,7 +377,7 @@ fn gestep(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 // continued fraction for the tail (|x|>1, via Lentz's algorithm).
 // ---------------------------------------------------------------------------
 
-const GAMMA: f64 = 0.5772156649015328606;
+const GAMMA: f64 = 0.577_215_664_901_532_9;
 
 fn erf_series(x: f64) -> f64 {
     let mut sum = x;
@@ -655,7 +655,7 @@ fn c_sqrt(a: Cplx) -> Cplx {
 }
 fn c_pow(z: Cplx, w: f64) -> Result<Cplx, CalcError> {
     if z.re == 0.0 && z.im == 0.0 {
-        if w == 0.0 || w < 0.0 {
+        if w <= 0.0 {
             return Err(CalcError::Num);
         }
         return Ok(Cplx { re: 0.0, im: 0.0 });
@@ -749,15 +749,13 @@ fn c_sech(a: Cplx) -> Result<Cplx, CalcError> {
 /// The suffix an operation must format with: reject mixing "i" and "j".
 fn resolve_suffix(suffixes: &[Option<Suffix>]) -> Result<Suffix, CalcError> {
     let mut found: Option<Suffix> = None;
-    for s in suffixes {
-        if let Some(suf) = s {
-            if let Some(f) = found {
-                if f != *suf {
-                    return Err(CalcError::Value);
-                }
-            } else {
-                found = Some(*suf);
+    for suf in suffixes.iter().flatten() {
+        if let Some(f) = found {
+            if f != *suf {
+                return Err(CalcError::Value);
             }
+        } else {
+            found = Some(*suf);
         }
     }
     Ok(found.unwrap_or(Suffix::I))
@@ -980,7 +978,7 @@ const UNITS: &[Unit] = &[
     u("ang", Cat::Len, 1e-10, false),
     u("ell", Cat::Len, 1.143, false),
     u("ly", Cat::Len, 9_460_730_472_580_800.0, false),
-    u("parsec", Cat::Len, 3.085_677_581_491_367_3e16, false),
+    u("parsec", Cat::Len, 3.085_677_581_491_367e16, false),
     u("ftm", Cat::Len, 1.8288, false),
     u("pica", Cat::Len, 0.0254 / 6.0, false),
     u("Pica", Cat::Len, 0.0254 / 72.0, false),
@@ -1064,7 +1062,7 @@ const UNITS: &[Unit] = &[
     u("btu", Cat::Energy, 1_055.055_852_62, false),
     // Power (watts).
     u("W", Cat::Power, 1.0, true),
-    u("HP", Cat::Power, 745.699_871_582_270_22, false),
+    u("HP", Cat::Power, 745.699_871_582_270_2, false),
     u("PS", Cat::Power, 735.498_75, false),
     // Magnetism (tesla).
     u("T", Cat::Mag, 1.0, true),
@@ -1196,7 +1194,8 @@ fn convert(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 // BESSELY keeps the accurate series/asymptotic pair below.
 // ---------------------------------------------------------------------------
 
-const W_2PI: f64 = 0.636619772; // Excel's 2/pi constant for the J/Y asymptotics
+#[allow(clippy::approx_constant)] // deliberate: Excel's truncated 2/pi, must match Excel Bessel output
+const W_2PI: f64 = 0.636619772;
 
 fn horner(coeffs: &[f64], x: f64) -> f64 {
     let mut z = 0.0;
@@ -1806,9 +1805,11 @@ pub fn register(r: &mut Registry) {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant, clippy::excessive_precision)]
 mod tests {
     use super::*;
     use crate::turbo::calc::testkit::{approx, error, num, text};
+    use pretty_assertions::assert_eq;
 
     fn err_num() -> CalcError {
         CalcError::Num

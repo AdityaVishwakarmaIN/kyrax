@@ -52,9 +52,9 @@ use crate::turbo::calc::coerce::{coerce_number, coerce_text, compare, compare_eq
 use crate::turbo::calc::value::{ArrayValue, CalcError, CalcValue};
 use std::cmp::Ordering;
 
-const PI: f64 = 3.14159265358979323846;
-const SQRT2: f64 = 1.41421356237309504880;
-const SQRT_2PI: f64 = 2.50662827463100050242;
+const PI: f64 = std::f64::consts::PI;
+const SQRT2: f64 = std::f64::consts::SQRT_2;
+const SQRT_2PI: f64 = 2.506_628_274_631_000_7;
 
 fn ok_num(n: f64) -> Result<CalcValue, CalcError> {
     if n.is_finite() {
@@ -76,20 +76,20 @@ fn gammaln(x: f64) -> f64 {
         return PI.ln() - gammaln(1.0 - x) - (PI * x).sin().abs().ln();
     }
     const P: [f64; 9] = [
-        0.99999999999980993,
+        0.999_999_999_999_809_9,
         676.5203681218851,
         -1259.1392167224028,
-        771.32342877765313,
-        -176.61502916214059,
+        771.323_428_777_653_1,
+        -176.615_029_162_140_6,
         12.507343278686905,
         -0.13857109526572012,
-        9.9843695780195716e-6,
+        9.984_369_578_019_572e-6,
         1.5056327351493116e-7,
     ];
     let z = x - 1.0;
     let mut a = P[0];
-    for i in 1..9 {
-        a += P[i] / (z + i as f64);
+    for (i, &pi) in P.iter().enumerate().skip(1) {
+        a += pi / (z + i as f64);
     }
     let t = z + 7.5;
     0.5 * (2.0 * PI).ln() + (z + 0.5) * t.ln() - t + a.ln()
@@ -252,7 +252,7 @@ fn norm_s_inv(p: f64) -> f64 {
         -3.969683028665376e+01,
         2.209460984245205e+02,
         -2.759285104469687e+02,
-        1.383577518672690e+02,
+        1.383_577_518_672_69e2,
         -3.066479806614716e+01,
         2.506628277459239e+00,
     ];
@@ -939,8 +939,8 @@ fn percentrank(ctx: &FuncCtx, args: &[FuncArg], exc: bool) -> Result<CalcValue, 
     }
     let mut rank = 0.0f64;
     // exact match at i -> (i + 1)/n1 for exc, i/(n2) for inc
-    for i in 0..n {
-        if v[i].to_bits() == x.to_bits() {
+    for (i, vi) in v.iter().enumerate() {
+        if vi.to_bits() == x.to_bits() {
             let base = if exc { (i + 1) as f64 } else { i as f64 };
             rank = base / n1 as f64;
             let factor = 10f64.powi(sig);
@@ -1036,7 +1036,7 @@ fn binom_dist(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let n = coerce_number(&args[1].value(ctx)?)?.trunc();
     let p = coerce_number(&args[2].value(ctx)?)?;
     let cum = coerce_number(&args[3].value(ctx)?)? != 0.0;
-    if k < 0.0 || k > n || p < 0.0 || p > 1.0 {
+    if k < 0.0 || k > n || !(0.0..=1.0).contains(&p) {
         return Err(CalcError::Num);
     }
     let k = k as i64;
@@ -1324,26 +1324,14 @@ fn negbinom_dist(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError
     let s = coerce_number(&args[1].value(ctx)?)?.trunc() as i64;
     let p = coerce_number(&args[2].value(ctx)?)?;
     let cum = coerce_number(&args[3].value(ctx)?)? != 0.0;
-    if f < 0 || s < 0 || p < 0.0 || p > 1.0 {
+    if f < 0 || s < 0 || !(0.0..=1.0).contains(&p) {
         return Err(CalcError::Num);
     }
     if p == 0.0 {
-        return ok_num(if cum {
-            1.0
-        } else if f == 0 {
-            1.0
-        } else {
-            0.0
-        });
+        return ok_num(if cum || f == 0 { 1.0 } else { 0.0 });
     }
     if p == 1.0 {
-        return ok_num(if cum {
-            1.0
-        } else if f == 0 {
-            1.0
-        } else {
-            0.0
-        });
+        return ok_num(if cum || f == 0 { 1.0 } else { 0.0 });
     }
     let pmf = |i: i64| -> f64 {
         if i < 0 {
@@ -1672,7 +1660,7 @@ fn f_inv(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let p = coerce_number(&args[0].value(ctx)?)?;
     let d1 = coerce_number(&args[1].value(ctx)?)?;
     let d2 = coerce_number(&args[2].value(ctx)?)?;
-    if p < 0.0 || p > 1.0 || d1 <= 0.0 || d2 <= 0.0 {
+    if !(0.0..=1.0).contains(&p) || d1 <= 0.0 || d2 <= 0.0 {
         return Err(CalcError::Num);
     }
     // Referee (2026-08): F.INV with p = 0 (blank probability) is 0, not #NUM!.
@@ -2109,12 +2097,10 @@ fn fit_observations(ctx: &FuncCtx, args: &[FuncArg]) -> Result<FitRows, CalcErro
         let mut ys = Vec::new();
         let mut xs = Vec::new();
         let mut rank = 0.0f64;
-        for yv in yvals {
-            if let Some(v) = yv {
-                rank += 1.0;
-                ys.push(v);
-                xs.push(vec![rank]);
-            }
+        for v in yvals.into_iter().flatten() {
+            rank += 1.0;
+            ys.push(v);
+            xs.push(vec![rank]);
         }
         if ys.len() < 2 {
             return Err(CalcError::Ref);
@@ -2178,8 +2164,8 @@ fn fit_observations(ctx: &FuncCtx, args: &[FuncArg]) -> Result<FitRows, CalcErro
         if let Some(yv) = yvals[i] {
             let mut row = Vec::with_capacity(k);
             let mut all = true;
-            for j in 0..k {
-                match xvals[j][i] {
+            for xv in xvals.iter().take(k) {
+                match xv[i] {
                     Some(v) => row.push(v),
                     None => {
                         all = false;
@@ -2253,8 +2239,8 @@ fn fit_least_squares(rows: &FitRows, use_const: bool) -> Result<LinFit, CalcErro
             }
         }
         let mut norm2 = 0.0;
-        for m in 0..n {
-            norm2 += v[m] * v[m];
+        for &vm in v.iter().take(n) {
+            norm2 += vm * vm;
         }
         if norm2 == 0.0 {
             return Err(CalcError::Num); // collinear predictor column
@@ -2363,14 +2349,14 @@ fn linest_layout(fit: &LinFit, stats: bool) -> CalcValue {
         return CalcValue::array(ArrayValue::new(1, p as u32, data));
     }
     let mut data = vec![CalcValue::err(CalcError::Na); 5 * p];
-    for j in 0..k {
-        data[j] = CalcValue::Number(fit.coeffs[k - 1 - j]);
+    for (j, d) in data.iter_mut().take(k).enumerate() {
+        *d = CalcValue::Number(fit.coeffs[k - 1 - j]);
     }
     if fit.const_used {
         data[k] = CalcValue::Number(fit.coeffs[k]);
     }
-    for j in 0..k {
-        data[p + j] = se_cell(fit.se[k - 1 - j]);
+    for (j, d) in data.iter_mut().skip(p).take(k).enumerate() {
+        *d = se_cell(fit.se[k - 1 - j]);
     }
     if fit.const_used {
         data[p + k] = se_cell(fit.se[k]);
@@ -2452,14 +2438,14 @@ fn logest(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
         return Ok(CalcValue::array(ArrayValue::new(1, p as u32, data)));
     }
     let mut data = vec![CalcValue::err(CalcError::Na); 5 * p];
-    for j in 0..k {
-        data[j] = CalcValue::Number(fit.coeffs[k - 1 - j]);
+    for (j, d) in data.iter_mut().take(k).enumerate() {
+        *d = CalcValue::Number(fit.coeffs[k - 1 - j]);
     }
     if fit.const_used {
         data[k] = CalcValue::Number(fit.coeffs[k].exp());
     }
-    for j in 0..k {
-        data[p + j] = se_cell(fit.se[k - 1 - j]);
+    for (j, d) in data.iter_mut().skip(p).take(k).enumerate() {
+        *d = se_cell(fit.se[k - 1 - j]);
     }
     if fit.const_used {
         data[p + k] = se_cell(fit.se[k]);
@@ -2503,8 +2489,8 @@ fn trend_growth(ctx: &FuncCtx, args: &[FuncArg], growth: bool) -> Result<CalcVal
     let fit = fit_least_squares(&rows, use_const)?;
     let predict = |point: &[f64]| -> f64 {
         let mut s = 0.0;
-        for j in 0..fit.k {
-            s += fit.coeffs[j] * point[j];
+        for (j, &pj) in point.iter().enumerate() {
+            s += fit.coeffs[j] * pj;
         }
         if fit.const_used {
             s += fit.coeffs[fit.k];
@@ -2605,7 +2591,7 @@ fn phi(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 
 fn gauss(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let z = coerce_number(&args[0].value(ctx)?)?;
-    if z < -10.0 || z > 10.0 {
+    if !(-10.0..=10.0).contains(&z) {
         return Err(CalcError::Num);
     }
     ok_num(norm_s_cdf(z) - 0.5)
@@ -3019,9 +3005,11 @@ mod coordinator_accuracy {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
     use crate::turbo::calc::testkit::{Grid, approx, error, num};
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn averagea_counts_text_and_logicals() {

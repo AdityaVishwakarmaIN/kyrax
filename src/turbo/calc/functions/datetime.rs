@@ -370,13 +370,13 @@ fn date(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     if (0.0..=1899.0).contains(&year) {
         year += 1900.0;
     }
-    if year < 0.0 || year > 9999.0 {
+    if !(0.0..=9999.0).contains(&year) {
         return Err(CalcError::Num);
     }
     let total = year * 12.0 + (m - 1.0);
     let ny = (total / 12.0).floor();
     let nm = total.rem_euclid(12.0) + 1.0;
-    if ny < 0.0 || ny > 9999.0 {
+    if !(0.0..=9999.0).contains(&ny) {
         return Err(CalcError::Num);
     }
     let base = civil_to_serial(ny as i64, nm as i64, 1, ctx.date1904) as f64;
@@ -490,12 +490,12 @@ fn shift_months(y: i64, m: i64, months: f64) -> (f64, f64) {
 fn edate(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let start = date_serial(ctx, &args[0])?;
     let months = coerce_number(&args[1].value(ctx)?)?;
-    if months > 1e7 || months < -1e7 {
+    if !(-1e7..=1e7).contains(&months) {
         return Err(CalcError::Num);
     }
     let (y, m, d) = serial_to_civil(start, ctx.date1904);
     let (ny, nm) = shift_months(y, m, months.trunc());
-    if ny < 0.0 || ny > 9999.0 {
+    if !(0.0..=9999.0).contains(&ny) {
         return Err(CalcError::Num);
     }
     let ny = ny as i64;
@@ -516,12 +516,12 @@ fn edate(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 fn eomonth(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let start = date_serial(ctx, &args[0])?;
     let months = coerce_number(&args[1].value(ctx)?)?;
-    if months > 1e7 || months < -1e7 {
+    if !(-1e7..=1e7).contains(&months) {
         return Err(CalcError::Num);
     }
     let (y, m, _d) = serial_to_civil(start, ctx.date1904);
     let (ny, nm) = shift_months(y, m, months.trunc());
-    if ny < 0.0 || ny > 9999.0 {
+    if !(0.0..=9999.0).contains(&ny) {
         return Err(CalcError::Num);
     }
     let ny = ny as i64;
@@ -552,7 +552,7 @@ fn datedif(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let (y2, m2, d2) = serial_to_civil(e, ctx.date1904);
     let unit = unit.trim().to_ascii_uppercase();
     let result: f64 = match unit.as_str() {
-        "D" => (e - s) as f64,
+        "D" => e - s,
         "M" => {
             let mut m = (y2 - y1) * 12 + (m2 - m1);
             if d2 < d1 {
@@ -1470,11 +1470,13 @@ pub fn register(r: &mut Registry) {
 }
 
 #[cfg(test)]
+#[allow(clippy::assertions_on_constants)]
 mod tests {
     use super::*;
     use crate::turbo::calc::functions::CellResolver;
     use crate::turbo::calc::testkit::Grid;
     use crate::turbo::calc::value::ArrayValue;
+    use pretty_assertions::assert_eq;
 
     struct TestResolver;
 

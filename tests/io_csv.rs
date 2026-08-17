@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 
 use arrow_array::DictionaryArray;
 use arrow_array::types::Int32Type;
+use pretty_assertions::assert_eq;
 
 use kyrax::turbo::io::csv::{
     CsvOptions, CsvReader, READ_CHUNK, RawField, csv_to_sheet, sheet_to_csv,

@@ -198,6 +198,7 @@ fn skip_squote(f: &[u8], i: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
     use std::borrow::Cow;
 
     fn row(s: &str, at: u32, delta: i64) -> Cow<'_, str> {

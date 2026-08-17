@@ -5,6 +5,7 @@
 //! fidelity, dates, headerless mode, streaming writes, and large imports.
 #![cfg(feature = "__arrow")]
 
+use pretty_assertions::assert_eq;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -84,7 +85,8 @@ fn ndjson() -> JsonOptions {
 /// The fidelity sheet every round trip exercises: embedded quotes and
 /// backslashes, an empty string, a null, a >2^53 number, a 20-digit numeric
 /// string, unicode, and XML-special characters.
-fn fidelity_sheet() -> (String, Vec<(u32, Vec<(u32, CellValue)>)>) {
+type FidelityRow = (u32, Vec<(u32, CellValue)>);
+fn fidelity_sheet() -> (String, Vec<FidelityRow>) {
     let xlsx = temp_path("fidelity", "xlsx");
     let rows = vec![
         (

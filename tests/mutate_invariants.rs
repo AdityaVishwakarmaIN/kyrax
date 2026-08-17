@@ -43,6 +43,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use kyrax::turbo::mutate::{delete_cols, delete_rows, insert_cols, insert_rows};
+use pretty_assertions::assert_eq;
 
 const MAX_ROW: u32 = 1_048_576;
 const MAX_COL: u32 = 16_384;
@@ -105,7 +106,7 @@ fn col_letters_str(c: u32, out: &mut Vec<u8>) {
     let mut c = c;
     while c > 0 {
         let m = (c - 1) % 26;
-        tmp[n] = (b'A' + m as u8) as u8;
+        tmp[n] = b'A' + m as u8;
         c = (c - 1) / 26;
         n += 1;
     }
@@ -223,23 +224,20 @@ fn shared_ref_str(r1: u32, c1: u32, r2: u32, c2: u32) -> String {
 
 fn serialize(m: &SheetModel) -> Vec<u8> {
     let mut out = String::from("<?xml version=\"1.0\"?><worksheet xmlns=\"x\">");
-    match m.dimension {
-        Some((r1, c1, r2, c2)) => {
-            out.push_str("<dimension ref=\"");
+    if let Some((r1, c1, r2, c2)) = m.dimension {
+        out.push_str("<dimension ref=\"");
+        let mut buf = Vec::new();
+        col_letters_str(c1, &mut buf);
+        out.push_str(&String::from_utf8(buf).unwrap());
+        out.push_str(&r1.to_string());
+        if (r2, c2) != (r1, c1) {
+            out.push(':');
             let mut buf = Vec::new();
-            col_letters_str(c1, &mut buf);
+            col_letters_str(c2, &mut buf);
             out.push_str(&String::from_utf8(buf).unwrap());
-            out.push_str(&r1.to_string());
-            if (r2, c2) != (r1, c1) {
-                out.push(':');
-                let mut buf = Vec::new();
-                col_letters_str(c2, &mut buf);
-                out.push_str(&String::from_utf8(buf).unwrap());
-                out.push_str(&r2.to_string());
-            }
-            out.push_str("\"/>");
+            out.push_str(&r2.to_string());
         }
-        None => {}
+        out.push_str("\"/>");
     }
     if !m.cols.is_empty() {
         out.push_str("<cols>");
@@ -348,7 +346,7 @@ struct ScanSheet {
 /// Find the byte offset of an opening `<tag` (not `</tag`), with a valid
 /// boundary after the name.
 fn find_tag(bytes: &[u8], tag: &[u8], from: usize) -> Option<usize> {
-    let mut i = from.max(0);
+    let mut i = from;
     while i + 1 < bytes.len() {
         if bytes[i] == b'<' && bytes[i + 1] != b'/' {
             let rest = &bytes[i + 1..];
@@ -429,10 +427,9 @@ fn scan(bytes: &[u8]) -> ScanSheet {
                 let row_end = if self_closing {
                     gt2 + 1
                 } else {
-                    let rel = memchr::memmem::find(&body[gt2 + 1..], b"</row>")
+                    memchr::memmem::find(&body[gt2 + 1..], b"</row>")
                         .map(|o| gt2 + 1 + o + 6)
-                        .unwrap_or(body.len());
-                    rel
+                        .unwrap_or(body.len())
                 };
                 let mut cells = Vec::new();
                 if !self_closing {
@@ -973,29 +970,29 @@ struct GenOpts {
 
 fn gen_row(rng: &mut Rng, max: u32) -> u32 {
     let r = if rng.chance(60) {
-        1 + rng.below(12) as u32
+        1 + rng.below(12)
     } else if rng.chance(50) {
         rng.pick_u32(&ROW_BOUNDARIES)
     } else {
-        1 + rng.below(200) as u32
+        1 + rng.below(200)
     };
     r.min(max)
 }
 
 fn gen_col(rng: &mut Rng, max: u32) -> u32 {
     let c = if rng.chance(55) {
-        1 + rng.below(8) as u32
+        1 + rng.below(8)
     } else if rng.chance(50) {
         rng.pick_u32(&COL_BOUNDARIES)
     } else {
-        1 + rng.below(60) as u32
+        1 + rng.below(60)
     };
     c.min(max)
 }
 
 fn gen_formula_body(rng: &mut Rng) -> String {
-    let a = 1 + rng.below(10) as u32;
-    let b = 1 + rng.below(10) as u32;
+    let a = 1 + rng.below(10);
+    let b = 1 + rng.below(10);
     let f = rng.pick(&["SUM", "AVG", "MAX"]);
     match rng.below(3) {
         0 => format!("{f}(A{a}:C{b})"),
@@ -1005,8 +1002,8 @@ fn gen_formula_body(rng: &mut Rng) -> String {
 }
 
 fn gen_trap_text(rng: &mut Rng) -> String {
-    let a = 1 + rng.below(9) as u32;
-    let b = 1 + rng.below(9) as u32;
+    let a = 1 + rng.below(9);
+    let b = 1 + rng.below(9);
     let xs = [
         format!("A{a} looks like a ref to Z{b}"),
         format!("text {a}:{b} is not a range"),
@@ -1183,9 +1180,9 @@ fn gen_sheet(rng: &mut Rng, opts: &GenOpts) -> SheetModel {
         let mut v = Vec::new();
         let mut c = 1u32;
         while c <= opts.max_col && v.len() < 6 {
-            let e = (c + rng.below(6) as u32).min(opts.max_col);
+            let e = (c + rng.below(6)).min(opts.max_col);
             v.push((c, e));
-            c = e + 1 + rng.below(2) as u32;
+            c = e + 1 + rng.below(2);
         }
         v
     } else {
@@ -1212,7 +1209,7 @@ fn gen_op(rng: &mut Rng, model: &SheetModel) -> (u32, u32) {
     let at = if rng.chance(30) {
         rng.pick_u32(&[1, 2, 3])
     } else if rng.chance(25) && content_max > 8 {
-        content_max - rng.below(6) as u32
+        content_max - rng.below(6)
     } else {
         1 + rng.below(content_max.max(1) as u64)
     }
@@ -1220,9 +1217,9 @@ fn gen_op(rng: &mut Rng, model: &SheetModel) -> (u32, u32) {
     let count = if rng.chance(50) {
         1
     } else if rng.chance(30) {
-        2 + rng.below(2) as u32
+        2 + rng.below(2)
     } else {
-        1 + rng.below(8) as u32
+        1 + rng.below(8)
     };
     (at, count)
 }
@@ -1803,7 +1800,8 @@ fn probe_stale_ref_guard_breaks_round_trip() {
     // the way out and un-clamps one lower on the way back. I1 therefore does not
     // apply to this shape. That is a documented consequence of the decision, not
     // an undiscovered defect.
-    let dimensions: &[(&[u8], u32, u32, Axis, &str, &str)] = &[
+    type DimCase<'a> = (&'a [u8], u32, u32, Axis, &'a str, &'a str);
+    let dimensions: &[DimCase] = &[
         (
             br#"<dimension ref="A1:A1048576"/><sheetData><row r="10"><c r="A10"><v>1</v></c></row></sheetData>"#,
             10,

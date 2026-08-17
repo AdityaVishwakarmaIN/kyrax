@@ -69,7 +69,7 @@ fn is_row_piece(s: &str) -> bool {
     if b.get(i) == Some(&b'$') {
         i += 1;
     }
-    if b.get(i).map_or(true, |c| !(b'1'..=b'9').contains(c)) {
+    if b.get(i).is_none_or(|c| !(b'1'..=b'9').contains(c)) {
         return false;
     }
     i += 1;
@@ -114,7 +114,7 @@ fn match_cell_ref(s: &str) -> Option<(&str, &str)> {
     if b.get(i) == Some(&b'$') {
         i += 1;
     }
-    if b.get(i).map_or(true, |c| !(b'1'..=b'9').contains(c)) {
+    if b.get(i).is_none_or(|c| !(b'1'..=b'9').contains(c)) {
         return None;
     }
     i += 1;
@@ -194,12 +194,11 @@ const ERROR_CODES: [&[u8]; 8] = [
 ];
 
 fn match_error(s: &[u8]) -> Option<&'static [u8]> {
-    for &e in ERROR_CODES.iter() {
-        if s.starts_with(e) {
-            return Some(e);
-        }
-    }
-    None
+    ERROR_CODES
+        .iter()
+        .find(|&&e| s.starts_with(e))
+        .copied()
+        .map(|v| v as _)
 }
 
 // scientific-notation check: token so far matches ^[1-9](\.[0-9]+)?[Ee]$
@@ -393,6 +392,7 @@ pub fn translate_body(body: &str, rd: i32, cd: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
     #[test]
     fn simple() {
         assert_eq!(translate_body("A2*2", 1, 0), "A3*2");

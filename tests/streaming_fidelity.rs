@@ -164,9 +164,9 @@ fn check_sheet(
     // Cell-by-cell values (row-aligned across batches).
     let mut offset = 0usize;
     for (k, b) in batches.iter().enumerate() {
-        for c in 0..eager_cols.len().min(b.num_columns()) {
+        for (c, ecol) in eager_cols.iter().enumerate().take(b.num_columns()) {
             let bcol = b.column(c).as_ref();
-            let ecol = eager_cols[c].as_ref();
+            let ecol = ecol.as_ref();
             let n = bcol.len();
             if offset + n > ecol.len() {
                 findings.push(format!(

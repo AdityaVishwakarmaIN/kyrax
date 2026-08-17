@@ -26,6 +26,7 @@ use std::io::Read;
 use std::path::Path;
 
 use kyrax::turbo::{FindingCode, RepairOptions, Severity, repair_workbook, validate_workbook};
+use pretty_assertions::assert_eq;
 
 fn testdata(name: &str) -> String {
     format!("{}/testdata/{}", env!("CARGO_MANIFEST_DIR"), name)
@@ -235,7 +236,6 @@ fn repair_options_filters_apply_without_error_on_clean_input() {
     let opts = RepairOptions {
         max_severity: Severity::Error,
         allowed_codes: Some(vec![FindingCode::XmlNotWellformed]),
-        ..Default::default()
     };
     let (report, actions, did_work) =
         repair_workbook(&src, &out, &opts).expect("filtered repair must not throw");
@@ -263,6 +263,7 @@ fn repair_options_filters_apply_without_error_on_clean_input() {
 mod encryption {
     use kyrax::turbo::crypto::{decrypt_workbook, encryption_info};
     use kyrax::turbo::{FindingCode, repair_workbook, validate_workbook};
+    use pretty_assertions::assert_eq;
 
     const FIXTURE_DIR: &str = "kyrax_c1c_fixtures";
     const PASSWORD: &str = "Password1234_";

@@ -10,7 +10,7 @@
 /// Column index 1-based → Excel letters (1=A, 26=Z, 27=AA).
 #[inline]
 pub fn col_letters(mut col: u32, buf: &mut [u8; 4]) -> &[u8] {
-    debug_assert!(col >= 1 && col <= 16384);
+    debug_assert!((1..=16384).contains(&col));
     let mut i = 4;
     while col > 0 {
         col -= 1;
@@ -216,6 +216,7 @@ pub fn write_i32(out: &mut Vec<u8>, v: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn col_letters_basic() {

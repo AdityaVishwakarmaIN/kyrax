@@ -94,6 +94,7 @@ fn text_table() -> Grid {
 // ---------------------------------------------------------------------------
 mod logical_if {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn a_number_is_true_when_non_zero_and_a_blank_is_false() {
@@ -163,6 +164,7 @@ mod logical_if {
 // ---------------------------------------------------------------------------
 mod logical_ifs {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn first_matching_value_wins() {
@@ -210,6 +212,7 @@ mod logical_ifs {
 // ---------------------------------------------------------------------------
 mod logical_and_or_xor {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn and_is_all_true() {
@@ -304,6 +307,7 @@ mod logical_and_or_xor {
 // ---------------------------------------------------------------------------
 mod logical_not {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn flips_truthiness() {
@@ -338,6 +342,7 @@ mod logical_not {
 // ---------------------------------------------------------------------------
 mod logical_true_false {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn literal_values() {
@@ -361,6 +366,7 @@ mod logical_true_false {
 // ---------------------------------------------------------------------------
 mod logical_iferror_ifna {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn iferror_passes_non_errors_through() {
@@ -416,6 +422,7 @@ mod logical_iferror_ifna {
 // ---------------------------------------------------------------------------
 mod logical_switch {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn matches_the_expression_against_each_value_in_turn() {
@@ -466,6 +473,7 @@ mod logical_switch {
 // ---------------------------------------------------------------------------
 mod lookup_vlookup {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn exact_vs_approximate_against_the_same_table() {
@@ -562,6 +570,7 @@ mod lookup_vlookup {
 // ---------------------------------------------------------------------------
 mod lookup_hlookup {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn exact_and_approximate_mirror_vlookup() {
@@ -602,6 +611,7 @@ mod lookup_hlookup {
 // ---------------------------------------------------------------------------
 mod lookup_xlookup {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn exact_match_by_default() {
@@ -680,6 +690,7 @@ mod lookup_xlookup {
 // ---------------------------------------------------------------------------
 mod lookup_match {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     fn ascending() -> Grid {
         Grid::empty().col("A1", &[1.0, 2.0, 3.0, 5.0])
@@ -774,6 +785,7 @@ mod lookup_match {
 // ---------------------------------------------------------------------------
 mod lookup_index {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn picks_one_based_cells() {
@@ -841,6 +853,7 @@ mod lookup_index {
 // ---------------------------------------------------------------------------
 mod lookup_lookup {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn vector_form_is_approximate_over_ascending_data() {
@@ -884,6 +897,7 @@ mod lookup_lookup {
 // ---------------------------------------------------------------------------
 mod lookup_choose {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn picks_by_one_based_index() {
@@ -931,6 +945,7 @@ mod lookup_choose {
 // ---------------------------------------------------------------------------
 mod cross_type_ordering {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn excel_orders_numbers_below_text_below_false_below_true() {
@@ -960,6 +975,7 @@ mod cross_type_ordering {
 // ---------------------------------------------------------------------------
 mod error_taxonomy {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn the_excel_error_codes_map_to_the_right_calc_error() {

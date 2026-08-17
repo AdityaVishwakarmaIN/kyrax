@@ -406,6 +406,7 @@ mod tests {
     use super::*;
     use crate::turbo::calc::functions::CellResolver;
     use crate::turbo::calc::value::ArrayValue;
+    use pretty_assertions::assert_eq;
 
     struct NoCells;
     impl CellResolver for NoCells {
@@ -808,6 +809,7 @@ mod tests {
     mod array_forms {
         use super::*;
         use crate::turbo::calc::testkit::{Grid, Outcome, error};
+        use pretty_assertions::assert_eq;
 
         fn value(g: &Grid, formula: &str) -> CalcValue {
             match g.calc(formula) {

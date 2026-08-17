@@ -680,6 +680,7 @@ fn extract_xml_attr(tag: &[u8], attr: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
     use std::sync::Arc;
 
     #[derive(Clone, Copy)]
@@ -754,7 +755,7 @@ mod tests {
         w_u16(&mut out, 0);
         w_u16(&mut out, 0);
         w_u32(&mut out, o.crc);
-        let l_zip64 = z.map_or(false, |z| z.usize_.is_some() || z.csize.is_some());
+        let l_zip64 = z.is_some_and(|z| z.usize_.is_some() || z.csize.is_some());
         if l_zip64 {
             w_u32(&mut out, 0xFFFF_FFFF);
             w_u32(&mut out, 0xFFFF_FFFF);

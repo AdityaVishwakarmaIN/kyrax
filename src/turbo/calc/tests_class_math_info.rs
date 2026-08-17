@@ -17,6 +17,7 @@
 //     not blank and numeric text is not a number.
 
 #![cfg(test)]
+#![allow(clippy::approx_constant)]
 
 use super::testkit::{Grid, Outcome, approx, boolean, calc, error, num, text};
 use crate::turbo::calc::value::{CalcError, CalcValue};
@@ -24,6 +25,7 @@ use crate::turbo::calc::value::{CalcError, CalcValue};
 #[cfg(test)]
 mod aggregates {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn sum_normal_and_variadic() {
@@ -216,6 +218,7 @@ mod aggregates {
 #[cfg(test)]
 mod abs_int {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn abs_normal() {
@@ -265,6 +268,7 @@ mod abs_int {
 #[cfg(test)]
 mod mod_power_sqrt {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn mod_normal_and_sign_of_divisor() {
@@ -347,6 +351,7 @@ mod mod_power_sqrt {
 #[cfg(test)]
 mod round_family {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn round_is_half_away_from_zero() {
@@ -429,6 +434,7 @@ mod round_family {
 #[cfg(test)]
 mod conditional {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     fn data() -> Grid {
         Grid::empty()
@@ -636,6 +642,7 @@ mod conditional {
 #[cfg(test)]
 mod is_predicates {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn isblank_distinguishes_blank_from_empty_text() {
@@ -789,6 +796,7 @@ mod is_predicates {
 #[cfg(test)]
 mod iseven_isodd {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn parity_of_integers() {
@@ -829,6 +837,7 @@ mod iseven_isodd {
 #[cfg(test)]
 mod na_n_type_error_type {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn na_produces_the_na_error_value() {
@@ -902,6 +911,7 @@ mod na_n_type_error_type {
 #[cfg(test)]
 mod row_column {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn bare_row_and_column_report_the_formula_cell() {
@@ -950,6 +960,7 @@ mod row_column {
 #[cfg(test)]
 mod rows_columns {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn rows_and_columns_of_ranges() {

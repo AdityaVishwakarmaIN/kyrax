@@ -375,6 +375,7 @@ fn fixed(digits: &[u8], dec_exp: i32) -> String {
 mod tests {
     use super::*;
     use crate::turbo::calc::value::ArrayValue;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn number_to_general_corpus() {

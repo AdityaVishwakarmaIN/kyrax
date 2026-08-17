@@ -225,6 +225,7 @@ fn a1_to_rc(a1: &str) -> (u32, u32) {
 #[cfg(test)]
 mod selftest {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn the_harness_drives_the_real_pipeline() {

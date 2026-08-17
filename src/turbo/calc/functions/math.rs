@@ -115,21 +115,18 @@ fn count(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
         match arg.value(ctx)? {
             CalcValue::Array(a) => {
                 for v in a.iter() {
-                    match v {
-                        CalcValue::Number(_) => n += 1,
-                        // Errors are skipped, not propagated: COUNT reports how
-                        // many numbers it sees (Excel: COUNT(#N/A) is 0).
-                        _ => {}
+                    // Errors are skipped, not propagated: COUNT reports how
+                    // many numbers it sees (Excel: COUNT(#N/A) is 0).
+                    if let CalcValue::Number(_) = v {
+                        n += 1;
                     }
                 }
             }
             v => {
                 // A direct error argument is likewise not a number — and is
                 // not propagated (measured: =COUNT(#N/A) returns 0).
-                if !matches!(v, CalcValue::Error(_)) {
-                    if coerce_number(&v).is_ok() {
-                        n += 1;
-                    }
+                if !matches!(v, CalcValue::Error(_)) && coerce_number(&v).is_ok() {
+                    n += 1;
                 }
             }
         }
@@ -980,7 +977,7 @@ fn quotient(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
 
 fn fact(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let n = coerce_number(&args[0].value(ctx)?)?.trunc();
-    if n < 0.0 || n > 170.0 {
+    if !(0.0..=170.0).contains(&n) {
         return Err(CalcError::Num);
     }
     let mut r = 1.0;
@@ -1412,7 +1409,7 @@ fn digit_char(d: u8) -> char {
 fn base(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let n = coerce_number(&args[0].value(ctx)?)?.trunc();
     let radix = coerce_number(&args[1].value(ctx)?)?.trunc() as i64;
-    if n < 0.0 || n >= 9_007_199_254_740_992.0 {
+    if !(0.0..9_007_199_254_740_992.0).contains(&n) {
         return Err(CalcError::Num);
     }
     if !(2..=36).contains(&radix) {
@@ -1599,7 +1596,7 @@ fn aggregate_values(
             let mut best: Option<(f64, usize)> = None;
             for &x in &nums {
                 let count = nums.iter().filter(|y| y.to_bits() == x.to_bits()).count();
-                if count > 1 && best.map_or(true, |(_, c)| count > c) {
+                if count > 1 && best.is_none_or(|(_, c)| count > c) {
                     best = Some((x, count));
                 }
             }
@@ -1664,10 +1661,8 @@ fn aggregate_k(
                     }
                 }
             }
-            CalcValue::Error(e) => {
-                if !ignore_errors {
-                    return Err(*e);
-                }
+            CalcValue::Error(e) if !ignore_errors => {
+                return Err(*e);
             }
             _ => {}
         }
@@ -1732,7 +1727,7 @@ fn aggregate(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
         return Err(CalcError::Value);
     }
     let ignore_errors = matches!(options, 2 | 3 | 6 | 7);
-    let k_needed = matches!(fnum, 14 | 15 | 16 | 17 | 18 | 19);
+    let k_needed = matches!(fnum, 14..=19);
     if k_needed && args.len() < 4 {
         return Err(CalcError::Value);
     }
@@ -2862,9 +2857,11 @@ pub fn register(r: &mut Registry) {
 }
 
 #[cfg(test)]
+#[allow(clippy::excessive_precision)]
 mod tests {
     use super::*;
     use crate::turbo::calc::functions::{CellResolver, Func};
+    use pretty_assertions::{assert_eq, assert_ne};
 
     struct EmptyResolver;
     impl CellResolver for EmptyResolver {

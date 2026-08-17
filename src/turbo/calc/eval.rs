@@ -316,6 +316,7 @@ mod tests {
     use super::*;
     use crate::turbo::calc::functions::CellResolver;
     use crate::turbo::calc::parse_formula;
+    use pretty_assertions::assert_eq;
 
     /// Fixed 3x3 grid on sheet 0:
     ///   A1=1 B1=2 C1=3

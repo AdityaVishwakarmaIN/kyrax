@@ -111,18 +111,13 @@ impl ChartType {
 /// `Clustered` and `Standard` are the family defaults: bar/column charts
 /// emit `clustered`, line/area charts emit `standard`. `Stacked` and
 /// `PercentStacked` are shared by both families.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Grouping {
+    #[default]
     Clustered,
     Standard,
     Stacked,
     PercentStacked,
-}
-
-impl Default for Grouping {
-    fn default() -> Self {
-        Grouping::Clustered
-    }
 }
 
 impl Grouping {

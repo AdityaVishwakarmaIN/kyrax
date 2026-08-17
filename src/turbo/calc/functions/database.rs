@@ -255,7 +255,7 @@ fn header_text(v: &CalcValue) -> Option<String> {
 }
 
 fn header_eq(db_header: &CalcValue, name: &str) -> bool {
-    header_text(db_header).map_or(false, |h| h.eq_ignore_ascii_case(name))
+    header_text(db_header).is_some_and(|h| h.eq_ignore_ascii_case(name))
 }
 
 /// Compile the criteria grid once: header names map to database columns, then
@@ -689,6 +689,7 @@ pub fn register(r: &mut Registry) {
 mod tests {
     use super::*;
     use crate::turbo::calc::testkit::Grid;
+    use pretty_assertions::assert_eq;
 
     /// The shared test database (6 records, 4 columns):
     ///   Product    Sales   Region   Qty

@@ -384,9 +384,11 @@ pub fn registry() -> &'static Registry {
 }
 
 #[cfg(test)]
+#[allow(clippy::assertions_on_constants)]
 mod tests {
     use super::*;
     use crate::turbo::calc::ast::{CellRef, RangeRef};
+    use pretty_assertions::assert_eq;
 
     fn identity_value(_ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
         args[0].value(_ctx)

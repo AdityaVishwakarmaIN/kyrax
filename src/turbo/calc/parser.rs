@@ -670,6 +670,7 @@ fn strip_brackets(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::turbo::calc::ast::{CellRef, ColumnRef, RangeRef, RefCore, RowRef};
+    use pretty_assertions::assert_eq;
 
     fn p(s: &str) -> Expr {
         parse_formula(s).unwrap_or_else(|e| panic!("{s:?} failed: {e:?}"))

@@ -362,6 +362,7 @@ pub fn rich_data_part_names(zip_bytes: &[u8]) -> TurboResult<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     const STRUCTURES: &[u8] = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <rvStructures xmlns="http://schemas.microsoft.com/office/spreadsheetml/2017/richdata" count="2">

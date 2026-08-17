@@ -2,6 +2,7 @@
 //! turbo reader, and assert bytes + anchor coordinates survive.
 #![cfg(feature = "__arrow")]
 
+use pretty_assertions::assert_eq;
 use std::sync::Arc;
 
 use kyrax::turbo::write::{Anchor, Image, ImageFormat, Workbook, cm_to_emu, write_workbook_bytes};

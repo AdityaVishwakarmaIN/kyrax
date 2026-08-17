@@ -464,6 +464,7 @@ pub fn thread_replies<'a>(all: &'a [ThreadedComment], root_id: &str) -> Vec<&'a 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     fn person(id: &str, name: &str) -> Person {
         Person {

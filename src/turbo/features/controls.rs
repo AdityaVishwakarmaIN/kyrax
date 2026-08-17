@@ -255,6 +255,7 @@ pub fn control_part_names(zip_bytes: &[u8]) -> TurboResult<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     const WRAPPED: &[u8] = b"<?xml version=\"1.0\"?><worksheet \
         xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" \

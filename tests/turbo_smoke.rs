@@ -2,6 +2,7 @@
 #![cfg(feature = "__arrow")]
 
 use kyrax::turbo::{Features, LinkTarget, read_workbook_turbo};
+use pretty_assertions::assert_eq;
 
 fn testdata(name: &str) -> String {
     format!("{}/testdata/{}", env!("CARGO_MANIFEST_DIR"), name)

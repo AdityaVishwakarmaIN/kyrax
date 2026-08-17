@@ -54,13 +54,13 @@ from ._kyrax import write_excel_turbo_stream as _write_excel_turbo_stream
 try:
     from ._kyrax import encryption_info as _encryption_info
 except ImportError:
-    _encryption_info = None
+    _encryption_info = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
 try:
     from ._kyrax import EditableSheet, EditableWorkbook, edit_excel
 except ImportError:
-    edit_excel = None
-    EditableWorkbook = None
-    EditableSheet = None
+    edit_excel = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    EditableWorkbook = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
+    EditableSheet = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
 
 
 def validate_excel(path: Path | str) -> dict:

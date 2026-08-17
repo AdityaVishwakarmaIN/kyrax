@@ -430,11 +430,10 @@ fn attr_value<'a>(tag: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
 fn is_data_cell(tag: &[u8]) -> bool {
     // Only the value-bearing cell types produce a push. Shared strings need a
     // resolvable index; others are always strings. Everything else is numeric.
-    match attr_value(tag, b"t") {
-        Some(b"inlineStr") | Some(b"str") | Some(b"e") => true,
-        Some(b"s") => true,
-        _ => false,
-    }
+    matches!(
+        attr_value(tag, b"t"),
+        Some(b"inlineStr") | Some(b"str") | Some(b"e")
+    ) || attr_value(tag, b"t") == Some(b"s")
 }
 
 fn shared_index_in_range(body: &[u8], shared: &StringArena) -> bool {

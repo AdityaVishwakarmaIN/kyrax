@@ -433,6 +433,7 @@ fn emit_value<W: Write>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_records<W: Write>(
     out: &mut JsonOut<W>,
     sh: &TurboSheet,
@@ -468,6 +469,7 @@ fn write_records<W: Write>(
     out.flush()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_columns<W: Write>(
     out: &mut JsonOut<W>,
     sh: &TurboSheet,
@@ -508,6 +510,7 @@ fn write_columns<W: Write>(
     out.flush()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_ndjson<W: Write>(
     out: &mut JsonOut<W>,
     sh: &TurboSheet,
@@ -594,6 +597,7 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 }
 
 /// Minimal strftime: `%Y %y %m %d %H %M %S %f %%`. Anything else is literal.
+#[allow(clippy::too_many_arguments)]
 fn strftime(fmt: &str, y: i64, mo: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64) -> String {
     let chars: Vec<char> = fmt.chars().collect();
     let mut out = String::with_capacity(fmt.len() + 8);
@@ -1608,6 +1612,7 @@ fn read_columns_into_sheet(sheet: &mut Sheet, path: &str) -> TurboResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
     use std::io::Cursor;
 
     fn json_out() -> JsonOut<Vec<u8>> {

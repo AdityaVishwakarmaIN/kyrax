@@ -136,7 +136,7 @@ impl Border {
 // B2 — Alignment + protection
 // ----------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Alignment {
     pub horizontal: Option<String>,
     pub vertical: Option<String>,
@@ -147,22 +147,6 @@ pub struct Alignment {
     pub relative_indent: i16,
     pub justify_last_line: Option<bool>,
     pub reading_order: u8,
-}
-
-impl Default for Alignment {
-    fn default() -> Self {
-        Self {
-            horizontal: None,
-            vertical: None,
-            text_rotation: 0,
-            wrap_text: None,
-            shrink_to_fit: None,
-            indent: 0,
-            relative_indent: 0,
-            justify_last_line: None,
-            reading_order: 0,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -606,7 +590,7 @@ pub fn parse_style_table(xml: &[u8]) -> StyleTable {
                     .first()
                     .map(|v| parse_color(v.1))
                     .unwrap_or_else(Color::default_rgb);
-            } else if each_element(elem, "gradientFill").first().is_some() {
+            } else if !each_element(elem, "gradientFill").is_empty() {
                 fill.pattern = "gradient".into();
             }
             fills.push(fill);
@@ -811,35 +795,35 @@ fn parse_border_elem(elem: &[u8], open_tag: &[u8], _scratch: &mut Vec<u8>) -> Bo
 }
 
 fn parse_alignment(tag: &[u8]) -> Alignment {
-    let mut a = Alignment::default();
-    a.horizontal = attr(tag, "horizontal")
-        .and_then(|v| std::str::from_utf8(v).ok())
-        .map(|s| s.to_string());
-    a.vertical = attr(tag, "vertical")
-        .and_then(|v| std::str::from_utf8(v).ok())
-        .map(|s| s.to_string());
-    a.text_rotation = attr(tag, "textRotation")
-        .and_then(|v| std::str::from_utf8(v).ok())
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    a.wrap_text = attr(tag, "wrapText").map(|v| v == b"1" || v.eq_ignore_ascii_case(b"true"));
-    a.shrink_to_fit =
-        attr(tag, "shrinkToFit").map(|v| v == b"1" || v.eq_ignore_ascii_case(b"true"));
-    a.indent = attr(tag, "indent")
-        .and_then(|v| std::str::from_utf8(v).ok())
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    a.relative_indent = attr(tag, "relativeIndent")
-        .and_then(|v| std::str::from_utf8(v).ok())
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    a.justify_last_line =
-        attr(tag, "justifyLastLine").map(|v| v == b"1" || v.eq_ignore_ascii_case(b"true"));
-    a.reading_order = attr(tag, "readingOrder")
-        .and_then(|v| std::str::from_utf8(v).ok())
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    a
+    Alignment {
+        horizontal: attr(tag, "horizontal")
+            .and_then(|v| std::str::from_utf8(v).ok())
+            .map(|s| s.to_string()),
+        vertical: attr(tag, "vertical")
+            .and_then(|v| std::str::from_utf8(v).ok())
+            .map(|s| s.to_string()),
+        text_rotation: attr(tag, "textRotation")
+            .and_then(|v| std::str::from_utf8(v).ok())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+        wrap_text: attr(tag, "wrapText").map(|v| v == b"1" || v.eq_ignore_ascii_case(b"true")),
+        shrink_to_fit: attr(tag, "shrinkToFit")
+            .map(|v| v == b"1" || v.eq_ignore_ascii_case(b"true")),
+        indent: attr(tag, "indent")
+            .and_then(|v| std::str::from_utf8(v).ok())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+        relative_indent: attr(tag, "relativeIndent")
+            .and_then(|v| std::str::from_utf8(v).ok())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+        justify_last_line: attr(tag, "justifyLastLine")
+            .map(|v| v == b"1" || v.eq_ignore_ascii_case(b"true")),
+        reading_order: attr(tag, "readingOrder")
+            .and_then(|v| std::str::from_utf8(v).ok())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+    }
 }
 
 fn parse_protection(tag: &[u8]) -> Protection {

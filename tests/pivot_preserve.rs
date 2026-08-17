@@ -1,7 +1,7 @@
 //! PIVOT PRESERVE — Task B5, PRESERVE half.
 //!
 //! A pivot table is not one part: it is a `<pivotTableDefinition>` (its layout
-//! + `<location>`), a `<pivotCacheDefinition>` (the `<cacheSource>` range it
+//! plus `<location>`), a `<pivotCacheDefinition>` (the `<cacheSource>` range it
 //! was built from), the materialised `pivotCacheRecords`, and the rels wiring
 //! all of them together. This file proves, on the real `testdata/pivot.xlsx`,
 //! that every one of those parts SURVIVES every mutation the engine supports:
@@ -21,6 +21,7 @@
 //! the source range — is asserted byte-for-byte in
 //! `insert_row_inside_source_shifts_cache_and_location`.
 
+use pretty_assertions::assert_eq;
 use std::sync::Arc;
 
 use kyrax::turbo::overlay::WorkbookOverlay;

@@ -6,12 +6,14 @@
 // case in `year_month_day`).
 
 #![cfg(test)]
+#![allow(clippy::approx_constant)]
 
 use super::testkit::{Grid, Outcome, approx, boolean, calc, error, num, text};
 use crate::turbo::calc::value::CalcError;
 
 mod left_right_mid {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn defaults_and_basic_positions() {
@@ -96,6 +98,7 @@ mod left_right_mid {
 
 mod len_trim_case {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn len_counts_characters() {
@@ -143,6 +146,7 @@ mod len_trim_case {
 
 mod find_search {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn find_is_case_sensitive_and_rejects_wildcards() {
@@ -211,6 +215,7 @@ mod find_search {
 
 mod substitute_replace {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn substitute_all_and_nth_instance() {
@@ -261,6 +266,7 @@ mod substitute_replace {
 
 mod value_fn {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn parses_numeric_text() {
@@ -297,6 +303,7 @@ mod value_fn {
 
 mod text_formatting {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn digit_patterns() {
@@ -356,6 +363,7 @@ mod text_formatting {
 
 mod concat_family {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn concat_scalars() {
@@ -421,6 +429,7 @@ mod concat_family {
 
 mod rept {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn repeats_and_truncates_count() {
@@ -452,6 +461,7 @@ mod rept {
 
 mod exact_char_code_t {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn exact_compares_case_sensitively_after_coercion() {
@@ -520,6 +530,7 @@ mod exact_char_code_t {
 
 mod date {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn serial_anchors_including_the_phantom_leap_day() {
@@ -594,6 +605,7 @@ mod date {
 
 mod year_month_day {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn reads_a_modern_anchor_back_consistently() {
@@ -658,6 +670,7 @@ mod year_month_day {
 
 mod time {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn builds_fraction_of_day() {
@@ -707,6 +720,7 @@ mod time {
 
 mod weekday {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn consecutive_serials_advance_by_one_and_wrap_after_seven() {
@@ -769,6 +783,7 @@ mod weekday {
 
 mod edate_eomonth {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn edate_adds_whole_months() {
@@ -816,6 +831,7 @@ mod edate_eomonth {
 
 mod datedif {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn whole_month_units() {
@@ -889,6 +905,7 @@ mod datedif {
 
 mod datevalue {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn parses_the_unambiguous_iso_form() {
@@ -947,6 +964,7 @@ mod datevalue {
 
 mod days {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn is_the_serial_difference() {
@@ -969,6 +987,7 @@ mod days {
 
 mod today_now {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn today_is_the_floor_of_now_and_in_a_sane_range() {
@@ -1029,6 +1048,7 @@ mod today_now {
 
 mod error_taxonomy {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn division_by_zero() {
@@ -1100,6 +1120,7 @@ mod error_taxonomy {
 
 mod error_propagation {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn an_error_argument_comes_out_of_every_text_function_unchanged() {

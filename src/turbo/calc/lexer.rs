@@ -623,6 +623,7 @@ fn is_reserved(b: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     fn lex(src: &str) -> Vec<Token> {
         tokenize(src).unwrap()

@@ -370,8 +370,7 @@ pub fn slicer_part_names(zip_bytes: &[u8]) -> TurboResult<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const SLICER_URI: &str = "{A8765BA9-456A-4dab-B4F3-ACF1C6B7B5FF}";
+    use pretty_assertions::assert_eq;
 
     const SLICERS_XML: &[u8] = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <slicers xmlns="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">

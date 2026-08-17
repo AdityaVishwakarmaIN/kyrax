@@ -535,6 +535,7 @@ mod tests {
     use crate::turbo::calc::ast::{CellRef, ColumnRef, RangeRef};
     use crate::turbo::calc::functions::CellResolver;
     use crate::turbo::calc::testkit::{Grid, Outcome};
+    use pretty_assertions::assert_eq;
 
     struct NoCells;
     impl CellResolver for NoCells {

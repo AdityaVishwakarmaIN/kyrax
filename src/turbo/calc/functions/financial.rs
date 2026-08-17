@@ -227,10 +227,10 @@ fn days_360_eu(s1: f64, s2: f64, date1904: bool) -> i64 {
 }
 
 /// Basis 1 days-in-year (Excel semantics). The average number of days per year
-/// over the span — `(last day of the end year − first day of the start year
-/// + 1) ÷ number of years spanned` — so a same-year span yields that year's
-/// full length (366 for a leap year even when the interval itself holds no
-/// 29-February). Truncating this to an integer misprices every basis-1
+/// over the span: `(last day of the end year - first day of the start year + 1)
+/// / number of years spanned` — so a same-year span yields that year's full
+/// length, 366 for a leap year even when the interval itself holds no
+/// 29-February. Truncating this to an integer misprices every basis-1
 /// security, and the "Feb 29 strictly between" rule is NOT what Excel uses.
 fn actual_actual_days_in_year(s1: f64, s2: f64, date1904: bool) -> f64 {
     let (mut y1, _, _) = serial_to_civil(s1, date1904);
@@ -253,7 +253,7 @@ fn actual_actual_days_in_year(s1: f64, s2: f64, date1904: bool) -> f64 {
 fn day_count(s1: f64, s2: f64, basis: u8, date1904: bool) -> f64 {
     match basis {
         0 => days_360_us(s1, s2, date1904) as f64,
-        1 | 2 | 3 => (clamp_serial(s2) - clamp_serial(s1)) as f64,
+        1..=3 => (clamp_serial(s2) - clamp_serial(s1)) as f64,
         _ => days_360_eu(s1, s2, date1904) as f64,
     }
 }
@@ -754,7 +754,7 @@ fn xnpv_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let d0 = dates[0].trunc();
     let mut total = 0.0;
     for (v, d) in values.iter().zip(dates.iter()) {
-        let t = (d.trunc() - d0) as f64 / 365.0;
+        let t = (d.trunc() - d0) / 365.0;
         total += v / (1.0 + r).powf(t);
     }
     ok_num(total)
@@ -867,8 +867,7 @@ fn db_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
         || salvage > cost
         || life <= 0.0
         || period < 1.0
-        || month < 1.0
-        || month > 12.0
+        || !(1.0..=12.0).contains(&month)
     {
         return Err(CalcError::Num);
     }
@@ -1302,6 +1301,7 @@ fn couppcd_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     ok_num(if prev < 0 { 0.0 } else { prev as f64 })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn accrint_value(
     issue: f64,
     first: f64,
@@ -1545,7 +1545,7 @@ fn t_bill_eq_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError>
     if settlement.trunc() >= maturity.trunc() || discount <= 0.0 {
         return Err(CalcError::Num);
     }
-    let dsm = (maturity.trunc() - settlement.trunc()) as f64;
+    let dsm = maturity.trunc() - settlement.trunc();
     let (y, _, _) = serial_to_civil(settlement, ctx.date1904);
     let year_days = if is_leap_system(y, ctx.date1904) {
         366.0
@@ -1578,6 +1578,7 @@ fn t_bill_eq_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError>
     ok_num(result)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn price_impl(
     settlement: f64,
     maturity: f64,
@@ -1936,6 +1937,7 @@ fn positive_days(s1: f64, s2: f64, basis: u8, date1904: bool) -> f64 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn oddfprice_value(
     settlement: f64,
     maturity: f64,
@@ -1992,6 +1994,7 @@ fn coupon_lattice_ok(date1: i64, date2: i64, freq: i64, date1904: bool) -> bool 
     months % (12 / freq) == 0
 }
 
+#[allow(clippy::too_many_arguments)]
 fn oddf_short(
     s: i64,
     m: i64,
@@ -2019,6 +2022,7 @@ fn oddf_short(
     result - c * a / e
 }
 
+#[allow(clippy::too_many_arguments)]
 fn oddf_long(
     s: i64,
     m: i64,
@@ -2174,6 +2178,7 @@ fn oddfyield_fn(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError>
     ok_num(x)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn oddlprice_value(
     settlement: f64,
     maturity: f64,
@@ -2904,6 +2909,7 @@ pub fn register(r: &mut Registry) {
 mod tests {
     use super::*;
     use crate::turbo::calc::testkit::Grid;
+    use pretty_assertions::assert_eq;
 
     fn near(a: f64, b: f64, tol: f64) {
         assert!(

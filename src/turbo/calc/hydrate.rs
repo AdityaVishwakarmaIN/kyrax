@@ -317,6 +317,7 @@ fn spill_element_value(v: &CalcValue) -> Option<CellValue> {
 mod tests {
     use super::*;
     use crate::turbo::write::model::{CachedValue, Cell, FormulaKind, Row, Sheet};
+    use pretty_assertions::{assert_eq, assert_ne};
 
     fn num_cell(col: u32, n: f64) -> Cell {
         Cell::new(col, CellValue::Number(n))

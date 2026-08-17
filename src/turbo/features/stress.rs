@@ -14,6 +14,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use pretty_assertions::assert_eq;
+
 use super::{
     controls, diff, external_links, power_query, rich_values, signatures, slicers, sparklines,
     threaded_comments,
@@ -52,7 +54,7 @@ fn corpus() -> Vec<(String, Vec<u8>)> {
 /// Run every zip-level entry point across the module set.
 ///
 /// The contract is *never panic*. An `Err` is a fine answer for a broken file;
-/// an unwrap on a malformed length field is not. Returns nothing — reaching the
+/// an unwrap on a malformed length field is not. Returns nothing � reaching the
 /// end without unwinding is the assertion.
 fn sweep_zip_entry_points(zip: &[u8]) {
     let _ = slicers::inventory_slicers(zip);
@@ -71,7 +73,7 @@ fn sweep_zip_entry_points(zip: &[u8]) {
 /// Run every part-level parser over an arbitrary byte slice.
 ///
 /// Each of these normally receives one specific inflated part. Feeding them the
-/// *wrong* part — or a truncated one — is exactly what a corrupt workbook does,
+/// *wrong* part � or a truncated one � is exactly what a corrupt workbook does,
 /// so they must all degrade rather than panic.
 fn sweep_part_parsers(part: &[u8]) {
     let _ = slicers::parse_slicers(part);
@@ -130,7 +132,7 @@ fn stress_every_corpus_sheet_part_survives_every_part_parser() {
             // directly. Volume is the streaming tests' job, not this one's.
             let xml = &xml[..xml.len().min(2 << 20)];
             parts_seen += 1;
-            let r = std::panic::catch_unwind(|| sweep_part_parsers(&xml));
+            let r = std::panic::catch_unwind(|| sweep_part_parsers(xml));
             assert!(r.is_ok(), "panicked on {name} :: {part}");
         }
     }
@@ -141,7 +143,7 @@ fn stress_every_corpus_sheet_part_survives_every_part_parser() {
 // 2. Deliberately broken bytes
 // ---------------------------------------------------------------------------
 
-/// Deterministic xorshift — a fixed seed so a failure reproduces exactly.
+/// Deterministic xorshift � a fixed seed so a failure reproduces exactly.
 struct Rng(u64);
 
 impl Rng {
@@ -214,8 +216,7 @@ fn stress_adversarial_xml_shapes_never_panic() {
         b"<sheetName val=\"\xE2\x82".to_vec(),
         vec![0xFF; 4096],
         vec![b'<'; 4096],
-        std::iter::repeat(b"<a>".as_slice())
-            .take(2000)
+        std::iter::repeat_n(b"<a>".as_slice(), 2000)
             .flatten()
             .copied()
             .collect(),
@@ -235,7 +236,7 @@ fn stress_adversarial_xml_shapes_never_panic() {
 /// that actually shipped.
 ///
 /// The gate is a **ratio against reading the same file**, not an absolute
-/// millisecond count, so it does not go red on a slow or loaded machine — the
+/// millisecond count, so it does not go red on a slow or loaded machine � the
 /// numerator and denominator move together. Detecting ten absent features must
 /// cost less than a twentieth of one read.
 #[test]
@@ -259,11 +260,11 @@ fn stress_absent_feature_detection_is_free_against_a_real_read() {
     let iters = 20;
     let t = Instant::now();
     for _ in 0..iters {
-        std::hint::black_box(sweep_zip_entry_points(&bytes));
+        sweep_zip_entry_points(&bytes);
     }
     let detect_ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
 
-    // Printed so `--nocapture` reports the headroom, not just pass/fail — a
+    // Printed so `--nocapture` reports the headroom, not just pass/fail � a
     // gate that only says "ok" cannot tell you it is about to stop being true.
     eprintln!(
         "absent-feature detection {detect_ms:.4} ms vs {read_ms:.1} ms read \
@@ -273,7 +274,7 @@ fn stress_absent_feature_detection_is_free_against_a_real_read() {
     assert!(
         detect_ms * 20.0 < read_ms,
         "absent-feature detection cost {detect_ms:.4} ms against a {read_ms:.1} ms read \
-         ({:.1}% of a read) — the fast path has regressed into inflating parts",
+         ({:.1}% of a read) � the fast path has regressed into inflating parts",
         detect_ms / read_ms * 100.0
     );
 }

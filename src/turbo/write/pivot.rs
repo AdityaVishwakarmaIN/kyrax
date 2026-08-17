@@ -227,10 +227,10 @@ pub fn build_pivot_parts(
 
     // Materialise the source into per-column value lists.
     let mut cols: Vec<ColumnData> = (0..ncols).map(|_| ColumnData::default()).collect();
-    for ci in 0..ncols {
+    for (ci, col) in cols.iter_mut().enumerate() {
         for ri in 0..n_data_rows {
             let v = cell_value_at(sheet, r0 + 1 + ri as u32, c0 + ci as u32);
-            cols[ci].values.push(v);
+            col.values.push(v);
         }
     }
 
@@ -306,12 +306,13 @@ pub fn build_pivot_parts(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="{PKG_REL_NS}"><Relationship Id="rId1" Type="{REL_NS}/pivotCacheDefinition" Target="../pivotCache/pivotCacheDefinition{n}.xml"/></Relationships>"#
     );
 
-    let mut parts = Vec::with_capacity(5);
-    parts.push((table.clone(), table_xml));
-    parts.push((table_rels.clone(), table_rels_xml.into_bytes()));
-    parts.push((cache_def.clone(), cache_def_xml));
-    parts.push((cache_def_rels.clone(), cache_def_rels_xml.into_bytes()));
-    parts.push((records.clone(), records_xml));
+    let parts = vec![
+        (table.clone(), table_xml),
+        (table_rels.clone(), table_rels_xml.into_bytes()),
+        (cache_def.clone(), cache_def_xml),
+        (cache_def_rels.clone(), cache_def_rels_xml.into_bytes()),
+        (records.clone(), records_xml),
+    ];
 
     let content_types = vec![
         (
@@ -954,6 +955,7 @@ fn push(out: &mut Vec<u8>, b: &[u8]) {
 mod tests {
     use super::*;
     use crate::turbo::write::model::{Cell, Row, Sheet};
+    use pretty_assertions::assert_eq;
 
     fn sheet_with(data: &[&[CellValue]]) -> Sheet {
         let mut s = Sheet::new("Data");

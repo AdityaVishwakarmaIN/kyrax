@@ -48,9 +48,7 @@ impl ColorSpec {
     /// 6-digit input gets AA=00 prefix (openpyxl RGB descriptor).
     pub fn from_rgb_hex(s: &str) -> Self {
         let h = s.trim_start_matches('#');
-        let v = if h.len() == 6 {
-            u32::from_str_radix(h, 16).unwrap_or(0)
-        } else if h.len() == 8 {
+        let v = if h.len() == 6 || h.len() == 8 {
             u32::from_str_radix(h, 16).unwrap_or(0)
         } else {
             0
@@ -1344,6 +1342,7 @@ fn _use_esc_text(s: &str, o: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::{assert_eq, assert_ne};
 
     #[test]
     fn bootstrap_ledger_14_16() {

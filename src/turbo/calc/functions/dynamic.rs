@@ -347,7 +347,7 @@ fn xlookup(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     if !matches!(search_mode, 1 | -1 | 2 | -2) {
         return Err(CalcError::Value);
     }
-    if !matches!(match_mode, -1 | 0 | 1 | 2) {
+    if !matches!(match_mode, -1..=2) {
         return Err(CalcError::Value);
     }
 
@@ -851,7 +851,7 @@ fn xmatch(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
         }
         None => 1,
     };
-    if !matches!(match_mode, -1 | 0 | 1 | 2) {
+    if !matches!(match_mode, -1..=2) {
         return Err(CalcError::Value);
     }
     if !matches!(search_mode, 1 | -1 | 2 | -2) {
@@ -1505,6 +1505,7 @@ mod tests {
     use super::*;
     use crate::turbo::calc::functions::{CellResolver, Func};
     use crate::turbo::calc::testkit::{Grid, Outcome};
+    use pretty_assertions::assert_eq;
 
     struct EmptyResolver;
     impl CellResolver for EmptyResolver {

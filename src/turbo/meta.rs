@@ -486,16 +486,17 @@ pub fn parse_row_dim(row_tag: &[u8], sheet_row: Option<u32>) -> Option<RowDim> {
 // Pre-sheetData header scan
 // ============================================================================
 
-pub fn scan_sheet_header(
-    header: &[u8],
-) -> (
+/// Everything the pre-sheetData header scan extracts.
+pub type SheetHeaderMeta = (
     Vec<ColDim>,
     Option<SheetFormat>,
     Option<SheetViewMeta>,
     Option<String>, // codeName
     Option<String>, // tabColor rgb/theme
     Option<bool>,   // fitToPage from pageSetUpPr
-) {
+);
+
+pub fn scan_sheet_header(header: &[u8]) -> SheetHeaderMeta {
     let mut scratch = Vec::new();
     let mut cols = Vec::new();
     let mut sheet_format = None;

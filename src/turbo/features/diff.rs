@@ -463,10 +463,7 @@ fn emit_row(
 ) -> TurboResult<()> {
     let mut pos = 0usize;
     let mut nc = 0u32;
-    loop {
-        let Some(c) = pull(ri.body, &mut pos, &mut nc)? else {
-            break;
-        };
+    while let Some(c) = pull(ri.body, &mut pos, &mut nc)? {
         let cell = a1(ri.row, c.col);
         let (before, after) = match kind {
             ChangeKind::Added => (None, owned(c.v, scratch)),
@@ -581,10 +578,7 @@ fn diff_sheet_present(xml: &[u8], sheet: &str, kind: ChangeKind) -> TurboResult<
     let mut out: Vec<CellChange> = Vec::new();
     let mut scratch: Vec<u8> = Vec::new();
     let mut i = 0usize;
-    loop {
-        let Some(ri) = next_row(region, i)? else {
-            break;
-        };
+    while let Some(ri) = next_row(region, i)? {
         emit_row(&ri, sheet, kind, &mut out, &mut scratch)?;
         i = ri.next;
     }
@@ -597,6 +591,7 @@ fn diff_sheet_present(xml: &[u8], sheet: &str, kind: ChangeKind) -> TurboResult<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     // ---- minimal STORE zip writer (no dependency, no files on disk) ----
     fn crc32(data: &[u8]) -> u32 {

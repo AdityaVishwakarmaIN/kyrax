@@ -143,7 +143,7 @@ impl<'a> Provenance<'a> {
     /// True when nothing reads `cell`. A cell absent from the graph has no
     /// dependents, so it is reported as a leaf.
     pub fn is_leaf(&self, cell: CellKey) -> bool {
-        self.reverse.get(&cell).map_or(true, |d| d.is_empty())
+        self.reverse.get(&cell).is_none_or(|d| d.is_empty())
     }
 
     /// The true inputs of the model: every formula cell with no precedents.
@@ -229,6 +229,7 @@ mod tests {
     use super::*;
     use crate::turbo::calc::deps::{NameTarget, RefResolver};
     use crate::turbo::calc::{BinaryOp, CalcValue, CellRef, Expr, RefCore, RefExpr};
+    use pretty_assertions::assert_eq;
 
     fn ck(row: u32, col: u16) -> CellKey {
         CellKey::new(0, row, col)

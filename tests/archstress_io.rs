@@ -18,6 +18,7 @@
 
 #![cfg(feature = "__arrow")]
 
+use pretty_assertions::assert_eq;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrow_array::types::Int32Type;

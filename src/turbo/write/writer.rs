@@ -538,8 +538,7 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
         .map(|(i, _)| format!("rId{}", pivot_rel_base + i + 1))
         .collect();
 
-    let sheet_names_states: Vec<(String, SheetState)> = if wb.numeric_columns.is_some() {
-        let g = wb.numeric_columns.as_ref().unwrap();
+    let sheet_names_states: Vec<(String, SheetState)> = if let Some(g) = &wb.numeric_columns {
         vec![(g.sheet_name.clone(), SheetState::Visible)]
     } else {
         sheets_ref
@@ -856,8 +855,7 @@ pub fn save_workbook_stream<W: io::Write + Seek>(wb: &Workbook, w: W) -> io::Res
         .map(|(i, _)| format!("rId{}", pivot_rel_base + i + 1))
         .collect();
 
-    let sheet_names_states: Vec<(String, SheetState)> = if wb.numeric_columns.is_some() {
-        let g = wb.numeric_columns.as_ref().unwrap();
+    let sheet_names_states: Vec<(String, SheetState)> = if let Some(g) = &wb.numeric_columns {
         vec![(g.sheet_name.clone(), SheetState::Visible)]
     } else {
         sheets_ref
@@ -925,6 +923,7 @@ fn emit_sheet_auto_filter(out: &mut Vec<u8>, af: &AutoFilterMeta, features: Writ
     emit_auto_filter(out, &range_a1(&af.ref_), cols);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_sheet_package_stream<W: io::Write + Seek>(
     zip: &mut StreamingZipWriter<W>,
     sheet_path: &str,
@@ -2028,6 +2027,7 @@ fn advance_counters_for_sheet(c: &mut PartCounters, sheet: &Sheet, features: Wri
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_sheet_package(
     sheet: &Sheet,
     use_sst: bool,
@@ -2558,18 +2558,15 @@ fn write_cell(
     emit_cache: bool,
     sst: &mut SstAccess<'_>,
 ) {
-    match &cell.value {
-        CellValue::Empty => {
-            if cell.style.is_none() || cell.style == Some(0) {
-                return;
-            }
-            push(out, br#"<c r=""#);
-            write_coord(out, row, cell.col);
-            write_style_attr(out, cell.style);
-            push(out, br#""/>"#);
+    if let CellValue::Empty = &cell.value {
+        if cell.style.is_none() || cell.style == Some(0) {
             return;
         }
-        _ => {}
+        push(out, br#"<c r=""#);
+        write_coord(out, row, cell.col);
+        write_style_attr(out, cell.style);
+        push(out, br#""/>"#);
+        return;
     }
 
     push(out, br#"<c r=""#);
@@ -2774,6 +2771,7 @@ fn chrono_days(year: i32, month: u32, day: u32) -> i64 {
 mod tests {
     use super::super::charts::{Chart, ChartType, Series};
     use super::*;
+    use pretty_assertions::assert_eq;
     use std::sync::Arc;
 
     #[test]

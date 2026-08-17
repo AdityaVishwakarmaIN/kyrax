@@ -8,6 +8,7 @@ use kyrax::turbo::features::threaded_comments::{
     write_threaded_comments,
 };
 use kyrax::turbo::write::{ImageFormat, detect_image_format};
+use pretty_assertions::assert_eq;
 
 #[test]
 fn a2_image_magic_detection_distinguishes_formats() {

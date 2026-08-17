@@ -18,6 +18,8 @@
 //!   * openpyxl (when present in the Python environment) loads the output
 //!     without error — weak semantics, strong non-corruption signal.
 
+use pretty_assertions::assert_eq;
+use pretty_assertions::assert_ne;
 use std::process::Command;
 
 use kyrax::turbo::write::{

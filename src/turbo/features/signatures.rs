@@ -125,10 +125,9 @@ pub fn strip_signature_rels(rels_xml: &[u8]) -> TurboResult<Vec<u8>> {
         let close_end = if rels_xml.get(te.wrapping_sub(1)) == Some(&b'/') {
             te + 1
         } else {
-            let cpos = find_close_rel(rels_xml, te + 1).ok_or_else(|| {
+            find_close_rel(rels_xml, te + 1).ok_or_else(|| {
                 TurboError::Format("unterminated <Relationship> element in .rels".into())
-            })?;
-            cpos
+            })?
         };
         if rel_is_signature_related(&rels_xml[start..te]) {
             removes.push((start, close_end));
@@ -261,12 +260,12 @@ fn find_close_rel(xml: &[u8], from: usize) -> Option<usize> {
 #[inline]
 fn rel_is_signature_related(tag: &[u8]) -> bool {
     if crate::turbo::structural::find_attr(tag, b"Type")
-        .map_or(false, |t| t.ends_with(b"/digital-signature/origin"))
+        .is_some_and(|t| t.ends_with(b"/digital-signature/origin"))
     {
         return true;
     }
     crate::turbo::structural::find_attr(tag, b"Target")
-        .map_or(false, |t| t.starts_with(b"_xmlsignatures/"))
+        .is_some_and(|t| t.starts_with(b"_xmlsignatures/"))
 }
 
 /// `rest` is everything after a `<`. True for a `<Default` or `<Override`
@@ -288,12 +287,12 @@ fn is_ct_open(rest: &[u8]) -> bool {
 #[inline]
 fn ct_decl_is_signature(tag: &[u8]) -> bool {
     if crate::turbo::structural::find_attr(tag, b"PartName")
-        .map_or(false, |p| p.starts_with(b"/_xmlsignatures/"))
+        .is_some_and(|p| p.starts_with(b"/_xmlsignatures/"))
     {
         return true;
     }
     crate::turbo::structural::find_attr(tag, b"Extension")
-        .map_or(false, |e| e.eq_ignore_ascii_case(b"sigs"))
+        .is_some_and(|e| e.eq_ignore_ascii_case(b"sigs"))
 }
 
 /// Span of the first element whose local tag name is `local`, searching from
@@ -308,9 +307,7 @@ fn element_span(xml: &[u8], from: usize, local: &[u8]) -> Option<(usize, usize)>
             let open_gt = pos + memchr::memchr(b'>', &xml[pos..])?;
             let mut j = open_gt + 1;
             while j < xml.len() {
-                let Some(o) = memchr::memmem::find(&xml[j..], b"</") else {
-                    return None;
-                };
+                let o = memchr::memmem::find(&xml[j..], b"</")?;
                 let cpos = j + o;
                 if tag_local_name(&xml[cpos + 2..]) == local {
                     return Some((open_gt, cpos));
@@ -347,6 +344,7 @@ fn scan_sig_meta(xml: &[u8]) -> (Option<String>, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     /// Minimal single- or multi-entry STORE zip built fully in memory. The
     /// reader never verifies CRC, so that field stays zero. `method` lets a

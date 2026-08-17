@@ -112,6 +112,7 @@ pub fn wellformed(xml: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn balanced_document_is_ok() {

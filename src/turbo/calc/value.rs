@@ -161,7 +161,7 @@ pub struct ArrayValue {
 
 impl ArrayValue {
     pub fn new(rows: u32, cols: u32, data: Vec<CalcValue>) -> Self {
-        debug_assert_eq!(data.len(), (rows as usize) * (cols as usize));
+        debug_assert!(data.len() == (rows as usize) * (cols as usize));
         Self {
             rows,
             cols,
@@ -311,6 +311,7 @@ impl fmt::Display for CalcValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn cacheable_partition() {

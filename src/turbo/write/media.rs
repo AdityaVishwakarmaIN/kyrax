@@ -146,6 +146,7 @@ impl Default for MediaInterner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::{assert_eq, assert_ne};
     // Test-only: the non-test code detects format at the call site.
     use super::super::model::detect_image_format;
 

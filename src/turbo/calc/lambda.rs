@@ -1165,6 +1165,7 @@ pub fn register(r: &mut Registry) {
 mod tests {
     use super::*;
     use crate::turbo::calc::testkit::{Grid, Outcome};
+    use pretty_assertions::assert_eq;
 
     fn arr(rows: u32, cols: u32, data: Vec<f64>) -> CalcValue {
         CalcValue::array(ArrayValue::new(

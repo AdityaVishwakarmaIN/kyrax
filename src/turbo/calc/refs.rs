@@ -133,7 +133,7 @@ fn parse_endpoint(s: &str) -> End {
         i += 1;
     }
     let lstart = i;
-    while b.get(i).map_or(false, |c| c.is_ascii_alphabetic()) {
+    while b.get(i).is_some_and(|c| c.is_ascii_alphabetic()) {
         i += 1;
     }
     let letters = &s[lstart..i];
@@ -142,7 +142,7 @@ fn parse_endpoint(s: &str) -> End {
         i += 1;
     }
     let dstart = i;
-    while b.get(i).map_or(false, |c| c.is_ascii_digit()) {
+    while b.get(i).is_some_and(|c| c.is_ascii_digit()) {
         i += 1;
     }
     let digits = &s[dstart..i];
@@ -215,7 +215,7 @@ fn parse_cell(s: &str) -> CellOutcome {
         i += 1;
     }
     let lstart = i;
-    while b.get(i).map_or(false, |c| c.is_ascii_alphabetic()) {
+    while b.get(i).is_some_and(|c| c.is_ascii_alphabetic()) {
         i += 1;
     }
     let letters = &s[lstart..i];
@@ -224,7 +224,7 @@ fn parse_cell(s: &str) -> CellOutcome {
         i += 1;
     }
     let dstart = i;
-    while b.get(i).map_or(false, |c| c.is_ascii_digit()) {
+    while b.get(i).is_some_and(|c| c.is_ascii_digit()) {
         i += 1;
     }
     let digits = &s[dstart..i];
@@ -253,7 +253,7 @@ fn parse_cell(s: &str) -> CellOutcome {
 /// Row number `[1-9][0-9]*` -> 1-based `u64`, or `None` on shape/overflow.
 fn parse_row_digits(s: &str) -> Option<u64> {
     let b = s.as_bytes();
-    if b.first().map_or(true, |c| !(b'1'..=b'9').contains(c)) {
+    if b.first().is_none_or(|c| !(b'1'..=b'9').contains(c)) {
         return None;
     }
     s.parse::<u64>().ok()
@@ -305,6 +305,7 @@ fn normalise_cols(a: u16, b: u16) -> ColumnRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     fn cell(col: u16, row: u32, abs_col: bool, abs_row: bool) -> CellRef {
         CellRef {

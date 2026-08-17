@@ -388,6 +388,23 @@ pub struct FormulaColumn {
     anchors: Vec<AnchorDef>,
 }
 
+/// One entry's byte span `(start, len)` inside a translated arena.
+pub(crate) type ArenaSpan = (u32, u32);
+
+/// A parallel chunk's local arena plus its entry spans, merged afterwards.
+type ArenaChunk = (Vec<u8>, Vec<ArenaSpan>);
+
+/// Value columns converted to Arrow arrays plus their metadata.
+pub(crate) type ArrowColumns = (
+    Vec<String>,
+    Vec<arrow_array::ArrayRef>,
+    Option<Vec<arrow_array::UInt32Array>>,
+    Option<FormulaColumn>,
+    Vec<CellError>,
+    usize,
+    usize,
+);
+
 impl FormulaColumn {
     /// Empty formula column (feature requested, sheet has no formulas).
     pub fn empty() -> Self {
@@ -523,13 +540,13 @@ impl FormulaColumn {
     /// Parallel over entry chunks, each with its own local arena, merged at
     /// the end by re-basing spans — no mutex on the hot path, no per-formula
     /// allocation (E4 candidate C).
-    fn build_arena_all(&self) -> (Vec<u8>, Vec<(u32, u32)>) {
+    fn build_arena_all(&self) -> (Vec<u8>, Vec<ArenaSpan>) {
         use rayon::prelude::*;
         let n = self.entries.len();
         let anchors = self.anchor_by_si();
         const CHUNK: usize = 4096;
         let nchunks = n.div_ceil(CHUNK);
-        let locals: Vec<(Vec<u8>, Vec<(u32, u32)>)> = (0..nchunks)
+        let locals: Vec<ArenaChunk> = (0..nchunks)
             .into_par_iter()
             .map(|k| {
                 let lo = k * CHUNK;
@@ -711,17 +728,7 @@ impl Partial {
         col
     }
     /// Convert value columns to Arrow arrays; consumes column buffers.
-    pub fn into_arrow_columns(
-        mut self,
-    ) -> TurboResult<(
-        Vec<String>,
-        Vec<arrow_array::ArrayRef>,
-        Option<Vec<arrow_array::UInt32Array>>,
-        Option<FormulaColumn>,
-        Vec<CellError>,
-        usize,
-        usize,
-    )> {
+    pub fn into_arrow_columns(mut self) -> TurboResult<ArrowColumns> {
         use arrow_array::builder::{Float64Builder, StringBuilder};
         use arrow_array::types::Int32Type;
         use arrow_array::{ArrayRef, Float64Array, UInt32Array};
@@ -779,12 +786,15 @@ impl Partial {
             match col {
                 Column::Num { v, valid } => {
                     let mut b = Float64Builder::with_capacity(nrows);
-                    for i in 0..nrows {
-                        if i < valid.len && valid.get(i) {
-                            b.append_value(v[i]);
+                    for (i, &val) in v.iter().take(nrows).enumerate() {
+                        if valid.get(i) {
+                            b.append_value(val);
                         } else {
                             b.append_null();
                         }
+                    }
+                    for _ in v.len().min(nrows)..nrows {
+                        b.append_null();
                     }
                     columns.push(Arc::new(b.finish()) as ArrayRef);
                 }
@@ -908,7 +918,8 @@ fn parse_cell_col_from_r(tag: &[u8]) -> Option<usize> {
         o + 4
     } else if tag.starts_with(b"r=\"") {
         3
-    } else if let Some(o) = memchr::memmem::find(tag, b"r=\"") {
+    } else {
+        let o = memchr::memmem::find(tag, b"r=\"")?;
         // Guard: attribute name must be exactly `r`, not `xr` / `pr` etc.
         if o > 0 {
             let p = tag[o - 1];
@@ -917,8 +928,6 @@ fn parse_cell_col_from_r(tag: &[u8]) -> Option<usize> {
             }
         }
         o + 3
-    } else {
-        return None;
     };
     col_from_ref_bytes(&tag[vs..])
 }
@@ -930,7 +939,8 @@ fn parse_row_r_attr(row_tag: &[u8]) -> Option<u32> {
         o + 4
     } else if row_tag.starts_with(b"r=\"") {
         3
-    } else if let Some(o) = memchr::memmem::find(row_tag, b"r=\"") {
+    } else {
+        let o = memchr::memmem::find(row_tag, b"r=\"")?;
         if o > 0 {
             let p = row_tag[o - 1];
             if p.is_ascii_alphanumeric() || p == b'_' {
@@ -938,8 +948,6 @@ fn parse_row_r_attr(row_tag: &[u8]) -> Option<u32> {
             }
         }
         o + 3
-    } else {
-        return None;
     };
     let ve = vs + memchr::memchr(b'"', &row_tag[vs..]).unwrap_or(row_tag.len() - vs);
     atoi(&row_tag[vs..ve])
@@ -987,6 +995,7 @@ impl ColTarget {
 
 /// Parse one row-aligned byte region of a worksheet (streaming path uses this
 /// per window; `parse_parallel` chunks a full sheet into these regions).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn parse_region(
     x: &[u8],
     lo: usize,
@@ -1037,6 +1046,7 @@ pub(crate) fn parse_region(
     /// Advance local `dr` to the absolute data-row for this sheet row, padding
     /// gaps. Returns the absolute data-row index used for formula/error coords.
     #[inline]
+    #[allow(clippy::too_many_arguments)]
     fn align_data_row(
         sheet_row: Option<u32>,
         dr: &mut usize,
@@ -1557,7 +1567,9 @@ pub(crate) fn parse_ref_range(refr: &[u8]) -> (u32, u32, u32, u32) {
 }
 
 /// Excel grid limits for strict A1 validation.
+#[allow(dead_code)] // used by the `python` feature bindings
 pub(crate) const MAX_GRID_ROWS: u32 = 1_048_576;
+#[allow(dead_code)] // used by the `python` feature bindings
 pub(crate) const MAX_GRID_COLS: u32 = 16_384;
 
 /// Strictly parse a single A1 cell ref or an A1 range into normalized 1-based
@@ -1568,6 +1580,7 @@ pub(crate) const MAX_GRID_COLS: u32 = 16_384;
 /// optional and allowed only immediately before the column letters and/or the
 /// row digits. Returns `None` for empty, malformed, zero, non-ASCII, or
 /// out-of-grid input (including extra colons or trailing characters).
+#[allow(dead_code)] // used by the `python` feature bindings
 pub(crate) fn parse_ref_range_strict(refr: &[u8]) -> Option<(u32, u32, u32, u32)> {
     let mut colon_at: Option<usize> = None;
     for (i, &b) in refr.iter().enumerate() {
@@ -1593,6 +1606,7 @@ pub(crate) fn parse_ref_range_strict(refr: &[u8]) -> Option<(u32, u32, u32, u32)
 
 /// Parse one `[$]?COL[$]?ROW` endpoint → 1-based `(row, col)`; `None` on any
 /// syntax or bounds violation.
+#[allow(dead_code)] // used by `parse_ref_range_strict` (python feature bindings)
 fn parse_ref_component(s: &[u8]) -> Option<(u32, u32)> {
     if s.is_empty() {
         return None;
@@ -1684,6 +1698,7 @@ pub(crate) fn parse_parallel(
     Ok(merge_partials(partials, feat))
 }
 
+#[allow(clippy::needless_range_loop)] // parallel arrays of differing lengths (guards + gap padding)
 fn merge_partials(mut partials: Vec<Partial>, feat: ScanFeat) -> Partial {
     if partials.is_empty() {
         return Partial {
@@ -1747,11 +1762,9 @@ fn merge_partials(mut partials: Vec<Partial>, feat: ScanFeat) -> Partial {
         let base = starts[i];
         let remap: Vec<u32> = {
             let nd = p.dict.ndistinct();
-            let mut r = vec![0u32; nd];
-            for id in 0..nd {
-                r[id] = gdict.intern(p.dict.resolve(id as u32));
-            }
-            r
+            (0..nd)
+                .map(|id| gdict.intern(p.dict.resolve(id as u32)))
+                .collect()
         };
         for c in 0..ncols {
             let pcol = match p.cols.get(c) {
@@ -1956,10 +1969,9 @@ fn merge_partials(mut partials: Vec<Partial>, feat: ScanFeat) -> Partial {
         }
         if feat.formulas {
             let nd = p.fdict.ndistinct();
-            let mut fremap = vec![0u32; nd];
-            for id in 0..nd {
-                fremap[id] = gfdict.intern(p.fdict.resolve(id as u32));
-            }
+            let fremap: Vec<u32> = (0..nd)
+                .map(|id| gfdict.intern(p.fdict.resolve(id as u32)))
+                .collect();
             // With sheet @r, formula rows are absolute data indices. Without, local + base.
             let formula_abs = any_abs;
             for e in &p.fentries {
@@ -2133,6 +2145,7 @@ impl FormulaColumn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     /// Build a formula column from anchor bodies and shared dependents.
     /// Anchors sit at data-row 1 / data-col 1 (delta 0 for the anchor cell

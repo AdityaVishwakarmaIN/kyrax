@@ -68,14 +68,13 @@ pub fn shift_rows<'a>(xml: &'a [u8], at: u32, delta: i64) -> Option<Cow<'a, [u8]
     let body_start = gt + 1;
     let close = body_start + memchr::memmem::find(&xml[body_start..], b"</sheetData>")?;
     let body = &xml[body_start..close];
-    if find_element(body, b"row", 0).is_none() {
-        return None;
-    }
+    find_element(body, b"row", 0)?;
 
-    if delta < 0 && memchr::memmem::find(body, b"t=\"shared\"").is_some() {
-        if would_orphan_shared(body, at, (-delta) as u64) {
-            return None;
-        }
+    if delta < 0
+        && memchr::memmem::find(body, b"t=\"shared\"").is_some()
+        && would_orphan_shared(body, at, (-delta) as u64)
+    {
+        return None;
     }
 
     match splice_body(body, at, delta)? {
@@ -132,14 +131,13 @@ pub fn shift_cols<'a>(xml: &'a [u8], at: u32, delta: i64) -> Option<Cow<'a, [u8]
     let body_start = gt + 1;
     let close = body_start + memchr::memmem::find(&xml[body_start..], b"</sheetData>")?;
     let body = &xml[body_start..close];
-    if find_element(body, b"row", 0).is_none() {
-        return None;
-    }
+    find_element(body, b"row", 0)?;
 
-    if delta < 0 && memchr::memmem::find(body, b"t=\"shared\"").is_some() {
-        if would_orphan_shared_cols(body, at, (-delta) as u64) {
-            return None;
-        }
+    if delta < 0
+        && memchr::memmem::find(body, b"t=\"shared\"").is_some()
+        && would_orphan_shared_cols(body, at, (-delta) as u64)
+    {
+        return None;
     }
 
     let body_edit = match splice_body_cols(body, at, delta)? {
@@ -1691,9 +1689,7 @@ pub fn move_range<'a>(
     let body_start = gt + 1;
     let close = body_start + memchr::memmem::find(&xml[body_start..], b"</sheetData>")?;
     let body = &xml[body_start..close];
-    if find_element(body, b"row", 0).is_none() {
-        return None;
-    }
+    find_element(body, b"row", 0)?;
 
     let rband_min = r1.min(dr1);
     let rband_max = r2.max(dr2);
@@ -2463,10 +2459,7 @@ fn rewrite_elements_mv(
     let mut changed = false;
     let mut started = false;
     let mut last = 0usize;
-    loop {
-        let Some(rel) = find_element(&tail[pos..], name, 0) else {
-            break;
-        };
+    while let Some(rel) = find_element(&tail[pos..], name, 0) {
         let s = pos + rel;
         let Some(gt_rel) = memchr::memchr(b'>', &tail[s..]) else {
             break;
@@ -2548,20 +2541,14 @@ fn fixup_merge_cells_move(
     rows: i64,
     cols: i64,
 ) -> Option<Vec<u8>> {
-    let Some(s) = find_element(tail, b"mergeCells", 0) else {
-        return None;
-    };
-    let Some(gt_rel) = memchr::memchr(b'>', &tail[s..]) else {
-        return None;
-    };
+    let s = find_element(tail, b"mergeCells", 0)?;
+    let gt_rel = memchr::memchr(b'>', &tail[s..])?;
     let gt = s + gt_rel;
     if gt > s && tail[gt - 1] == b'/' {
         return None;
     }
     let close_tag = b"</mergeCells>";
-    let Some(close_rel) = memchr::memmem::find(&tail[gt..], close_tag) else {
-        return None;
-    };
+    let close_rel = memchr::memmem::find(&tail[gt..], close_tag)?;
     let close = gt + close_rel;
     let block = &tail[gt + 1..close];
 
@@ -2771,6 +2758,7 @@ mod tests {
     use crate::turbo::SheetOverlay;
     use crate::turbo::overlay::splice_sheet_xml;
     use crate::turbo::write::model::CellValue;
+    use pretty_assertions::assert_eq;
 
     fn xml(dim: &str, rows: &str) -> String {
         format!(

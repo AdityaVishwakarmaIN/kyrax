@@ -665,6 +665,7 @@ mod tests {
     use super::*;
     use crate::turbo::calc::CalcValue;
     use crate::turbo::calc::ast::{BinaryOp, CellRef, ColumnRef, RangeRef, RowRef};
+    use pretty_assertions::assert_eq;
 
     fn ck(row: u32, col: u16) -> CellKey {
         CellKey::new(0, row, col)
