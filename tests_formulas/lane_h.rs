@@ -676,6 +676,26 @@ fn package_content_hash(bytes: &[u8]) -> u64 {
     fnv1a(&content)
 }
 
+/// Diagnostics: per-entry content hashes, one per line, so a cross-machine
+/// golden mismatch pinpoints the diverging package part.
+fn per_entry_hashes(bytes: &[u8]) -> String {
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("package is a readable zip");
+    let mut lines = Vec::new();
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).expect("entry");
+        let mut buf = Vec::with_capacity(entry.size() as usize);
+        entry.read_to_end(&mut buf).expect("entry inflates");
+        lines.push(format!(
+            "  {} -> {:#018x} ({} bytes)",
+            entry.name(),
+            fnv1a(&buf),
+            buf.len()
+        ));
+    }
+    lines.join("\n")
+}
+
 /// Golden content hash of the scalar workbook below, frozen from the
 /// pre-Lane-H writer. The spill persistence must not change a byte of a
 /// workbook that has no array formulas.
@@ -764,6 +784,7 @@ fn scalar_workbook_output_is_byte_identical_to_the_lane_h_baseline() {
     let first = package_content_hash(&bytes);
     assert_eq!(
         first, GOLDEN_SCALAR_HASH,
-        "scalar output changed vs the pre-Lane-H baseline (hash {first:#x})"
+        "scalar output changed vs the pre-Lane-H baseline (hash {first:#x})\n{}",
+        per_entry_hashes(&bytes)
     );
 }
