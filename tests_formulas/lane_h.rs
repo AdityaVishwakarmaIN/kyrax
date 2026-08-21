@@ -645,8 +645,7 @@ fn every_spilled_family_saves_into_a_readable_package() {
 // H.5: scalar workbooks are byte-identical before/after the spill work
 // ---------------------------------------------------------------------------
 
-/// FNV-1a 64: a tiny, stable hash independent of std's randomized hashers, so
-/// the golden constant below is comparable across builds and machines.
+/// FNV-1a 64: a tiny, stable hash independent of std's randomized hashers.
 fn fnv1a(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {
@@ -656,10 +655,31 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     h
 }
 
-/// Golden hash of the scalar workbook below, frozen from the pre-Lane-H
-/// writer. The spill persistence must not change a byte of a workbook that has
-/// no array formulas.
-const GOLDEN_SCALAR_HASH: u64 = 0xc3b2_eb40_b43f_05aa;
+/// Content hash of a saved package: every entry's name plus its *decompressed*
+/// bytes, in archive order. The compression layer (libdeflater) may emit
+/// different-but-valid deflate streams per CPU architecture (AVX2 vs NEON
+/// code paths), so compressed container bytes are only comparable within one
+/// machine. The uncompressed part contents are the portability contract.
+fn package_content_hash(bytes: &[u8]) -> u64 {
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("package is a readable zip");
+    let mut content = Vec::new();
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).expect("entry");
+        content.extend_from_slice(entry.name().as_bytes());
+        content.push(0);
+        let mut buf = Vec::with_capacity(entry.size() as usize);
+        entry.read_to_end(&mut buf).expect("entry inflates");
+        content.extend_from_slice(&buf);
+        content.push(0);
+    }
+    fnv1a(&content)
+}
+
+/// Golden content hash of the scalar workbook below, frozen from the
+/// pre-Lane-H writer. The spill persistence must not change a byte of a
+/// workbook that has no array formulas.
+const GOLDEN_SCALAR_HASH: u64 = 0xd17e_51f7_4d87_c832;
 
 fn scalar_book() -> Workbook {
     let mut wb = Workbook::new();
@@ -737,11 +757,11 @@ fn scalar_workbook_output_is_byte_identical_to_the_lane_h_baseline() {
     assert_eq!(report.computed, 5, "{report:?}");
 
     let bytes = write_workbook_bytes(&wb).expect("scalar workbook serializes");
-    let first = fnv1a(&bytes);
     // determinism: a second serialization of the same model hashes identically
     let again = fnv1a(&write_workbook_bytes(&wb).expect("serializes again"));
-    assert_eq!(first, again, "writer output must be deterministic");
+    assert_eq!(fnv1a(&bytes), again, "writer output must be deterministic");
 
+    let first = package_content_hash(&bytes);
     assert_eq!(
         first, GOLDEN_SCALAR_HASH,
         "scalar output changed vs the pre-Lane-H baseline (hash {first:#x})"

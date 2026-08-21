@@ -50,6 +50,7 @@ testing = [
     "polars>=0.16.14",
     "openpyxl>=3.1.2,<4",
     "xlrd>=2.0.1,<3",
+    "pillow>=9.0",
 ]
 linting = [
     { include-group = "dev" },

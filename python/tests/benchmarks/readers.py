@@ -1,6 +1,6 @@
 from kyrax import read_excel
 from openpyxl import load_workbook
-from xlrd import open_workbook  # ty: ignore[unresolved-import]
+from xlrd import open_workbook
 
 
 def pyxl_read(test_file_path: str):
