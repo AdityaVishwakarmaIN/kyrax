@@ -217,6 +217,37 @@ pub fn json_to_sheet(
     Ok(())
 }
 
+/// Like [`json_to_sheet`], but parses an in-memory document (any `BufRead` +
+/// `Copy`, e.g. `&[u8]`) instead of a file. `Records`/`Ndjson` need two passes
+/// over the document (key discovery then row fill), which is why `R` must be
+/// `Copy`.
+pub fn json_to_sheet_from<R: BufRead + Copy>(
+    data: R,
+    xlsx_out: &str,
+    sheet_name: &str,
+    opts: &JsonOptions,
+) -> TurboResult<()> {
+    let mut sheet = Sheet::new(sheet_name);
+    match opts.shape {
+        JsonShape::Records => {
+            let keys = discover_records_keys_from(data)?;
+            read_records_into_sheet_from(&mut sheet, data, &keys)?;
+        }
+        JsonShape::Ndjson => {
+            let keys = discover_ndjson_keys_from(data)?;
+            read_ndjson_into_sheet_from(&mut sheet, data, &keys)?;
+        }
+        JsonShape::Columns => {
+            read_columns_into_sheet_from(&mut sheet, data)?;
+        }
+    }
+    let mut wb = Workbook::new();
+    wb.sheets.clear();
+    wb.sheets.push(sheet);
+    save_workbook(&wb, xlsx_out)?;
+    Ok(())
+}
+
 // ----------------------------------------------------------------------------
 // Export internals
 // ----------------------------------------------------------------------------
@@ -1321,9 +1352,10 @@ fn for_each_records_element<R: Read, T, F: FnMut(T) -> TurboResult<()>>(
     }
 }
 
-fn discover_records_keys(path: &str) -> TurboResult<Vec<String>> {
-    let f = std::fs::File::open(path)?;
-    let mut r = ChunkReader::new(f);
+/// Stream the key union of a `Records` document from any `BufRead` (a file, or
+/// an in-memory buffer for the Python bytes entry point).
+fn discover_records_keys_from<R: BufRead>(r: R) -> TurboResult<Vec<String>> {
+    let mut r = ChunkReader::new(r);
     skip_bom(&mut r)?;
     let mut keys: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -1340,6 +1372,11 @@ fn discover_records_keys(path: &str) -> TurboResult<Vec<String>> {
         },
     )?;
     Ok(keys)
+}
+
+fn discover_records_keys(path: &str) -> TurboResult<Vec<String>> {
+    let f = std::fs::File::open(path)?;
+    discover_records_keys_from(std::io::BufReader::new(f))
 }
 
 fn header_row(keys: &[String]) -> Row {
@@ -1381,11 +1418,15 @@ fn record_to_row(obj: &[(String, JVal)], keys: &[String], row_no: u32) -> Row {
     row
 }
 
-fn read_records_into_sheet(sheet: &mut Sheet, path: &str, keys: &[String]) -> TurboResult<()> {
+/// Stream `Records` rows into a sheet from any `BufRead`.
+fn read_records_into_sheet_from<R: BufRead>(
+    sheet: &mut Sheet,
+    r: R,
+    keys: &[String],
+) -> TurboResult<()> {
     sheet.rows.push(header_row(keys));
     let mut row_no = 2u32;
-    let f = std::fs::File::open(path)?;
-    let mut r = ChunkReader::new(f);
+    let mut r = ChunkReader::new(r);
     skip_bom(&mut r)?;
     for_each_records_element(
         &mut r,
@@ -1397,6 +1438,11 @@ fn read_records_into_sheet(sheet: &mut Sheet, path: &str, keys: &[String]) -> Tu
         },
     )?;
     Ok(())
+}
+
+fn read_records_into_sheet(sheet: &mut Sheet, path: &str, keys: &[String]) -> TurboResult<()> {
+    let f = std::fs::File::open(path)?;
+    read_records_into_sheet_from(sheet, std::io::BufReader::new(f), keys)
 }
 
 /// NDJSON: stream one object per line (no wrapping array). Objects may be
@@ -1449,11 +1495,11 @@ fn ndjson_object_stream<R: BufRead>(
     Ok(())
 }
 
-fn discover_ndjson_keys(path: &str) -> TurboResult<Vec<String>> {
-    let f = std::fs::File::open(path)?;
+/// Discover the NDJSON key union from any `BufRead`.
+fn discover_ndjson_keys_from<R: BufRead>(r: R) -> TurboResult<Vec<String>> {
     let mut keys: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    ndjson_object_stream(std::io::BufReader::new(f), |obj| {
+    ndjson_object_stream(r, |obj| {
         let (_, ks) = parse_object_keys(obj, 0).map_err(|e| match e {
             JsonErr::NeedMore => TurboError::Format("truncated NDJSON object".into()),
             JsonErr::Format(s) => TurboError::Format(s),
@@ -1468,11 +1514,20 @@ fn discover_ndjson_keys(path: &str) -> TurboResult<Vec<String>> {
     Ok(keys)
 }
 
-fn read_ndjson_into_sheet(sheet: &mut Sheet, path: &str, keys: &[String]) -> TurboResult<()> {
+fn discover_ndjson_keys(path: &str) -> TurboResult<Vec<String>> {
+    let f = std::fs::File::open(path)?;
+    discover_ndjson_keys_from(std::io::BufReader::new(f))
+}
+
+/// Stream NDJSON rows into a sheet from any `BufRead`.
+fn read_ndjson_into_sheet_from<R: BufRead>(
+    sheet: &mut Sheet,
+    r: R,
+    keys: &[String],
+) -> TurboResult<()> {
     sheet.rows.push(header_row(keys));
     let mut row_no = 2u32;
-    let f = std::fs::File::open(path)?;
-    ndjson_object_stream(std::io::BufReader::new(f), |obj| {
+    ndjson_object_stream(r, |obj| {
         let (_, pairs) = parse_object_full(obj, 0).map_err(|e| match e {
             JsonErr::NeedMore => TurboError::Format("truncated NDJSON object".into()),
             JsonErr::Format(s) => TurboError::Format(s),
@@ -1484,13 +1539,17 @@ fn read_ndjson_into_sheet(sheet: &mut Sheet, path: &str, keys: &[String]) -> Tur
     Ok(())
 }
 
+fn read_ndjson_into_sheet(sheet: &mut Sheet, path: &str, keys: &[String]) -> TurboResult<()> {
+    let f = std::fs::File::open(path)?;
+    read_ndjson_into_sheet_from(sheet, std::io::BufReader::new(f), keys)
+}
+
 /// Columns shape: top-level object of `"key": [v, ...]`. Each column array is
 /// parsed into memory in turn (peak ≈ sheet model, inherent to the row-based
 /// write target); column arrays may differ in length — shorter columns pad
-/// with empty cells.
-fn read_columns_into_sheet(sheet: &mut Sheet, path: &str) -> TurboResult<()> {
-    let f = std::fs::File::open(path)?;
-    let mut r = ChunkReader::new(f);
+/// with empty cells. Reads from any `BufRead`.
+fn read_columns_into_sheet_from<R: BufRead>(sheet: &mut Sheet, r: R) -> TurboResult<()> {
+    let mut r = ChunkReader::new(r);
     skip_bom(&mut r)?;
     expect_char(&mut r, b'{')?;
 
@@ -1603,6 +1662,11 @@ fn read_columns_into_sheet(sheet: &mut Sheet, path: &str) -> TurboResult<()> {
         sheet.rows.push(row);
     }
     Ok(())
+}
+
+fn read_columns_into_sheet(sheet: &mut Sheet, path: &str) -> TurboResult<()> {
+    let f = std::fs::File::open(path)?;
+    read_columns_into_sheet_from(sheet, std::io::BufReader::new(f))
 }
 
 // ----------------------------------------------------------------------------

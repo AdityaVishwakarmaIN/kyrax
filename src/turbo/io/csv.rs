@@ -413,9 +413,12 @@ fn format_date(y: i64, m: u32, d: u32, z: i64, frac: f64, fmt: &str) -> String {
     const DAYS_ABBR: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
     let wd = ((z.rem_euclid(7) + 4) % 7) as usize; // z=0 (1970-01-01) is Thursday
-    let hour24 = (((frac * 24.0) as i64) % 24).rem_euclid(24) as u32;
-    let minute = (((frac * 1440.0) as i64) % 60).rem_euclid(60) as u32;
-    let second = (((frac * 86_400.0) as i64) % 60).rem_euclid(60) as u32;
+    // Round each component (json.rs rounds at the millisecond level for the
+    // same reason): `frac` is an f64, and truncating 05:06:07's fraction can
+    // land on 18366.999... and emit 06 for the seconds.
+    let hour24 = (((frac * 24.0).round() as i64) % 24).rem_euclid(24) as u32;
+    let minute = (((frac * 1440.0).round() as i64) % 60).rem_euclid(60) as u32;
+    let second = (((frac * 86_400.0).round() as i64) % 60).rem_euclid(60) as u32;
 
     let mut out = String::new();
     let b = fmt.as_bytes();
@@ -535,6 +538,20 @@ pub fn csv_to_sheet(
     validate_opts(opts)?;
     let file = std::fs::File::open(csv_path)?;
     let mut reader = CsvReader::new(file, opts);
+    let wb = build_workbook(&mut reader, sheet_name, opts)?;
+    save_workbook(&wb, xlsx_out).map_err(TurboError::Io)?;
+    Ok(())
+}
+
+/// Like [`csv_to_sheet`], but parses an in-memory CSV buffer instead of a file.
+pub fn csv_bytes_to_sheet(
+    data: &[u8],
+    xlsx_out: &str,
+    sheet_name: &str,
+    opts: &CsvOptions,
+) -> TurboResult<()> {
+    validate_opts(opts)?;
+    let mut reader = CsvReader::new(std::io::Cursor::new(data), opts);
     let wb = build_workbook(&mut reader, sheet_name, opts)?;
     save_workbook(&wb, xlsx_out).map_err(TurboError::Io)?;
     Ok(())

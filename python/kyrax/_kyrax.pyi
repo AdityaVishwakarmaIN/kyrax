@@ -792,6 +792,75 @@ def dependency_query(
     "precedents" | "dependents" | "precedents_deep" | "dependents_deep" |
     "impact" | "roots"."""
 
+# --- turbo io: csv + json interchange ---
+
+def sheet_to_csv(
+    path: str,
+    sheet: str,
+    out_path: str,
+    delimiter: str,
+    quote: str,
+    has_header: bool,
+    infer_types: bool,
+    date_format: str,
+) -> None: ...
+def sheet_to_csv_bytes(
+    path: str,
+    sheet: str,
+    delimiter: str,
+    quote: str,
+    has_header: bool,
+    infer_types: bool,
+    date_format: str,
+) -> bytes: ...
+def csv_to_sheet(
+    csv_path: str,
+    xlsx_out: str,
+    sheet_name: str,
+    delimiter: str,
+    quote: str,
+    has_header: bool,
+    infer_types: bool,
+) -> None: ...
+def csv_bytes_to_sheet(
+    csv_bytes: bytes,
+    xlsx_out: str,
+    sheet_name: str,
+    delimiter: str,
+    quote: str,
+    has_header: bool,
+    infer_types: bool,
+) -> None: ...
+def sheet_to_json(
+    path: str,
+    sheet: str,
+    out_path: str,
+    shape: str,
+    has_header: bool,
+    date_format: str,
+) -> None: ...
+def sheet_to_json_bytes(
+    path: str,
+    sheet: str,
+    shape: str,
+    has_header: bool,
+    date_format: str,
+) -> bytes: ...
+def json_to_sheet(
+    json_path: str,
+    xlsx_out: str,
+    sheet_name: str,
+    shape: str,
+    has_header: bool,
+) -> None: ...
+def json_bytes_to_sheet(
+    json_bytes: bytes,
+    xlsx_out: str,
+    sheet_name: str,
+    shape: str,
+    has_header: bool,
+) -> None: ...
+
 __version__: str
 
 # Exceptions

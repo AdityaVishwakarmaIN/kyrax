@@ -178,6 +178,22 @@ fn _kyrax(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(py_dependency_query, m)?)?;
     }
 
+    // turbo io: csv + json interchange
+    {
+        use crate::turbo::io::python::{
+            py_csv_bytes_to_sheet, py_csv_to_sheet, py_json_bytes_to_sheet, py_json_to_sheet,
+            py_sheet_to_csv, py_sheet_to_csv_bytes, py_sheet_to_json, py_sheet_to_json_bytes,
+        };
+        m.add_function(wrap_pyfunction!(py_sheet_to_csv, m)?)?;
+        m.add_function(wrap_pyfunction!(py_sheet_to_csv_bytes, m)?)?;
+        m.add_function(wrap_pyfunction!(py_csv_to_sheet, m)?)?;
+        m.add_function(wrap_pyfunction!(py_csv_bytes_to_sheet, m)?)?;
+        m.add_function(wrap_pyfunction!(py_sheet_to_json, m)?)?;
+        m.add_function(wrap_pyfunction!(py_sheet_to_json_bytes, m)?)?;
+        m.add_function(wrap_pyfunction!(py_json_to_sheet, m)?)?;
+        m.add_function(wrap_pyfunction!(py_json_bytes_to_sheet, m)?)?;
+    }
+
     m.add("__version__", get_python_version())?;
 
     // errors

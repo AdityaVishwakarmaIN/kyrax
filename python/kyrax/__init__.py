@@ -1297,6 +1297,8 @@ __all__ = (
     "__version__",
     # standalone formula API (lazy; imported on first access)
     "formulas",
+    # csv/json interchange (lazy; imported on first access)
+    "io",
     # main entrypoint
     "read_excel",
     "read_excel_turbo",
@@ -1357,4 +1359,8 @@ def __getattr__(name: str):
         import importlib
 
         return importlib.import_module(f"{__name__}.formulas")
+    if name == "io":
+        import importlib
+
+        return importlib.import_module(f"{__name__}.io")
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

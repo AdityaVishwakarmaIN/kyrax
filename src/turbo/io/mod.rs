@@ -12,3 +12,6 @@
 
 pub mod csv;
 pub mod json;
+
+#[cfg(feature = "python")]
+pub mod python;
