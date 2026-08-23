@@ -62,6 +62,17 @@ const REL_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/rela
 
 static THEME_XML: &str = include_str!("theme_office.xml");
 
+const _: () = {
+    let bytes = THEME_XML.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' {
+            panic!("theme_office.xml must not contain CRLF (\\r\\n) line endings — canonical LF required for byte determinism");
+        }
+        i += 1;
+    }
+};
+
 /// Builtin date format (numFmtId=14). openpyxl `is_date` true on read-back.
 const DATE_NUM_FMT: &str = "mm-dd-yy";
 /// Builtin datetime format (numFmtId=22).

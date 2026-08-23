@@ -172,13 +172,14 @@ impl EntryInflate {
             InflateMethod::Stored => {
                 let mut n = 0usize;
                 while n < out.len() && self.remaining_compressed > 0 {
-                    let got = file_read_at(&mut self.file, &mut out[n..], self.data_offset)?;
+                    let to_read = (out.len() - n).min(self.remaining_compressed);
+                    let got = file_read_at(&mut self.file, &mut out[n..n + to_read], self.data_offset)?;
                     if got == 0 {
                         self.eof = true;
                         break;
                     }
                     self.data_offset += got as u64;
-                    self.remaining_compressed -= got;
+                    self.remaining_compressed = self.remaining_compressed.saturating_sub(got);
                     n += got;
                 }
                 if self.remaining_compressed == 0 {

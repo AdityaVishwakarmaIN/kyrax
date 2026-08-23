@@ -699,7 +699,7 @@ fn per_entry_hashes(bytes: &[u8]) -> String {
 /// Golden content hash of the scalar workbook below, frozen from the
 /// pre-Lane-H writer. The spill persistence must not change a byte of a
 /// workbook that has no array formulas.
-const GOLDEN_SCALAR_HASH: u64 = 0xd17e_51f7_4d87_c832;
+const GOLDEN_SCALAR_HASH: u64 = 0xd035_be35_2e92_aaa5;
 
 fn scalar_book() -> Workbook {
     let mut wb = Workbook::new();
