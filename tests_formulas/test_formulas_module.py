@@ -2,7 +2,7 @@
 
 Run with the project venv::
 
-    nextexcel/.venv/Scripts/python.exe -m pytest tests_formulas/test_formulas_module.py
+    kyrax/.venv/Scripts/python.exe -m pytest tests_formulas/test_formulas_module.py
 """
 
 import doctest

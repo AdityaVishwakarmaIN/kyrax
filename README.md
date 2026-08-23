@@ -183,7 +183,7 @@ uv python pin 3.13      # Pin project to Python 3.13
 ```bash
 # Clone the repository (or from your fork)
 git clone <repository-url>
-cd nextexcel
+cd kyrax
 
 # First-time setup: install dependencies, build debug version, and setup pre-commit hooks
 make setup-dev

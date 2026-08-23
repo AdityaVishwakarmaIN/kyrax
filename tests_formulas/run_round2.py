@@ -4,7 +4,7 @@ Re-evaluates every `matrix_frozen.csv` formula through the live direct engine
 (`kyrax.formulas.evaluate`, scalar-picked for arrays) and emits the draft plus
 the gated `formula-validation/round2/matrix_v2.csv` final snapshot.
 
-Run from `nextexcel/`:
+Run from `kyrax/`:
     .venv\\Scripts\\python.exe tests_formulas/run_round2.py
 """
 

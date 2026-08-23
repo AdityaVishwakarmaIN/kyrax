@@ -10,7 +10,7 @@ command that proves it.
 | 2 | **0 Excel-refereed failures** in matrix_v2 | `python tests_formulas/run_round2.py` → `formula-validation/round2/matrix_v2_draft.csv`; every `CONFIRMED-EXCEL` row's `verdict` = `PASS` |
 | 3 | **0 array-write-path rows** | matrix_v2 draft: no row flagged `array-write-path` remains unhandled |
 | 4 | **tests_formulas 100% green** | `python -m pytest tests_formulas -q` — 0 failures (Lane J's `xfail` pending rows may remain `xfail`, never fail) |
-| 5 | **cargo test 100% green** | `cargo test --test direct_eval` and every lane's integration test from `nextexcel/` |
+| 5 | **cargo test 100% green** | `cargo test --test direct_eval` and every lane's integration test from `kyrax/` |
 | 6 | **No repair prompt (COM-verified)** | Excel COM opens every output family (`write_excel_turbo` × all feature sets); `Workbook.EnableAutoRecover` / open-check reports no repair dialog |
 | 7 | **Determinism** | `python -m pytest tests_formulas/test_determinism.py -q` — identical non-volatile workbook ⇒ byte-identical output; volatile set (`NOW`/`TODAY`/`RAND`) excluded |
 | 8 | **`from kyrax import formulas` works per doctests** | `python -m pytest --doctest-modules python/kyrax/formulas.py -q` — 3 doctests pass |

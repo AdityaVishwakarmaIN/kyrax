@@ -27,7 +27,7 @@
 //! `calc::testkit` is `#[cfg(test)]`-gated inside the crate. The write model is
 //! used purely as the in-memory grid container — nothing is ever serialized.
 //!
-//! Rerunnable: `cargo test --test direct_eval` from `nextexcel/` re-reads the
+//! Rerunnable: `cargo test --test direct_eval` from `kyrax/` re-reads the
 //! fixture and overwrites `target/direct_eval_results.csv` with one result row
 //! per input row. No external crates: CSV and the small JSON payloads are
 //! parsed by the minimal readers below (the crate's dev-dependencies expose no

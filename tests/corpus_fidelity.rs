@@ -4,7 +4,7 @@
 //! non-grid fixups around them (`turbo/fixup.rs`). Every prior test for that
 //! work used SYNTHETIC XML written by the same hands as the splice — that proves
 //! self-consistency, not fidelity. This file runs the mutation paths over the
-//! REAL workbooks in `nextexcel/testdata/` and checks that nothing is corrupted.
+//! REAL workbooks in `kyrax/testdata/` and checks that nothing is corrupted.
 //!
 //! Files are discovered at runtime (never hardcoded) so new corpus files are
 //! picked up automatically; a file that cannot even be opened is skipped

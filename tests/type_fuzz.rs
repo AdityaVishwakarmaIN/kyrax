@@ -41,7 +41,7 @@
 //!
 //!   cargo test --release --features __arrow --test type_fuzz type_fuzz_exhaustive -- --ignored
 //!
-//! The reader (`nextexcel/src/turbo/scan.rs`) is intentionally OUT OF BOUNDS:
+//! The reader (`kyrax/src/turbo/scan.rs`) is intentionally OUT OF BOUNDS:
 //! this file only writes xlsx via the turbo WRITE path and reads them back via
 //! the turbo READ path. A real defect must be reported, not patched here.
 

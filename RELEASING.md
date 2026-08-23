@@ -38,7 +38,7 @@ understood and reproducible.
 1. **Metadata** in `pyproject.toml` / `Cargo.toml`: name `kyrax`, MIT license,
    `requires-python >=3.10`, README wired up as the PyPI long description
    (`readme = "README.md"`), and project URLs pointing at the GitHub repo.
-2. **Isolated git repository:** this folder (`nextexcel/`) is its own git repo,
+2. **Isolated git repository:** this folder (`kyrax/`) is its own git repo,
    independent of any parent folder. Its remote `origin` is the private GitHub
    repo **https://github.com/AdityaVishwakarmaIN/kyrax**.
 3. **PyPI credentials:** a PyPI API token is stored as the GitHub Actions
