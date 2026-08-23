@@ -524,7 +524,7 @@ fn cell_value_at(sheet: &Sheet, row: u32, col: u32) -> ColVal {
         CellValue::Bool(b) => ColVal::Num(if *b { 1.0 } else { 0.0 }),
         CellValue::Error(e) => ColVal::Str(e.clone()),
         CellValue::Str(s) => ColVal::Str(s.clone()),
-        CellValue::DateSerial(d) => ColVal::Date(*d),
+        CellValue::DateSerial(d) | CellValue::Time(d) | CellValue::Duration(d) => ColVal::Date(*d),
         CellValue::Rich(rt) => ColVal::Str(rich_text_plain(rt)),
         CellValue::Formula { cached, .. } => match cached {
             Some(cv) => match cv {

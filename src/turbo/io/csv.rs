@@ -69,7 +69,10 @@
 use std::io::Read;
 
 use arrow_array::types::Int32Type;
-use arrow_array::{Array, DictionaryArray, Float64Array, StringArray};
+use arrow_array::{
+    Array, BooleanArray, Date32Array, DictionaryArray, Float64Array, Int64Array, StringArray,
+    TimestampMillisecondArray,
+};
 
 use crate::turbo::error::{TurboError, TurboResult};
 use crate::turbo::write::{Cell, CellValue, Row, Workbook, save_workbook};
@@ -201,6 +204,28 @@ pub fn sheet_to_csv<W: std::io::Write>(
                         append_field(&mut rowbuf, &Field::Raw(&s), opts);
                     }
                 }
+                CellOut::Int(i) => {
+                    let s = i.to_string();
+                    append_field(&mut rowbuf, &Field::Raw(&s), opts);
+                }
+                CellOut::Bool(b) => {
+                    let s = if b { "TRUE" } else { "FALSE" };
+                    append_field(&mut rowbuf, &Field::Raw(s), opts);
+                }
+                CellOut::Date32(days) => {
+                    let unix_epoch_excel_serial = 25569.0;
+                    let serial = unix_epoch_excel_serial + (days as f64);
+                    let (y, m, d, z, frac) = serial_parts(serial, false);
+                    let s = format_date(y, m, d, z, frac, &opts.date_format);
+                    append_field(&mut rowbuf, &Field::Raw(&s), opts);
+                }
+                CellOut::TimestampMs(ms) => {
+                    let unix_epoch_excel_serial = 25569.0;
+                    let serial = unix_epoch_excel_serial + (ms as f64 / 86400000.0);
+                    let (y, m, d, z, frac) = serial_parts(serial, false);
+                    let s = format_date(y, m, d, z, frac, &opts.date_format);
+                    append_field(&mut rowbuf, &Field::Raw(&s), opts);
+                }
                 CellOut::Str(s) => {
                     if s.is_empty() {
                         append_field(&mut rowbuf, &Field::EmptyStr, opts);
@@ -268,6 +293,10 @@ fn fmt_num(x: f64) -> String {
 /// Columnar view of one Arrow array, downcast once.
 enum ColRef<'a> {
     Num(&'a Float64Array),
+    Int(&'a Int64Array),
+    Bool(&'a BooleanArray),
+    Date32(&'a Date32Array),
+    TimestampMs(&'a TimestampMillisecondArray),
     Str(&'a StringArray),
     Dict(&'a DictionaryArray<Int32Type>),
     Other,
@@ -276,6 +305,14 @@ enum ColRef<'a> {
 fn col_view(a: &arrow_array::ArrayRef) -> ColRef<'_> {
     if let Some(x) = a.as_any().downcast_ref::<Float64Array>() {
         ColRef::Num(x)
+    } else if let Some(x) = a.as_any().downcast_ref::<Int64Array>() {
+        ColRef::Int(x)
+    } else if let Some(x) = a.as_any().downcast_ref::<BooleanArray>() {
+        ColRef::Bool(x)
+    } else if let Some(x) = a.as_any().downcast_ref::<Date32Array>() {
+        ColRef::Date32(x)
+    } else if let Some(x) = a.as_any().downcast_ref::<TimestampMillisecondArray>() {
+        ColRef::TimestampMs(x)
     } else if let Some(x) = a.as_any().downcast_ref::<StringArray>() {
         ColRef::Str(x)
     } else if let Some(x) = a.as_any().downcast_ref::<DictionaryArray<Int32Type>>() {
@@ -288,6 +325,10 @@ fn col_view(a: &arrow_array::ArrayRef) -> ColRef<'_> {
 enum CellOut<'a> {
     Null,
     Num(f64),
+    Int(i64),
+    Bool(bool),
+    Date32(i32),
+    TimestampMs(i64),
     Str(&'a str),
 }
 
@@ -299,6 +340,34 @@ fn cell_at<'a>(col: &'a ColRef<'_>, r: usize) -> CellOut<'a> {
                 CellOut::Null
             } else {
                 CellOut::Num(a.value(r))
+            }
+        }
+        ColRef::Int(a) => {
+            if a.is_null(r) {
+                CellOut::Null
+            } else {
+                CellOut::Int(a.value(r))
+            }
+        }
+        ColRef::Bool(a) => {
+            if a.is_null(r) {
+                CellOut::Null
+            } else {
+                CellOut::Bool(a.value(r))
+            }
+        }
+        ColRef::Date32(a) => {
+            if a.is_null(r) {
+                CellOut::Null
+            } else {
+                CellOut::Date32(a.value(r))
+            }
+        }
+        ColRef::TimestampMs(a) => {
+            if a.is_null(r) {
+                CellOut::Null
+            } else {
+                CellOut::TimestampMs(a.value(r))
             }
         }
         ColRef::Str(a) => {
@@ -413,12 +482,10 @@ fn format_date(y: i64, m: u32, d: u32, z: i64, frac: f64, fmt: &str) -> String {
     const DAYS_ABBR: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
     let wd = ((z.rem_euclid(7) + 4) % 7) as usize; // z=0 (1970-01-01) is Thursday
-    // Round each component (json.rs rounds at the millisecond level for the
-    // same reason): `frac` is an f64, and truncating 05:06:07's fraction can
-    // land on 18366.999... and emit 06 for the seconds.
-    let hour24 = (((frac * 24.0).round() as i64) % 24).rem_euclid(24) as u32;
-    let minute = (((frac * 1440.0).round() as i64) % 60).rem_euclid(60) as u32;
-    let second = (((frac * 86_400.0).round() as i64) % 60).rem_euclid(60) as u32;
+    let total_ms = (frac * 86_400_000.0).round() as i64;
+    let hour24 = ((total_ms / 3_600_000) % 24).rem_euclid(24) as u32;
+    let minute = ((total_ms / 60_000) % 60).rem_euclid(60) as u32;
+    let second = ((total_ms / 1_000) % 60).rem_euclid(60) as u32;
 
     let mut out = String::new();
     let b = fmt.as_bytes();

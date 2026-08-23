@@ -88,6 +88,10 @@ pub enum CellValue {
     Str(String),
     /// Excel serial day number (Windows 1900 system by default).
     DateSerial(f64),
+    /// Time fraction of day serial [0.0, 1.0)
+    Time(f64),
+    /// Duration in days (e.g. for [h]:mm:ss)
+    Duration(f64),
     /// Multi-run rich text (`t="inlineStr"` with `<r>` children).
     Rich(RichText),
     Formula {
@@ -95,6 +99,46 @@ pub enum CellValue {
         kind: FormulaKind,
         cached: Option<CachedValue>,
     },
+}
+
+/// Validate an Excel worksheet name according to ECMA-376 and Excel UI rules.
+#[allow(dead_code)]
+pub fn validate_sheet_name(name: &str, existing: &[String]) -> Result<(), crate::turbo::error::TurboError> {
+    if name.is_empty() {
+        return Err(crate::turbo::error::TurboError::Format("sheet name cannot be empty".into()));
+    }
+    let char_len = name.chars().count();
+    if char_len > 31 {
+        return Err(crate::turbo::error::TurboError::Format(format!(
+            "sheet name \"{name}\" exceeds maximum length of 31 characters (got {char_len})"
+        )));
+    }
+    const INVALID_CHARS: [char; 7] = [':', '\\', '/', '?', '*', '[', ']'];
+    for c in name.chars() {
+        if INVALID_CHARS.contains(&c) {
+            return Err(crate::turbo::error::TurboError::Format(format!(
+                "sheet name \"{name}\" contains invalid character '{c}'"
+            )));
+        }
+    }
+    if name.starts_with('\'') || name.ends_with('\'') {
+        return Err(crate::turbo::error::TurboError::Format(format!(
+            "sheet name \"{name}\" cannot start or end with an apostrophe"
+        )));
+    }
+    if name.eq_ignore_ascii_case("History") {
+        return Err(crate::turbo::error::TurboError::Format(
+            "sheet name \"History\" is reserved by Excel".into()
+        ));
+    }
+    for ex in existing {
+        if name.eq_ignore_ascii_case(ex) {
+            return Err(crate::turbo::error::TurboError::Format(format!(
+                "sheet name \"{name}\" already exists (case-insensitive duplicate of \"{ex}\")"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -554,6 +598,7 @@ pub struct WriteOptions {
     /// When true, emit `<v>` for formula cells that carry a cache.
     pub emit_cached_values: bool,
     pub date1904: bool,
+    pub date_iso: bool,
     pub features: WriteFeatures,
     /// Auto SST unique/total threshold (only used when string_mode == Auto).
     pub auto_sst_threshold: f64,
@@ -565,6 +610,7 @@ impl Default for WriteOptions {
             string_mode: StringMode::InlineStr,
             emit_cached_values: true,
             date1904: false,
+            date_iso: false,
             features: WriteFeatures::CORE,
             auto_sst_threshold: AUTO_SST_THRESHOLD,
         }

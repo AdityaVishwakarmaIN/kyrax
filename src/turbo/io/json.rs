@@ -73,7 +73,10 @@ use std::io::{self, BufRead, Read, Write};
 
 use arrow_array::array::DictionaryArray;
 use arrow_array::types::Int32Type;
-use arrow_array::{Array, ArrayRef, Float64Array, StringArray, UInt32Array};
+use arrow_array::{
+    Array, ArrayRef, BooleanArray, Date32Array, Float64Array, Int64Array, StringArray,
+    TimestampMillisecondArray, UInt32Array,
+};
 
 use crate::turbo::error::{TurboError, TurboResult};
 use crate::turbo::write::{Cell, CellValue, Row, Sheet, Workbook, save_workbook};
@@ -258,6 +261,10 @@ const TWO_POW_53: f64 = 9_007_199_254_740_992.0;
 enum CellVal {
     Null,
     Num(f64),
+    Int(i64),
+    Bool(bool),
+    Date32(i32),
+    TimestampMs(i64),
     Str(String),
 }
 
@@ -359,6 +366,30 @@ fn cell_at(col: &ArrayRef, i: usize) -> CellVal {
         } else {
             CellVal::Num(f.value(i))
         }
+    } else if let Some(x) = col.as_any().downcast_ref::<Int64Array>() {
+        if x.is_null(i) {
+            CellVal::Null
+        } else {
+            CellVal::Int(x.value(i))
+        }
+    } else if let Some(x) = col.as_any().downcast_ref::<BooleanArray>() {
+        if x.is_null(i) {
+            CellVal::Null
+        } else {
+            CellVal::Bool(x.value(i))
+        }
+    } else if let Some(x) = col.as_any().downcast_ref::<Date32Array>() {
+        if x.is_null(i) {
+            CellVal::Null
+        } else {
+            CellVal::Date32(x.value(i))
+        }
+    } else if let Some(x) = col.as_any().downcast_ref::<TimestampMillisecondArray>() {
+        if x.is_null(i) {
+            CellVal::Null
+        } else {
+            CellVal::TimestampMs(x.value(i))
+        }
     } else if let Some(s) = col.as_any().downcast_ref::<StringArray>() {
         if s.is_null(i) {
             CellVal::Null
@@ -449,6 +480,21 @@ fn emit_value<W: Write>(
     match val {
         CellVal::Null => out.push(b"null"),
         CellVal::Str(s) => out.write_str(s),
+        CellVal::Bool(b) => out.push(if *b { b"true" } else { b"false" }),
+        CellVal::Int(i) => {
+            let mut ib = itoa::Buffer::new();
+            out.push(ib.format(*i).as_bytes())
+        }
+        CellVal::Date32(days) => {
+            let unix_epoch_excel_serial = 25569.0;
+            let serial = unix_epoch_excel_serial + (*days as f64);
+            out.write_str(&format_date_serial(serial, false, date_fmt))
+        }
+        CellVal::TimestampMs(ms) => {
+            let unix_epoch_excel_serial = 25569.0;
+            let serial = unix_epoch_excel_serial + (*ms as f64 / 86400000.0);
+            out.write_str(&format_date_serial(serial, false, date_fmt))
+        }
         CellVal::Num(v) => {
             // Formulas: the value column already holds the cached `<v>` result,
             // so this is exporting cached values — never formula text.

@@ -1021,11 +1021,12 @@ impl SheetStream {
             feat,
             self.data_rows_emitted,
             Some(&self.targets),
+            true,
         );
         let abs_start = partial.abs_start;
         let window_row_dims = std::mem::take(&mut partial.row_dims);
         let (header, columns, _style, _formulas, window_errors, nrows, _ncols) =
-            partial.into_arrow_columns()?;
+            partial.into_arrow_columns(None, false)?;
 
         // Align to the eager path's absolute row indexing: pad the leading gap
         // between the previous batch's end and this window's first data row.

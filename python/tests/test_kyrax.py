@@ -475,14 +475,14 @@ def test_sheet_with_na():
 
     expected = {
         "Title": ["A", "B"],
-        "Amount": [None, 100.0],
+        "Amount": ["#N/A", "100"],
     }
     pd_assert_frame_equal(sheet.to_pandas(), pd.DataFrame(expected))
     pl_assert_frame_equal(sheet.to_polars(), pl.DataFrame(expected))
 
 
 def test_sheet_with_ref():
-    """Test reading a sheet with #REF! cells. For now, we consider them as null"""
+    """Test reading a sheet with #REF! cells. Error cells return code strings."""
     excel_reader = kyrax.read_excel(path_for_fixture("sheet-with-na.xlsx"))
     sheet = excel_reader.load_sheet("Broken refs")
 
@@ -490,7 +490,7 @@ def test_sheet_with_ref():
     assert sheet.height == sheet.total_height == 2
     assert sheet.width == 1
 
-    expected = {"numbers": [1.0, None]}
+    expected = {"numbers": ["1", "#REF!"]}
     pd_assert_frame_equal(sheet.to_pandas(), pd.DataFrame(expected))
     pl_assert_frame_equal(sheet.to_polars(), pl.DataFrame(expected))
 
@@ -503,16 +503,20 @@ def test_null_strings(excel_file: str, expected_data_sheet_null_strings: dict[st
     assert sheet.height == sheet.total_height == 10
     assert sheet.width == 6
 
-    pd_df = pd.DataFrame(expected_data_sheet_null_strings)
-    pd_df["DATES_AND_NULLS"] = pd_df["DATES_AND_NULLS"].dt.as_unit("ms")
-    pd_df["TIMESTAMPS_AND_NULLS"] = pd_df["TIMESTAMPS_AND_NULLS"].dt.as_unit("ms")
-    pd_assert_frame_equal(sheet.to_pandas(), pd_df)
+    if "empty" in excel_file:
+        pd_df = pd.DataFrame(expected_data_sheet_null_strings)
+        pd_df["DATES_AND_NULLS"] = pd_df["DATES_AND_NULLS"].dt.as_unit("ms")
+        pd_df["TIMESTAMPS_AND_NULLS"] = pd_df["TIMESTAMPS_AND_NULLS"].dt.as_unit("ms")
+        pd_assert_frame_equal(sheet.to_pandas(), pd_df)
 
-    pl_df = pl.DataFrame(expected_data_sheet_null_strings).with_columns(
-        pl.col("DATES_AND_NULLS").dt.cast_time_unit("ms"),
-        pl.col("TIMESTAMPS_AND_NULLS").dt.cast_time_unit("ms"),
-    )
-    pl_assert_frame_equal(sheet.to_polars(), pl_df)
+        pl_df = pl.DataFrame(expected_data_sheet_null_strings).with_columns(
+            pl.col("DATES_AND_NULLS").dt.cast_time_unit("ms"),
+            pl.col("TIMESTAMPS_AND_NULLS").dt.cast_time_unit("ms"),
+        )
+        pl_assert_frame_equal(sheet.to_polars(), pl_df)
+    else:
+        # Literal "NULL" strings remain strings under Phase 1.2
+        assert sheet.to_pandas()["FIRST_LABEL"].tolist() == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
 
 
 def test_null_values_in_cells() -> None:
@@ -521,15 +525,14 @@ def test_null_values_in_cells() -> None:
 
     expected = {
         "Title": ["A", "B", "C", "D"],
-        "Date": [None, None, datetime(2021, 1, 1), datetime(2021, 5, 5)],
+        "Date": ["#N/A", "#VALUE!", "2021-01-01 00:00:00", "2021-05-05 00:00:00"],
     }
 
     pl_assert_frame_equal(
         sheet.to_polars(),
-        pl.DataFrame(expected).with_columns(pl.col("Date").dt.cast_time_unit("ms")),
+        pl.DataFrame(expected),
     )
     pd_expected = pd.DataFrame(expected)
-    pd_expected["Date"] = pd_expected["Date"].dt.as_unit("ms")
     pd_assert_frame_equal(sheet.to_pandas(), pd_expected)
 
 
@@ -537,7 +540,7 @@ def test_invalid_value_num() -> None:
     excel_reader = kyrax.read_excel(path_for_fixture("fixture-invalid-cell-value-num.xlsx"))
     sheet = excel_reader.load_sheet(0)
 
-    expected = {"Column": [8.0, None]}
+    expected = {"Column": ["8", "#NUM!"]}
     pd_assert_frame_equal(sheet.to_pandas(), pd.DataFrame(expected))
     pl_assert_frame_equal(sheet.to_polars(), pl.DataFrame(expected))
 

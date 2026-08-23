@@ -1,14 +1,17 @@
-//! Memchr single-pass sheet scanner with typed columnar output and rayon chunk-parallel parse.
+﻿//! Memchr single-pass sheet scanner with typed columnar output and rayon chunk-parallel parse.
 
 use super::decode::{atoi, decode};
 use super::error::{TurboError, TurboResult};
 use super::formula;
 use super::structural::CellRange;
+use super::styles::StyleTable;
+use arrow_array::Array;
 
 // ----------------------------------------------------------------------------
 // BitVec / Dict / StringArena / Column (from struct_proto)
 // ----------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub(crate) struct BitVec {
     pub bits: Vec<u64>,
     pub len: usize,
@@ -48,6 +51,7 @@ impl BitVec {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Dict {
     map: std::collections::HashMap<Box<[u8]>, u32>,
     offsets: Vec<usize>,
@@ -73,7 +77,7 @@ impl Dict {
         id
     }
     /// Resolve an interned id. Returns empty slice if `id` is out of range
-    /// (defensive — Dict ids are always produced by [`Dict::intern`]).
+    /// (defensive â€” Dict ids are always produced by [`Dict::intern`]).
     #[inline]
     pub fn resolve(&self, id: u32) -> &[u8] {
         self.try_resolve(id).unwrap_or(b"")
@@ -176,33 +180,116 @@ pub(crate) fn parse_shared_strings(xml: &[u8]) -> StringArena {
 #[derive(Debug, Clone)]
 pub enum MixedValue {
     Null,
-    Num(f64),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Date(i32),
+    DateTime(i64),
     Str(u32),
+}
+
+#[inline]
+fn atoi_i64(s: &[u8]) -> Result<i64, ()> {
+    if s.is_empty() {
+        return Err(());
+    }
+    let (neg, digits) = match s[0] {
+        b'-' => (true, &s[1..]),
+        b'+' => (false, &s[1..]),
+        _ => (false, s),
+    };
+    if digits.is_empty() || digits.len() > 19 {
+        return Err(());
+    }
+    let mut n: i64 = 0;
+    for &b in digits {
+        if !b.is_ascii_digit() {
+            return Err(());
+        }
+        n = n.checked_mul(10).ok_or(())?;
+        n = n.checked_add((b - b'0') as i64).ok_or(())?;
+    }
+    if neg {
+        Ok(-n)
+    } else {
+        Ok(n)
+    }
+}
+
+fn parse_iso_date_or_datetime(s: &[u8]) -> Option<(bool, i64)> {
+    let s_str = std::str::from_utf8(s).ok()?.trim();
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s_str, "%Y-%m-%dT%H:%M:%S") {
+        Some((true, dt.and_utc().timestamp_millis()))
+    } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s_str, "%Y-%m-%d %H:%M:%S") {
+        Some((true, dt.and_utc().timestamp_millis()))
+    } else if let Ok(d) = chrono::NaiveDate::parse_from_str(s_str, "%Y-%m-%d") {
+        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)?;
+        let days = d.signed_duration_since(epoch).num_days();
+        Some((false, days))
+    } else {
+        None
+    }
 }
 
 enum Column {
     Unset,
-    Num { v: Vec<f64>, valid: BitVec },
+    Int { v: Vec<i64>, valid: BitVec },
+    Float { v: Vec<f64>, valid: BitVec },
+    Bool { v: BitVec, valid: BitVec },
+    Date32 { v: Vec<i32>, valid: BitVec },
+    TimestampMs { v: Vec<i64>, valid: BitVec },
     Str(Vec<u32>),
     Mixed(Vec<MixedValue>),
 }
+
 impl Column {
     #[inline]
-    fn push_num(&mut self, dr: usize, x: f64) {
+    fn push_int(&mut self, dr: usize, x: i64) {
         if let Column::Unset = self {
-            *self = Column::Num {
+            *self = Column::Int {
                 v: Vec::new(),
                 valid: BitVec::new(),
             };
         }
         match self {
-            Column::Num { v, valid } => {
+            Column::Int { v, valid } => {
                 while v.len() < dr {
-                    v.push(f64::NAN);
+                    v.push(0);
                     valid.push(false);
                 }
                 v.push(x);
                 valid.push(true);
+            }
+            Column::Float { v, valid } => {
+                while v.len() < dr {
+                    v.push(f64::NAN);
+                    valid.push(false);
+                }
+                v.push(x as f64);
+                valid.push(true);
+            }
+            Column::Bool { v, valid } => {
+                let mut iv = Vec::with_capacity(v.len.max(dr) + 1);
+                let mut ivalid = BitVec::new();
+                for i in 0..v.len {
+                    if valid.get(i) {
+                        iv.push(if v.get(i) { 1 } else { 0 });
+                        ivalid.push(true);
+                    } else {
+                        iv.push(0);
+                        ivalid.push(false);
+                    }
+                }
+                while iv.len() < dr {
+                    iv.push(0);
+                    ivalid.push(false);
+                }
+                iv.push(x);
+                ivalid.push(true);
+                *self = Column::Int {
+                    v: iv,
+                    valid: ivalid,
+                };
             }
             Column::Str(s) => {
                 let mut m: Vec<MixedValue> = s
@@ -218,18 +305,366 @@ impl Column {
                 while m.len() < dr {
                     m.push(MixedValue::Null);
                 }
-                m.push(MixedValue::Num(x));
+                m.push(MixedValue::Int(x));
                 *self = Column::Mixed(m);
             }
             Column::Mixed(m) => {
                 while m.len() < dr {
                     m.push(MixedValue::Null);
                 }
-                m.push(MixedValue::Num(x));
+                m.push(MixedValue::Int(x));
+            }
+            Column::Date32 { v, valid } => {
+                let mut m: Vec<MixedValue> = (0..v.len())
+                    .map(|i| {
+                        if i < valid.len && valid.get(i) {
+                            MixedValue::Date(v[i])
+                        } else {
+                            MixedValue::Null
+                        }
+                    })
+                    .collect();
+                while m.len() < dr {
+                    m.push(MixedValue::Null);
+                }
+                m.push(MixedValue::Int(x));
+                *self = Column::Mixed(m);
+            }
+            Column::TimestampMs { v, valid } => {
+                let mut m: Vec<MixedValue> = (0..v.len())
+                    .map(|i| {
+                        if i < valid.len && valid.get(i) {
+                            MixedValue::DateTime(v[i])
+                        } else {
+                            MixedValue::Null
+                        }
+                    })
+                    .collect();
+                while m.len() < dr {
+                    m.push(MixedValue::Null);
+                }
+                m.push(MixedValue::Int(x));
+                *self = Column::Mixed(m);
             }
             Column::Unset => unreachable!(),
         }
     }
+
+    #[inline]
+    fn push_float(&mut self, dr: usize, x: f64) {
+        if let Column::Unset = self {
+            *self = Column::Float {
+                v: Vec::new(),
+                valid: BitVec::new(),
+            };
+        }
+        match self {
+            Column::Int { v, valid } => {
+                let mut fv: Vec<f64> = (0..v.len())
+                    .map(|i| {
+                        if i < valid.len && valid.get(i) {
+                            v[i] as f64
+                        } else {
+                            f64::NAN
+                        }
+                    })
+                    .collect();
+                let mut fvalid = valid.clone();
+                while fv.len() < dr {
+                    fv.push(f64::NAN);
+                    fvalid.push(false);
+                }
+                fv.push(x);
+                fvalid.push(true);
+                *self = Column::Float {
+                    v: fv,
+                    valid: fvalid,
+                };
+            }
+            Column::Float { v, valid } => {
+                while v.len() < dr {
+                    v.push(f64::NAN);
+                    valid.push(false);
+                }
+                v.push(x);
+                valid.push(true);
+            }
+            Column::Bool { v, valid } => {
+                let mut fv = Vec::with_capacity(v.len.max(dr) + 1);
+                let mut fvalid = BitVec::new();
+                for i in 0..v.len {
+                    if valid.get(i) {
+                        fv.push(if v.get(i) { 1.0 } else { 0.0 });
+                        fvalid.push(true);
+                    } else {
+                        fv.push(f64::NAN);
+                        fvalid.push(false);
+                    }
+                }
+                while fv.len() < dr {
+                    fv.push(f64::NAN);
+                    fvalid.push(false);
+                }
+                fv.push(x);
+                fvalid.push(true);
+                *self = Column::Float {
+                    v: fv,
+                    valid: fvalid,
+                };
+            }
+            Column::Str(s) => {
+                let mut m: Vec<MixedValue> = s
+                    .iter()
+                    .map(|&idx| {
+                        if idx == NULL_IDX {
+                            MixedValue::Null
+                        } else {
+                            MixedValue::Str(idx)
+                        }
+                    })
+                    .collect();
+                while m.len() < dr {
+                    m.push(MixedValue::Null);
+                }
+                m.push(MixedValue::Float(x));
+                *self = Column::Mixed(m);
+            }
+            Column::Mixed(m) => {
+                while m.len() < dr {
+                    m.push(MixedValue::Null);
+                }
+                m.push(MixedValue::Float(x));
+            }
+            Column::Date32 { v, valid } => {
+                let mut m: Vec<MixedValue> = (0..v.len())
+                    .map(|i| {
+                        if i < valid.len && valid.get(i) {
+                            MixedValue::Date(v[i])
+                        } else {
+                            MixedValue::Null
+                        }
+                    })
+                    .collect();
+                while m.len() < dr {
+                    m.push(MixedValue::Null);
+                }
+                m.push(MixedValue::Float(x));
+                *self = Column::Mixed(m);
+            }
+            Column::TimestampMs { v, valid } => {
+                let mut m: Vec<MixedValue> = (0..v.len())
+                    .map(|i| {
+                        if i < valid.len && valid.get(i) {
+                            MixedValue::DateTime(v[i])
+                        } else {
+                            MixedValue::Null
+                        }
+                    })
+                    .collect();
+                while m.len() < dr {
+                    m.push(MixedValue::Null);
+                }
+                m.push(MixedValue::Float(x));
+                *self = Column::Mixed(m);
+            }
+            Column::Unset => unreachable!(),
+        }
+    }
+
+    #[inline]
+    fn push_bool(&mut self, dr: usize, b: bool) {
+        if let Column::Unset = self {
+            *self = Column::Bool {
+                v: BitVec::new(),
+                valid: BitVec::new(),
+            };
+        }
+        match self {
+            Column::Bool { v, valid } => {
+                while v.len < dr {
+                    v.push(false);
+                    valid.push(false);
+                }
+                v.push(b);
+                valid.push(true);
+            }
+            Column::Int { v, valid } => {
+                let mut m: Vec<MixedValue> = (0..v.len())
+                    .map(|i| {
+                        if i < valid.len && valid.get(i) {
+                            MixedValue::Int(v[i])
+                        } else {
+                            MixedValue::Null
+                        }
+                    })
+                    .collect();
+                while m.len() < dr {
+                    m.push(MixedValue::Null);
+                }
+                m.push(MixedValue::Bool(b));
+                *self = Column::Mixed(m);
+            }
+            Column::Float { v, valid } => {
+                let mut m: Vec<MixedValue> = (0..v.len())
+                    .map(|i| {
+                        if i < valid.len && valid.get(i) {
+                            MixedValue::Float(v[i])
+                        } else {
+                            MixedValue::Null
+                        }
+                    })
+                    .collect();
+                while m.len() < dr {
+                    m.push(MixedValue::Null);
+                }
+                m.push(MixedValue::Bool(b));
+                *self = Column::Mixed(m);
+            }
+            Column::Str(s) => {
+                let mut m: Vec<MixedValue> = s
+                    .iter()
+                    .map(|&idx| {
+                        if idx == NULL_IDX {
+                            MixedValue::Null
+                        } else {
+                            MixedValue::Str(idx)
+                        }
+                    })
+                    .collect();
+                while m.len() < dr {
+                    m.push(MixedValue::Null);
+                }
+                m.push(MixedValue::Bool(b));
+                *self = Column::Mixed(m);
+            }
+            Column::Mixed(m) => {
+                while m.len() < dr {
+                    m.push(MixedValue::Null);
+                }
+                m.push(MixedValue::Bool(b));
+            }
+            Column::Date32 { v, valid } => {
+                let mut m: Vec<MixedValue> = (0..v.len())
+                    .map(|i| {
+                        if i < valid.len && valid.get(i) {
+                            MixedValue::Date(v[i])
+                        } else {
+                            MixedValue::Null
+                        }
+                    })
+                    .collect();
+                while m.len() < dr {
+                    m.push(MixedValue::Null);
+                }
+                m.push(MixedValue::Bool(b));
+                *self = Column::Mixed(m);
+            }
+            Column::TimestampMs { v, valid } => {
+                let mut m: Vec<MixedValue> = (0..v.len())
+                    .map(|i| {
+                        if i < valid.len && valid.get(i) {
+                            MixedValue::DateTime(v[i])
+                        } else {
+                            MixedValue::Null
+                        }
+                    })
+                    .collect();
+                while m.len() < dr {
+                    m.push(MixedValue::Null);
+                }
+                m.push(MixedValue::Bool(b));
+                *self = Column::Mixed(m);
+            }
+            Column::Unset => unreachable!(),
+        }
+    }
+
+    #[inline]
+    fn push_date32(&mut self, dr: usize, d: i32) {
+        if let Column::Unset = self {
+            *self = Column::Date32 {
+                v: Vec::new(),
+                valid: BitVec::new(),
+            };
+        }
+        match self {
+            Column::Date32 { v, valid } => {
+                while v.len() < dr {
+                    v.push(0);
+                    valid.push(false);
+                }
+                v.push(d);
+                valid.push(true);
+            }
+            Column::TimestampMs { v, valid } => {
+                while v.len() < dr {
+                    v.push(0);
+                    valid.push(false);
+                }
+                v.push((d as i64) * 86_400_000);
+                valid.push(true);
+            }
+            _ => {
+                let mut m = self.to_mixed();
+                while m.len() < dr {
+                    m.push(MixedValue::Null);
+                }
+                m.push(MixedValue::Date(d));
+                *self = Column::Mixed(m);
+            }
+        }
+    }
+
+    #[inline]
+    fn push_timestamp_ms(&mut self, dr: usize, ms: i64) {
+        if let Column::Unset = self {
+            *self = Column::TimestampMs {
+                v: Vec::new(),
+                valid: BitVec::new(),
+            };
+        }
+        match self {
+            Column::Date32 { v, valid } => {
+                let mut tsv: Vec<i64> = (0..v.len())
+                    .map(|i| {
+                        if i < valid.len && valid.get(i) {
+                            (v[i] as i64) * 86_400_000
+                        } else {
+                            0
+                        }
+                    })
+                    .collect();
+                let mut tsvalid = valid.clone();
+                while tsv.len() < dr {
+                    tsv.push(0);
+                    tsvalid.push(false);
+                }
+                tsv.push(ms);
+                tsvalid.push(true);
+                *self = Column::TimestampMs {
+                    v: tsv,
+                    valid: tsvalid,
+                };
+            }
+            Column::TimestampMs { v, valid } => {
+                while v.len() < dr {
+                    v.push(0);
+                    valid.push(false);
+                }
+                v.push(ms);
+                valid.push(true);
+            }
+            _ => {
+                let mut m = self.to_mixed();
+                while m.len() < dr {
+                    m.push(MixedValue::Null);
+                }
+                m.push(MixedValue::DateTime(ms));
+                *self = Column::Mixed(m);
+            }
+        }
+    }
+
     #[inline]
     fn push_str(&mut self, dr: usize, idx: u32) {
         if let Column::Unset = self {
@@ -242,41 +677,59 @@ impl Column {
                 }
                 s.push(idx);
             }
-            Column::Num { v, valid } => {
-                let mut m: Vec<MixedValue> = (0..v.len())
-                    .map(|i| {
-                        if i < valid.len && valid.get(i) {
-                            MixedValue::Num(v[i])
-                        } else {
-                            MixedValue::Null
-                        }
-                    })
-                    .collect();
+            _ => {
+                let mut m = self.to_mixed();
                 while m.len() < dr {
                     m.push(MixedValue::Null);
                 }
                 m.push(MixedValue::Str(idx));
                 *self = Column::Mixed(m);
             }
-            Column::Mixed(m) => {
-                while m.len() < dr {
-                    m.push(MixedValue::Null);
-                }
-                m.push(MixedValue::Str(idx));
-            }
-            Column::Unset => unreachable!(),
         }
     }
+
     #[inline]
     fn push_null(&mut self, dr: usize) {
         match self {
             Column::Unset => {}
-            Column::Num { v, valid } => {
+            Column::Int { v, valid } => {
+                while v.len() < dr {
+                    v.push(0);
+                    valid.push(false);
+                }
+                v.push(0);
+                valid.push(false);
+            }
+            Column::Float { v, valid } => {
                 while v.len() < dr {
                     v.push(f64::NAN);
                     valid.push(false);
                 }
                 v.push(f64::NAN);
+                valid.push(false);
+            }
+            Column::Bool { v, valid } => {
+                while v.len < dr {
+                    v.push(false);
+                    valid.push(false);
+                }
+                v.push(false);
+                valid.push(false);
+            }
+            Column::Date32 { v, valid } => {
+                while v.len() < dr {
+                    v.push(0);
+                    valid.push(false);
+                }
+                v.push(0);
+                valid.push(false);
+            }
+            Column::TimestampMs { v, valid } => {
+                while v.len() < dr {
+                    v.push(0);
+                    valid.push(false);
+                }
+                v.push(0);
                 valid.push(false);
             }
             Column::Str(s) => {
@@ -293,12 +746,37 @@ impl Column {
             }
         }
     }
+
     fn pad_to(&mut self, n: usize) {
         match self {
             Column::Unset => {}
-            Column::Num { v, valid } => {
+            Column::Int { v, valid } => {
+                while v.len() < n {
+                    v.push(0);
+                    valid.push(false);
+                }
+            }
+            Column::Float { v, valid } => {
                 while v.len() < n {
                     v.push(f64::NAN);
+                    valid.push(false);
+                }
+            }
+            Column::Bool { v, valid } => {
+                while v.len < n {
+                    v.push(false);
+                    valid.push(false);
+                }
+            }
+            Column::Date32 { v, valid } => {
+                while v.len() < n {
+                    v.push(0);
+                    valid.push(false);
+                }
+            }
+            Column::TimestampMs { v, valid } => {
+                while v.len() < n {
+                    v.push(0);
                     valid.push(false);
                 }
             }
@@ -312,6 +790,68 @@ impl Column {
                     m.push(MixedValue::Null);
                 }
             }
+        }
+    }
+
+    fn to_mixed(&self) -> Vec<MixedValue> {
+        match self {
+            Column::Unset => Vec::new(),
+            Column::Int { v, valid } => (0..v.len())
+                .map(|i| {
+                    if i < valid.len && valid.get(i) {
+                        MixedValue::Int(v[i])
+                    } else {
+                        MixedValue::Null
+                    }
+                })
+                .collect(),
+            Column::Float { v, valid } => (0..v.len())
+                .map(|i| {
+                    if i < valid.len && valid.get(i) {
+                        MixedValue::Float(v[i])
+                    } else {
+                        MixedValue::Null
+                    }
+                })
+                .collect(),
+            Column::Bool { v, valid } => (0..v.len)
+                .map(|i| {
+                    if valid.get(i) {
+                        MixedValue::Bool(v.get(i))
+                    } else {
+                        MixedValue::Null
+                    }
+                })
+                .collect(),
+            Column::Date32 { v, valid } => (0..v.len())
+                .map(|i| {
+                    if i < valid.len && valid.get(i) {
+                        MixedValue::Date(v[i])
+                    } else {
+                        MixedValue::Null
+                    }
+                })
+                .collect(),
+            Column::TimestampMs { v, valid } => (0..v.len())
+                .map(|i| {
+                    if i < valid.len && valid.get(i) {
+                        MixedValue::DateTime(v[i])
+                    } else {
+                        MixedValue::Null
+                    }
+                })
+                .collect(),
+            Column::Str(s) => s
+                .iter()
+                .map(|&idx| {
+                    if idx == NULL_IDX {
+                        MixedValue::Null
+                    } else {
+                        MixedValue::Str(idx)
+                    }
+                })
+                .collect(),
+            Column::Mixed(m) => m.clone(),
         }
     }
 }
@@ -382,6 +922,7 @@ pub struct CellError {
 }
 
 /// Sparse formula column with lazy shared-formula translation.
+#[derive(Clone)]
 pub struct FormulaColumn {
     entries: Vec<FEntry>,
     fdict: Dict,
@@ -538,7 +1079,7 @@ impl FormulaColumn {
     /// returning it alongside each entry's `(start, len)` span.
     ///
     /// Parallel over entry chunks, each with its own local arena, merged at
-    /// the end by re-basing spans — no mutex on the hot path, no per-formula
+    /// the end by re-basing spans â€” no mutex on the hot path, no per-formula
     /// allocation (E4 candidate C).
     fn build_arena_all(&self) -> (Vec<u8>, Vec<ArenaSpan>) {
         use rayon::prelude::*;
@@ -620,7 +1161,7 @@ impl FormulaColumn {
 /// again. A caller that reads everything pays candidate C's single-arena cost
 /// (no per-formula allocation) rather than candidate A's String per formula.
 ///
-/// Thread-safety: this handle is not `Sync` — a caller sharing it across
+/// Thread-safety: this handle is not `Sync` â€” a caller sharing it across
 /// threads should instead use [`FormulaColumn::materialize_all`] /
 /// [`FormulaColumn::materialize_export_rows`], which build per-chunk arenas in
 /// rayon and merge them at the end.
@@ -728,8 +1269,15 @@ impl Partial {
         col
     }
     /// Convert value columns to Arrow arrays; consumes column buffers.
-    pub fn into_arrow_columns(mut self) -> TurboResult<ArrowColumns> {
-        use arrow_array::builder::{Float64Builder, StringBuilder};
+    pub fn into_arrow_columns(
+        mut self,
+        style_table: Option<&StyleTable>,
+        date1904: bool,
+    ) -> TurboResult<ArrowColumns> {
+        use arrow_array::builder::{
+            BooleanBuilder, Date32Builder, Float64Builder, Int64Builder, StringBuilder,
+            TimestampMillisecondBuilder,
+        };
         use arrow_array::types::Int32Type;
         use arrow_array::{ArrayRef, Float64Array, UInt32Array};
         use std::sync::Arc;
@@ -740,8 +1288,9 @@ impl Partial {
             .map(|c| {
                 self.header
                     .get(c)
+                    .filter(|h| !h.is_empty())
                     .map(|h| String::from_utf8_lossy(h).into_owned())
-                    .unwrap_or_default()
+                    .unwrap_or_else(|| format!("c{c}"))
             })
             .collect();
 
@@ -770,10 +1319,6 @@ impl Partial {
         };
 
         let cell_errors = std::mem::take(&mut self.cell_errors);
-
-        // One shared dictionary values array for all Str columns on this sheet.
-        // Column keys index into Partial.dict (sheet-local intern pool); cloning
-        // the Arc is a refcount bump — not a full copy of the string pool.
         let dict_values: ArrayRef = Arc::new(arrow_array::StringArray::from(self.dict.strings()));
         let mut columns: Vec<ArrayRef> = Vec::with_capacity(ncols);
 
@@ -784,8 +1329,114 @@ impl Partial {
                 Column::Unset
             };
             match col {
-                Column::Num { v, valid } => {
-                    let mut b = Float64Builder::with_capacity(nrows);
+                Column::Int { v, valid } => {
+                    let is_date = is_col_date_styled(c, style_cols.as_ref(), style_table);
+                    if is_date {
+                        let offset = if date1904 { 24107 } else { 25569 };
+                        let mut b = Date32Builder::with_capacity(nrows);
+                        for (i, &val) in v.iter().take(nrows).enumerate() {
+                            if valid.get(i) {
+                                b.append_value((val - offset) as i32);
+                            } else {
+                                b.append_null();
+                            }
+                        }
+                        for _ in v.len().min(nrows)..nrows {
+                            b.append_null();
+                        }
+                        columns.push(Arc::new(b.finish()) as ArrayRef);
+                    } else {
+                        let mut b = Int64Builder::with_capacity(nrows);
+                        for (i, &val) in v.iter().take(nrows).enumerate() {
+                            if valid.get(i) {
+                                b.append_value(val);
+                            } else {
+                                b.append_null();
+                            }
+                        }
+                        for _ in v.len().min(nrows)..nrows {
+                            b.append_null();
+                        }
+                        columns.push(Arc::new(b.finish()) as ArrayRef);
+                    }
+                }
+                Column::Float { v, valid } => {
+                    let is_date = is_col_date_styled(c, style_cols.as_ref(), style_table);
+                    if is_date {
+                        let has_fraction = v
+                            .iter()
+                            .enumerate()
+                            .any(|(i, &val)| valid.get(i) && val.fract().abs() > 1e-6);
+                        let offset = if date1904 { 24107.0 } else { 25569.0 };
+                        if has_fraction {
+                            let mut b = TimestampMillisecondBuilder::with_capacity(nrows);
+                            for (i, &val) in v.iter().take(nrows).enumerate() {
+                                if valid.get(i) {
+                                    b.append_value(((val - offset) * 86_400_000.0).round() as i64);
+                                } else {
+                                    b.append_null();
+                                }
+                            }
+                            for _ in v.len().min(nrows)..nrows {
+                                b.append_null();
+                            }
+                            columns.push(Arc::new(b.finish()) as ArrayRef);
+                        } else {
+                            let mut b = Date32Builder::with_capacity(nrows);
+                            for (i, &val) in v.iter().take(nrows).enumerate() {
+                                if valid.get(i) {
+                                    b.append_value((val - offset).round() as i32);
+                                } else {
+                                    b.append_null();
+                                }
+                            }
+                            for _ in v.len().min(nrows)..nrows {
+                                b.append_null();
+                            }
+                            columns.push(Arc::new(b.finish()) as ArrayRef);
+                        }
+                    } else {
+                        let mut b = Float64Builder::with_capacity(nrows);
+                        for (i, &val) in v.iter().take(nrows).enumerate() {
+                            if valid.get(i) {
+                                b.append_value(val);
+                            } else {
+                                b.append_null();
+                            }
+                        }
+                        for _ in v.len().min(nrows)..nrows {
+                            b.append_null();
+                        }
+                        columns.push(Arc::new(b.finish()) as ArrayRef);
+                    }
+                }
+                Column::Bool { v, valid } => {
+                    let mut b = BooleanBuilder::with_capacity(nrows);
+                    for i in 0..nrows {
+                        if i < valid.len && valid.get(i) {
+                            b.append_value(v.get(i));
+                        } else {
+                            b.append_null();
+                        }
+                    }
+                    columns.push(Arc::new(b.finish()) as ArrayRef);
+                }
+                Column::Date32 { v, valid } => {
+                    let mut b = Date32Builder::with_capacity(nrows);
+                    for (i, &val) in v.iter().take(nrows).enumerate() {
+                        if valid.get(i) {
+                            b.append_value(val);
+                        } else {
+                            b.append_null();
+                        }
+                    }
+                    for _ in v.len().min(nrows)..nrows {
+                        b.append_null();
+                    }
+                    columns.push(Arc::new(b.finish()) as ArrayRef);
+                }
+                Column::TimestampMs { v, valid } => {
+                    let mut b = TimestampMillisecondBuilder::with_capacity(nrows);
                     for (i, &val) in v.iter().take(nrows).enumerate() {
                         if valid.get(i) {
                             b.append_value(val);
@@ -822,36 +1473,34 @@ impl Partial {
                     for i in 0..nrows {
                         match m.get(i) {
                             Some(MixedValue::Null) | None => sb.append_null(),
-                            Some(MixedValue::Num(x)) => {
+                            Some(MixedValue::Int(x)) => sb.append_value(x.to_string()),
+                            Some(MixedValue::Float(x)) => {
                                 let mut ryu_buf = ryu::Buffer::new();
                                 sb.append_value(ryu_buf.format(*x));
+                            }
+                            Some(MixedValue::Bool(b)) => {
+                                sb.append_value(if *b { "TRUE" } else { "FALSE" })
+                            }
+                            Some(MixedValue::Date(d)) => {
+                                let dt = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()
+                                    + chrono::Duration::days(*d as i64);
+                                sb.append_value(dt.format("%Y-%m-%d").to_string());
+                            }
+                            Some(MixedValue::DateTime(ms)) => {
+                                let dt = chrono::DateTime::from_timestamp_millis(*ms);
+                                match dt {
+                                    Some(d) => {
+                                        sb.append_value(d.format("%Y-%m-%dT%H:%M:%S").to_string())
+                                    }
+                                    None => sb.append_null(),
+                                }
                             }
                             Some(MixedValue::Str(id)) => {
                                 if *id == NULL_IDX {
                                     sb.append_null();
                                 } else {
-                                    // Resolve straight out of the intern pool.
-                                    //
-                                    // This used to call `self.dict.strings()`, which
-                                    // rebuilds the ENTIRE pool into a fresh
-                                    // `Vec<String>` — allocating every distinct string
-                                    // — just to index one element and drop it. Inside
-                                    // this per-cell loop that is O(cells x distinct)
-                                    // with an allocation per string per cell, and it
-                                    // made mixed-type columns quadratic: a 50k-row
-                                    // sheet took 118 s against 0.065 s for the same
-                                    // sheet with homogeneous columns.
-                                    //
-                                    // `try_resolve` is an offset lookup, and
-                                    // `from_utf8_lossy` borrows when the bytes are
-                                    // valid UTF-8, which interned XML text always is.
                                     match self.dict.try_resolve(*id) {
                                         Some(b) => sb.append_value(String::from_utf8_lossy(b)),
-                                        // Out of range cannot happen for ids produced
-                                        // by `intern`, but append SOMETHING regardless:
-                                        // the old code appended neither value nor null
-                                        // here, which would silently leave this column
-                                        // shorter than `nrows` and misalign the batch.
                                         None => sb.append_null(),
                                     }
                                 }
@@ -879,7 +1528,34 @@ impl Partial {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+fn is_col_date_styled(
+    c: usize,
+    style_cols: Option<&Vec<arrow_array::UInt32Array>>,
+    style_table: Option<&StyleTable>,
+) -> bool {
+    let (Some(sc_list), Some(st)) = (style_cols, style_table) else {
+        return false;
+    };
+    let Some(sc) = sc_list.get(c) else {
+        return false;
+    };
+    let mut has_styled = false;
+    for i in 0..sc.len() {
+        if sc.is_valid(i) {
+            let sidx = sc.value(i);
+            if sidx > 0 {
+                if st.is_date(sidx) {
+                    has_styled = true;
+                } else {
+                    return false;
+                }
+            }
+        }
+    }
+    has_styled
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum CellType {
     Num,
     Inline,
@@ -887,6 +1563,7 @@ enum CellType {
     StrVal,
     Bool,
     Err,
+    IsoDate,
 }
 
 // ----------------------------------------------------------------------------
@@ -894,7 +1571,7 @@ enum CellType {
 // ----------------------------------------------------------------------------
 
 /// Parse column letters from a cell ref payload starting at the first letter
-/// (e.g. `A1...` or `BC12...`) → 0-based column index.
+/// (e.g. `A1...` or `BC12...`) â†’ 0-based column index.
 #[inline]
 fn col_from_ref_bytes(bytes: &[u8]) -> Option<usize> {
     let mut i = 0usize;
@@ -908,9 +1585,9 @@ fn col_from_ref_bytes(bytes: &[u8]) -> Option<usize> {
     Some((col1 - 1) as usize)
 }
 
-/// Parse `r="A1"` (or ` r="A1"`) from a `<c ...>` attribute blob → 0-based col.
+/// Parse `r="A1"` (or ` r="A1"`) from a `<c ...>` attribute blob â†’ 0-based col.
 /// Fast path: when refs are contiguous the caller still just uses this col, which
-/// equals the sequential counter — no extra gap logic.
+/// equals the sequential counter â€” no extra gap logic.
 #[inline]
 fn parse_cell_col_from_r(tag: &[u8]) -> Option<usize> {
     // Prefer ` r="` (normal OOXML); also accept leading `r="` at start of tag.
@@ -932,7 +1609,7 @@ fn parse_cell_col_from_r(tag: &[u8]) -> Option<usize> {
     col_from_ref_bytes(&tag[vs..])
 }
 
-/// Parse `r="12"` from a `<row ...>` open tag → 1-based sheet row number.
+/// Parse `r="12"` from a `<row ...>` open tag â†’ 1-based sheet row number.
 #[inline]
 fn parse_row_r_attr(row_tag: &[u8]) -> Option<u32> {
     let vs = if let Some(o) = memchr::memmem::find(row_tag, b" r=\"") {
@@ -953,11 +1630,13 @@ fn parse_row_r_attr(row_tag: &[u8]) -> Option<u32> {
     atoi(&row_tag[vs..ve])
 }
 
-/// Sheet row (1-based) → 0-based data-row index under the turbo convention that
-/// spreadsheet row 1 is the header (when the first chunk consumes a header).
+/// Sheet row (1-based) â†’ 0-based data-row index under the turbo convention:
+/// with a header, spreadsheet row 1 is the header and row 2 is data row 0;
+/// headerless, row 1 is data row 0.
 #[inline]
-fn sheet_row_to_data_row(sheet_row: u32) -> usize {
-    (sheet_row as usize).saturating_sub(2)
+fn sheet_row_to_data_row(sheet_row: u32, sheet_has_header: bool) -> usize {
+    let off = if sheet_has_header { 2 } else { 1 };
+    (sheet_row as usize).saturating_sub(off)
 }
 
 // ----------------------------------------------------------------------------
@@ -968,22 +1647,41 @@ fn sheet_row_to_data_row(sheet_row: u32) -> usize {
 /// The eager path infers a column's type from every row before building any
 /// Arrow array. A streaming reader cannot see the whole sheet before emitting
 /// the first batch, so it runs a type-only pre-pass over the sheet and then
-/// seeds every window's columns with these targets — making every batch's
+/// seeds every window's columns with these targets â€” making every batch's
 /// schema identical AND equal to what the eager path produces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum ColTarget {
-    /// All-null or numeric-only column → Float64 with nulls (eager `Column::Unset`/`Num`).
     Num,
-    /// String-only column → Dictionary<Int32, Utf8> (eager `Column::Str`).
+    Int,
+    Float,
+    Bool,
+    Date,
+    DateTime,
     Str,
-    /// Mixed numeric + string column → Utf8 via ryu + pool resolution (eager `Column::Mixed`).
     Mixed,
 }
 
 impl ColTarget {
     fn seed(self) -> Column {
         match self {
-            ColTarget::Num => Column::Num {
+            ColTarget::Num | ColTarget::Float => Column::Float {
+                v: Vec::new(),
+                valid: BitVec::new(),
+            },
+            ColTarget::Int => Column::Int {
+                v: Vec::new(),
+                valid: BitVec::new(),
+            },
+            ColTarget::Bool => Column::Bool {
+                v: BitVec::new(),
+                valid: BitVec::new(),
+            },
+            ColTarget::Date => Column::Date32 {
+                v: Vec::new(),
+                valid: BitVec::new(),
+            },
+            ColTarget::DateTime => Column::TimestampMs {
                 v: Vec::new(),
                 valid: BitVec::new(),
             },
@@ -1012,6 +1710,11 @@ pub(crate) fn parse_region(
     // eager inferred behavior; `Some` seeds every column (and pre-sizes the
     // column set to the target count) so a window emits the pre-pass schema.
     targets: Option<&[ColTarget]>,
+    // SHEET-level header convention (row 1 is the sheet's header). Controls
+    // the absolute data-row mapping (`@r` minus 2 vs minus 1). Distinct from
+    // window-level `has_header`, which only marks whether THIS region's first
+    // row is the consumed header.
+    sheet_has_header: bool,
 ) -> Partial {
     let mut cols: Vec<Column> = if let Some(t) = targets {
         t.iter().map(|&t| t.seed()).collect()
@@ -1036,7 +1739,7 @@ pub(crate) fn parse_region(
 
     // Local data-row cursor (0-based within this partial). Absolute data-row =
     // abs_start + dr. abs_start is fixed from the first data row's sheet `@r`
-    // (or 0 when `@r` is absent — sequential fallback).
+    // (or 0 when `@r` is absent â€” sequential fallback).
     let mut dr = 0usize;
     let mut abs_start = 0usize;
     let mut abs_start_set = false;
@@ -1056,9 +1759,10 @@ pub(crate) fn parse_region(
         style_cols: &mut [Vec<u32>],
         feat: ScanFeat,
         row_offset: usize,
+        sheet_has_header: bool,
     ) -> u32 {
         let abs = if let Some(sr) = sheet_row {
-            let a = sheet_row_to_data_row(sr);
+            let a = sheet_row_to_data_row(sr, sheet_has_header);
             if !*abs_start_set {
                 *abs_start = a;
                 *abs_start_set = true;
@@ -1133,6 +1837,7 @@ pub(crate) fn parse_region(
                     &mut style_cols,
                     feat,
                     row_offset,
+                    sheet_has_header,
                 );
                 for c in cols.iter_mut() {
                     c.pad_to(dr + 1);
@@ -1165,6 +1870,7 @@ pub(crate) fn parse_region(
                 &mut style_cols,
                 feat,
                 row_offset,
+                sheet_has_header,
             )
         } else {
             0
@@ -1208,6 +1914,7 @@ pub(crate) fn parse_region(
                         b"str" => CellType::StrVal,
                         b"b" => CellType::Bool,
                         b"e" => CellType::Err,
+                        b"d" => CellType::IsoDate,
                         _ => CellType::Num,
                     }
                 }
@@ -1386,7 +2093,7 @@ pub(crate) fn parse_region(
                     } else {
                         None
                     };
-                    // OOB shared-string index → null cell (never panic).
+                    // OOB shared-string index â†’ null cell (never panic).
                     let resolved: Option<&[u8]> = match (idx, shared) {
                         (Some(i), Some(a)) => a.try_resolve(i),
                         _ => None,
@@ -1406,31 +2113,50 @@ pub(crate) fn parse_region(
                         }
                     }
                 }
-                CellType::Inline | CellType::StrVal | CellType::Err => {
-                    let text: &[u8] = if ctype == CellType::Inline {
-                        if let Some(to) = memchr::memmem::find(content, b"<t") {
-                            let topen_end = to
-                                + memchr::memchr(b'>', &content[to..])
-                                    .unwrap_or(content.len() - to);
-                            if topen_end == 0
-                                || content.get(topen_end.saturating_sub(1)) == Some(&b'/')
-                                || topen_end >= content.len()
-                            {
-                                b""
-                            } else {
-                                let te = memchr::memmem::find(&content[topen_end..], b"</t>")
-                                    .map(|o| topen_end + o)
-                                    .unwrap_or(content.len());
-                                if topen_end < te {
-                                    &content[topen_end + 1..te]
-                                } else {
-                                    b""
-                                }
-                            }
-                        } else {
-                            b""
+                CellType::Inline => {
+                    let mut decoded_buf = Vec::new();
+                    let mut p = 0;
+                    while let Some(to) = memchr::memmem::find(&content[p..], b"<t") {
+                        let topen = p + to;
+                        let after = content.get(topen + 2).copied().unwrap_or(b'>');
+                        if !(after == b' ' || after == b'>' || after == b'/') {
+                            p = topen + 2;
+                            continue;
                         }
-                    } else if let Some(vo) = memchr::memmem::find(content, b"<v>") {
+                        let topen_end = topen
+                            + memchr::memchr(b'>', &content[topen..])
+                                .unwrap_or(content.len() - topen);
+                        if topen_end == 0
+                            || content.get(topen_end.saturating_sub(1)) == Some(&b'/')
+                            || topen_end >= content.len()
+                        {
+                            p = topen_end + 1;
+                            continue;
+                        }
+                        let tclose = topen_end
+                            + memchr::memmem::find(&content[topen_end..], b"</t>")
+                                .unwrap_or(content.len() - topen_end);
+                        if topen_end + 1 <= tclose && tclose <= content.len() {
+                            let raw = &content[topen_end + 1..tclose];
+                            let dec = decode(raw, &mut scratch);
+                            decoded_buf.extend_from_slice(dec);
+                            p = tclose + 4;
+                        } else {
+                            break;
+                        }
+                    }
+                    if is_header {
+                        if col >= header.len() {
+                            header.resize_with(col + 1, Vec::new);
+                        }
+                        header[col] = decoded_buf;
+                    } else {
+                        let id = dict.intern(&decoded_buf);
+                        cols[col].push_str(dr, id);
+                    }
+                }
+                CellType::StrVal | CellType::Err => {
+                    let text: &[u8] = if let Some(vo) = memchr::memmem::find(content, b"<v>") {
                         let vs = vo + 3;
                         let ve = memchr::memmem::find(&content[vs..], b"</v>")
                             .map(|o| vs + o)
@@ -1448,7 +2174,7 @@ pub(crate) fn parse_region(
                     } else {
                         // Typed error caches: always record sparsely. Value columns may
                         // still show the code when the column is string-typed, or null
-                        // when mixed into a numeric column (push_str → null on Num).
+                        // when mixed into a numeric column (push_str â†’ null on Num).
                         if ctype == CellType::Err {
                             cell_errors.push(CellError {
                                 row: abs_row,
@@ -1460,31 +2186,78 @@ pub(crate) fn parse_region(
                         cols[col].push_str(dr, id);
                     }
                 }
-                CellType::Num | CellType::Bool => {
-                    let val = if let Some(vo) = memchr::memmem::find(content, b"<v>") {
+                CellType::IsoDate => {
+                    let text: &[u8] = if let Some(vo) = memchr::memmem::find(content, b"<v>") {
                         let vs = vo + 3;
                         let ve = memchr::memmem::find(&content[vs..], b"</v>")
                             .map(|o| vs + o)
                             .unwrap_or(content.len());
-                        let raw = &content[vs..ve];
-                        if raw.is_empty() {
-                            None
+                        &content[vs..ve]
+                    } else {
+                        b""
+                    };
+                    let decoded = decode(text, &mut scratch);
+                    if is_header {
+                        if col >= header.len() {
+                            header.resize_with(col + 1, Vec::new);
+                        }
+                        header[col] = decoded.to_vec();
+                    } else if let Some((is_dt, val)) = parse_iso_date_or_datetime(decoded) {
+                        if is_dt {
+                            cols[col].push_timestamp_ms(dr, val);
                         } else {
-                            fast_float2::parse::<f64, _>(raw).ok()
+                            cols[col].push_date32(dr, val as i32);
                         }
                     } else {
-                        None
+                        let id = dict.intern(decoded);
+                        cols[col].push_str(dr, id);
+                    }
+                }
+                CellType::Bool => {
+                    let raw = if let Some(vo) = memchr::memmem::find(content, b"<v>") {
+                        let vs = vo + 3;
+                        let ve = memchr::memmem::find(&content[vs..], b"</v>")
+                            .map(|o| vs + o)
+                            .unwrap_or(content.len());
+                        &content[vs..ve]
+                    } else {
+                        b""
+                    };
+                    let b = raw == b"1" || raw == b"true" || raw == b"TRUE";
+                    if is_header {
+                        if col >= header.len() {
+                            header.resize_with(col + 1, Vec::new);
+                        }
+                        header[col] = if b { b"TRUE".to_vec() } else { b"FALSE".to_vec() };
+                    } else if raw.is_empty() {
+                        cols[col].push_null(dr);
+                    } else {
+                        cols[col].push_bool(dr, b);
+                    }
+                }
+                CellType::Num => {
+                    let raw = if let Some(vo) = memchr::memmem::find(content, b"<v>") {
+                        let vs = vo + 3;
+                        let ve = memchr::memmem::find(&content[vs..], b"</v>")
+                            .map(|o| vs + o)
+                            .unwrap_or(content.len());
+                        &content[vs..ve]
+                    } else {
+                        b""
                     };
                     if is_header {
                         if col >= header.len() {
                             header.resize_with(col + 1, Vec::new);
                         }
-                        header[col] = val.map(|v| v.to_string().into_bytes()).unwrap_or_default();
+                        header[col] = raw.to_vec();
+                    } else if raw.is_empty() {
+                        cols[col].push_null(dr);
+                    } else if let Ok(i) = atoi_i64(raw) {
+                        cols[col].push_int(dr, i);
+                    } else if let Ok(f) = fast_float2::parse::<f64, _>(raw) {
+                        cols[col].push_float(dr, f);
                     } else {
-                        match val {
-                            Some(v) => cols[col].push_num(dr, v),
-                            None => cols[col].push_null(dr),
-                        }
+                        cols[col].push_null(dr);
                     }
                 }
             }
@@ -1604,7 +2377,7 @@ pub(crate) fn parse_ref_range_strict(refr: &[u8]) -> Option<(u32, u32, u32, u32)
     Some((r1.min(r2), c1.min(c2), r1.max(r2), c1.max(c2)))
 }
 
-/// Parse one `[$]?COL[$]?ROW` endpoint → 1-based `(row, col)`; `None` on any
+/// Parse one `[$]?COL[$]?ROW` endpoint â†’ 1-based `(row, col)`; `None` on any
 /// syntax or bounds violation.
 #[allow(dead_code)] // used by `parse_ref_range_strict` (python feature bindings)
 fn parse_ref_component(s: &[u8]) -> Option<(u32, u32)> {
@@ -1672,6 +2445,7 @@ pub(crate) fn parse_parallel(
     nchunks: usize,
     shared: Option<&StringArena>,
     feat: ScanFeat,
+    has_header: bool,
 ) -> TurboResult<Partial> {
     use rayon::prelude::*;
     let (s, e) = sheet_data_region(xml)?;
@@ -1689,11 +2463,13 @@ pub(crate) fn parse_parallel(
     }
     bounds.push(e);
     let ranges: Vec<(usize, usize, bool)> = (0..bounds.len() - 1)
-        .map(|k| (bounds[k], bounds[k + 1], k == 0))
+        .map(|k| (bounds[k], bounds[k + 1], k == 0 && has_header))
         .collect();
     let partials: Vec<Partial> = ranges
         .par_iter()
-        .map(|&(lo, hi, has_header)| parse_region(xml, lo, hi, has_header, shared, feat, 0, None))
+        .map(|&(lo, hi, is_hdr)| {
+            parse_region(xml, lo, hi, is_hdr, shared, feat, 0, None, has_header)
+        })
         .collect();
     Ok(merge_partials(partials, feat))
 }
@@ -1774,8 +2550,32 @@ fn merge_partials(mut partials: Vec<Partial>, feat: ScanFeat) -> Partial {
 
             if let Column::Unset = gcols[c] {
                 match pcol {
-                    Column::Num { .. } => {
-                        gcols[c] = Column::Num {
+                    Column::Int { .. } => {
+                        gcols[c] = Column::Int {
+                            v: Vec::new(),
+                            valid: BitVec::new(),
+                        }
+                    }
+                    Column::Float { .. } => {
+                        gcols[c] = Column::Float {
+                            v: Vec::new(),
+                            valid: BitVec::new(),
+                        }
+                    }
+                    Column::Bool { .. } => {
+                        gcols[c] = Column::Bool {
+                            v: BitVec::new(),
+                            valid: BitVec::new(),
+                        }
+                    }
+                    Column::Date32 { .. } => {
+                        gcols[c] = Column::Date32 {
+                            v: Vec::new(),
+                            valid: BitVec::new(),
+                        }
+                    }
+                    Column::TimestampMs { .. } => {
+                        gcols[c] = Column::TimestampMs {
                             v: Vec::new(),
                             valid: BitVec::new(),
                         }
@@ -1788,8 +2588,29 @@ fn merge_partials(mut partials: Vec<Partial>, feat: ScanFeat) -> Partial {
 
             match (pcol, &mut gcols[c]) {
                 (
-                    Column::Num { v, valid },
-                    Column::Num {
+                    Column::Int { v, valid },
+                    Column::Int {
+                        v: gv,
+                        valid: gvalid,
+                    },
+                ) => {
+                    while gv.len() < base {
+                        gv.push(0);
+                        gvalid.push(false);
+                    }
+                    for irow in 0..p.nrows {
+                        if irow < valid.len && valid.get(irow) {
+                            gv.push(v[irow]);
+                            gvalid.push(true);
+                        } else {
+                            gv.push(0);
+                            gvalid.push(false);
+                        }
+                    }
+                }
+                (
+                    Column::Float { v, valid },
+                    Column::Float {
                         v: gv,
                         valid: gvalid,
                     },
@@ -1804,6 +2625,69 @@ fn merge_partials(mut partials: Vec<Partial>, feat: ScanFeat) -> Partial {
                             gvalid.push(true);
                         } else {
                             gv.push(f64::NAN);
+                            gvalid.push(false);
+                        }
+                    }
+                }
+                (
+                    Column::Bool { v, valid },
+                    Column::Bool {
+                        v: gv,
+                        valid: gvalid,
+                    },
+                ) => {
+                    while gv.len < base {
+                        gv.push(false);
+                        gvalid.push(false);
+                    }
+                    for irow in 0..p.nrows {
+                        if irow < valid.len && valid.get(irow) {
+                            gv.push(v.get(irow));
+                            gvalid.push(true);
+                        } else {
+                            gv.push(false);
+                            gvalid.push(false);
+                        }
+                    }
+                }
+                (
+                    Column::Date32 { v, valid },
+                    Column::Date32 {
+                        v: gv,
+                        valid: gvalid,
+                    },
+                ) => {
+                    while gv.len() < base {
+                        gv.push(0);
+                        gvalid.push(false);
+                    }
+                    for irow in 0..p.nrows {
+                        if irow < valid.len && valid.get(irow) {
+                            gv.push(v[irow]);
+                            gvalid.push(true);
+                        } else {
+                            gv.push(0);
+                            gvalid.push(false);
+                        }
+                    }
+                }
+                (
+                    Column::TimestampMs { v, valid },
+                    Column::TimestampMs {
+                        v: gv,
+                        valid: gvalid,
+                    },
+                ) => {
+                    while gv.len() < base {
+                        gv.push(0);
+                        gvalid.push(false);
+                    }
+                    for irow in 0..p.nrows {
+                        if irow < valid.len && valid.get(irow) {
+                            gv.push(v[irow]);
+                            gvalid.push(true);
+                        } else {
+                            gv.push(0);
                             gvalid.push(false);
                         }
                     }
@@ -1840,110 +2724,29 @@ fn merge_partials(mut partials: Vec<Partial>, feat: ScanFeat) -> Partial {
                         gm.push(mapped_val);
                     }
                 }
-                (Column::Unset, gcol) => match gcol {
-                    Column::Num { v, valid } => {
-                        while v.len() < base {
-                            v.push(f64::NAN);
-                            valid.push(false);
-                        }
-                        for _ in 0..p.nrows {
-                            v.push(f64::NAN);
-                            valid.push(false);
-                        }
-                    }
-                    Column::Str(s) => {
-                        while s.len() < base {
-                            s.push(NULL_IDX);
-                        }
-                        for _ in 0..p.nrows {
-                            s.push(NULL_IDX);
-                        }
-                    }
-                    Column::Mixed(m) => {
-                        while m.len() < base {
-                            m.push(MixedValue::Null);
-                        }
-                        for _ in 0..p.nrows {
-                            m.push(MixedValue::Null);
-                        }
-                    }
-                    Column::Unset => {}
-                },
+                (Column::Unset, gcol) => {
+                    gcol.pad_to(base + p.nrows);
+                }
                 (p_other, gcol) => {
-                    let mut mixed: Vec<MixedValue> = match gcol {
-                        Column::Num {
-                            v: gv,
-                            valid: gvalid,
-                        } => (0..gv.len())
-                            .map(|i| {
-                                if i < gvalid.len && gvalid.get(i) {
-                                    MixedValue::Num(gv[i])
-                                } else {
-                                    MixedValue::Null
-                                }
-                            })
-                            .collect(),
-                        Column::Str(gs) => gs
-                            .iter()
-                            .map(|&idx| {
-                                if idx == NULL_IDX {
-                                    MixedValue::Null
-                                } else {
-                                    MixedValue::Str(idx)
-                                }
-                            })
-                            .collect(),
-                        Column::Mixed(m) => std::mem::take(m),
-                        Column::Unset => Vec::new(),
-                    };
-
+                    let mut mixed = gcol.to_mixed();
                     while mixed.len() < base {
                         mixed.push(MixedValue::Null);
                     }
-
-                    match p_other {
-                        Column::Num { v, valid } => {
-                            for irow in 0..p.nrows {
-                                if irow < valid.len && valid.get(irow) {
-                                    mixed.push(MixedValue::Num(v[irow]));
-                                } else {
-                                    mixed.push(MixedValue::Null);
-                                }
-                            }
-                        }
-                        Column::Str(sidx) => {
-                            for irow in 0..p.nrows {
-                                let id = sidx.get(irow).copied().unwrap_or(NULL_IDX);
+                    let p_mixed = p_other.to_mixed();
+                    for irow in 0..p.nrows {
+                        let val = p_mixed.get(irow).cloned().unwrap_or(MixedValue::Null);
+                        let mapped_val = match val {
+                            MixedValue::Str(id) => {
                                 if id == NULL_IDX {
-                                    mixed.push(MixedValue::Null);
+                                    MixedValue::Null
                                 } else {
-                                    mixed.push(MixedValue::Str(remap[id as usize]));
+                                    MixedValue::Str(remap[id as usize])
                                 }
                             }
-                        }
-                        Column::Mixed(pm) => {
-                            for irow in 0..p.nrows {
-                                let val = pm.get(irow).cloned().unwrap_or(MixedValue::Null);
-                                let mapped_val = match val {
-                                    MixedValue::Str(id) => {
-                                        if id == NULL_IDX {
-                                            MixedValue::Null
-                                        } else {
-                                            MixedValue::Str(remap[id as usize])
-                                        }
-                                    }
-                                    other => other,
-                                };
-                                mixed.push(mapped_val);
-                            }
-                        }
-                        Column::Unset => {
-                            for _ in 0..p.nrows {
-                                mixed.push(MixedValue::Null);
-                            }
-                        }
+                            other => other,
+                        };
+                        mixed.push(mapped_val);
                     }
-
                     *gcol = Column::Mixed(mixed);
                 }
             }
@@ -2210,7 +3013,7 @@ mod tests {
 
     #[test]
     fn dependent_translation_out_of_grid_is_ref() {
-        // Anchor "A1" one row below the dependent: rd = -1 pushes row 1 → 0,
+        // Anchor "A1" one row below the dependent: rd = -1 pushes row 1 â†’ 0,
         // which is out of grid, so the operand degrades to #REF!.
         let c = col(&["A1"], &[(0, 1, 0, -1, 0)]);
         assert_eq!(c.translate(0, 1).as_deref(), Some("#REF!"));
@@ -2227,7 +3030,7 @@ mod tests {
     #[test]
     fn orphan_shared_si_still_degrades_to_empty() {
         // A dependent whose si has no anchor must stay an empty string, never
-        // panic — the historical degradation (turbo_malformed pins it too).
+        // panic â€” the historical degradation (turbo_malformed pins it too).
         let c = FormulaColumn {
             entries: vec![FEntry {
                 row: 5,
@@ -2292,9 +3095,9 @@ mod tests {
             row_dims: Vec::new(),
         };
         let col = p.take_formula_column();
-        // Anchor cell (row 2, col 0) → delta 0 → reads its own text.
+        // Anchor cell (row 2, col 0) â†’ delta 0 â†’ reads its own text.
         assert_eq!(col.translate(2, 0).as_deref(), Some("A2*2"));
-        // Dependent (row 7, col 2) → delta (5, 2) → A2*2 becomes C7*2.
+        // Dependent (row 7, col 2) â†’ delta (5, 2) â†’ A2*2 becomes C7*2.
         assert_eq!(col.translate(7, 2).as_deref(), Some("C7*2"));
     }
 }

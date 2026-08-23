@@ -8,7 +8,7 @@ use std::{
     sync::OnceLock,
 };
 
-use calamine::{CellErrorType, CellType, DataType, Range};
+use calamine::{CellType, DataType, Range};
 use log::warn;
 #[cfg(feature = "python")]
 use pyo3::{IntoPyObject, IntoPyObjectRef};
@@ -111,11 +111,7 @@ impl FromStr for DTypeCoercion {
     }
 }
 
-/// All the possible string values that should be considered as NULL
-const NULL_STRING_VALUES: [&str; 19] = [
-    "", "#N/A", "#N/A N/A", "#NA", "-1.#IND", "-1.#QNAN", "-NaN", "-nan", "1.#IND", "1.#QNAN",
-    "<NA>", "N/A", "NA", "NULL", "NaN", "None", "n/a", "nan", "null",
-];
+
 
 fn get_cell_dtype<DT: CellType + Debug + DataType>(
     data: &Range<DT>,
@@ -145,14 +141,8 @@ pub(crate) fn cell_dtype<DT: CellType + Debug + DataType>(
     } else if cell.is_float() {
         Ok(DType::Float)
     } else if cell.is_string() {
-        if NULL_STRING_VALUES.contains(&cell.get_string().unwrap())
-        // If we want to consider whitespace as null and either the cell is empty or contains only
-        // whitespace, we return null
-            || (whitespace_as_null
-            && cell
-                .get_string()
-                .is_none_or(|s| s.trim().is_empty()))
-        {
+        let s = cell.get_string().unwrap();
+        if s.is_empty() || (whitespace_as_null && s.trim().is_empty()) {
             Ok(DType::Null)
         } else {
             Ok(DType::String)
@@ -171,7 +161,7 @@ pub(crate) fn cell_dtype<DT: CellType + Debug + DataType>(
             DType::Duration
         })
     }
-    // These types contain an ISO8601 representation of a date/datetime or a durat
+    // These types contain an ISO8601 representation of a date/datetime or a duration
     else if cell.is_datetime_iso() {
         match cell.as_datetime() {
             // If we cannot convert the cell to a datetime, we're working on a date
@@ -189,22 +179,7 @@ pub(crate) fn cell_dtype<DT: CellType + Debug + DataType>(
     else if cell.is_empty() {
         Ok(DType::Null)
     } else if cell.is_error() {
-        match cell.get_error() {
-            // considering cells with #N/A! or #REF! as null
-            Some(
-                CellErrorType::NA
-                | CellErrorType::Value
-                | CellErrorType::Null
-                | CellErrorType::Ref
-                | CellErrorType::Num
-                | CellErrorType::Div0,
-            ) => Ok(DType::Null),
-            Some(err) => Err(KyraxErrorKind::CalamineCellError(err.to_owned()).into()),
-            None => Err(KyraxErrorKind::Internal(format!(
-                "cell is an error but get_error returned None: {cell:?}"
-            ))
-            .into()),
-        }
+        Ok(DType::String)
     } else {
         Err(KyraxErrorKind::Internal(format!("unsupported cell type: {cell:?}")).into())
     }
@@ -336,12 +311,12 @@ mod tests {
             // First column
             Cell::new((0, 0), CalData::Bool(true)),
             Cell::new((1, 0), CalData::Bool(false)),
-            Cell::new((2, 0), CalData::String("NULL".to_string())),
+            Cell::new((2, 0), CalData::Empty),
             Cell::new((3, 0), CalData::Int(42)),
             Cell::new((4, 0), CalData::Float(13.37)),
             Cell::new((5, 0), CalData::String("hello".to_string())),
             Cell::new((6, 0), CalData::Empty),
-            Cell::new((7, 0), CalData::String("#N/A".to_string())),
+            Cell::new((7, 0), CalData::Empty),
             Cell::new((8, 0), CalData::Int(12)),
             Cell::new((9, 0), CalData::Float(12.21)),
             Cell::new((10, 0), CalData::Bool(true)),

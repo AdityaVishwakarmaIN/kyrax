@@ -515,7 +515,7 @@ def test_guess_dtypes_with_div0_error() -> None:
             name="quotient",
             index=2,
             absolute_index=2,
-            dtype="float",
+            dtype="string",
             dtype_from="guessed",
             column_name_from="looked_up",
         ),
@@ -523,7 +523,7 @@ def test_guess_dtypes_with_div0_error() -> None:
     expected_data = {
         "dividend": [42.0, 43.0, 44.0, 45.0],
         "divisor": [0.0, 1.0, 2.0, 3.0],
-        "quotient": [None, 43.0, 22.0, 15.0],
+        "quotient": ["#DIV/0!", "43", "22", "15"],
     }
 
     pd_df = sheet.to_pandas()

@@ -22,8 +22,9 @@ use super::{
     Protection, ReadImageAnchor, ReadImageMarker, RowDim, Scope, SheetComments, SheetFormat,
     SheetKind, SheetProtectionMeta, SheetState, SheetViewMeta, Side, StyleTable, Table,
     ThreadedComment, TurboError, VbaProject, WorkbookProps, a1, list_sheet_names_with_password,
-    range_a1, read_workbook_turbo_sheet_with_password,
+    range_a1, read_workbook_turbo_sheet_with_options,
 };
+use crate::turbo::error::TurboResult;
 use crate::error::{KyraxError, KyraxErrorKind, py_errors::IntoPyResult};
 
 // ---------------------------------------------------------------------------
@@ -420,7 +421,7 @@ fn cell_errors_to_batch(errs: &[CellError]) -> Result<RecordBatch, KyraxError> {
 ///   (both-not-XOR). Typed cell errors (`t="e"`) are also listed sparsely via
 ///   `cell_errors()`; pure-error columns may still show the code string in
 ///   values, while errors mixed into numeric columns surface as null there.
-#[pyclass(name = "_TurboSheet", module = "kyrax._kyrax")]
+#[pyclass(name = "_TurboSheet", module = "kyrax._kyrax", skip_from_py_object)]
 pub struct PyTurboSheet {
     name: String,
     column_names: Vec<String>,
@@ -498,6 +499,54 @@ impl PyTurboSheet {
             tab_color: sheet.tab_color,
             data_validations: sheet.data_validations,
             cf_rules: sheet.cf_rules,
+        }
+    }
+}
+
+impl Clone for PyTurboSheet {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            column_names: self.column_names.clone(),
+            columns: self.columns.clone(),
+            nrows: self.nrows,
+            ncols: self.ncols,
+            style_indices: self.style_indices.clone(),
+            style_table: self.style_table.clone(),
+            formulas: self.formulas.clone(),
+            formulas_batch: match self.formulas_batch.get() {
+                Some(b) => {
+                    let cell = OnceLock::new();
+                    let _ = cell.set(b.clone());
+                    cell
+                }
+                None => OnceLock::new(),
+            },
+            cell_errors: self.cell_errors.clone(),
+            merges: self.merges.clone(),
+            tables: self.tables.clone(),
+            hyperlinks: self.hyperlinks.clone(),
+            comments: self.comments.clone(),
+            threaded_comments: self.threaded_comments.clone(),
+            charts: self.charts.clone(),
+            images: self.images.clone(),
+            pivots: self.pivots.clone(),
+            sheet_state: self.sheet_state,
+            sheet_kind: self.sheet_kind,
+            row_dimensions: self.row_dimensions.clone(),
+            column_dimensions: self.column_dimensions.clone(),
+            sheet_format: self.sheet_format.clone(),
+            auto_filter: self.auto_filter.clone(),
+            sheet_view: self.sheet_view.clone(),
+            protection: self.protection.clone(),
+            page_setup: self.page_setup.clone(),
+            page_margins: self.page_margins.clone(),
+            print_options: self.print_options.clone(),
+            header_footer: self.header_footer.clone(),
+            code_name: self.code_name.clone(),
+            tab_color: self.tab_color.clone(),
+            data_validations: self.data_validations.clone(),
+            cf_rules: self.cf_rules.clone(),
         }
     }
 }
@@ -1228,6 +1277,48 @@ fn dxf_to_dict<'py>(py: Python<'py>, dxf: &super::Dxf) -> PyResult<Bound<'py, Py
 /// but inflates+scans only the selected sheet (selective-sheet fast path).
 ///
 /// Caching the parsed `TurboWorkbook` across calls is intentionally not done:
+const MAX_TURBO_CACHE_CELLS: usize = 20_000_000;
+
+type TurboCacheKey = (usize, u64, Option<usize>);
+
+#[derive(Default)]
+struct TurboReaderCache {
+    map: ahash::AHashMap<TurboCacheKey, (PyTurboSheet, usize)>,
+    order: std::collections::VecDeque<TurboCacheKey>,
+    total_cells: usize,
+}
+
+impl TurboReaderCache {
+    fn get(&self, key: &TurboCacheKey) -> Option<PyTurboSheet> {
+        self.map.get(key).map(|(s, _)| s.clone())
+    }
+
+    fn insert(&mut self, key: TurboCacheKey, sheet: PyTurboSheet, cells: usize) {
+        if cells > MAX_TURBO_CACHE_CELLS {
+            return;
+        }
+        if let Some((_, old_cells)) = self.map.remove(&key) {
+            self.total_cells = self.total_cells.saturating_sub(old_cells);
+            self.order.retain(|k| k != &key);
+        }
+        while self.total_cells + cells > MAX_TURBO_CACHE_CELLS {
+            if let Some(oldest_key) = self.order.pop_front() {
+                if let Some((_, c)) = self.map.remove(&oldest_key) {
+                    self.total_cells = self.total_cells.saturating_sub(c);
+                }
+            } else {
+                break;
+            }
+        }
+        self.map.insert(key, (sheet, cells));
+        self.order.push_back(key);
+        self.total_cells += cells;
+    }
+}
+
+/// A reader for an open workbook that parses sidecars selectively per load.
+///
+/// Multi-sheet workbooks pay one selective read per `load_sheet` call because
 /// each call may pass different feature bits, and sheet extraction consumes the
 /// per-sheet Arrow columns. Documented residual cost for multi-sheet workflows.
 /// Unrequested features are not computed (wired to Rust `Features` bitflags).
@@ -1243,6 +1334,7 @@ pub struct PyTurboReader {
     date1904: bool,
     persons: Option<Vec<Person>>,
     vba: Option<VbaProject>,
+    cached_sheets: std::sync::Mutex<TurboReaderCache>,
 }
 
 #[pymethods]
@@ -1256,21 +1348,42 @@ impl PyTurboReader {
     ///
     /// `features` is `"values"` (default), `"all"`, or a list of feature names.
     /// Values are always included.
-    #[pyo3(signature = (idx_or_name, *, features = None))]
+    /// `header_row`: row index of the header (default: 0). `None` means no header (row 1 is data).
+    #[pyo3(signature = (idx_or_name, *, features = None, header_row = Some(0)))]
     fn load_sheet(
         &mut self,
         py: Python<'_>,
         idx_or_name: &Bound<'_, PyAny>,
         features: Option<&Bound<'_, PyAny>>,
+        header_row: Option<usize>,
     ) -> PyResult<PyTurboSheet> {
+        if let Some(hr) = header_row {
+            if hr != 0 {
+                return Err(PyValueError::new_err("only header_row=0 or None is supported"));
+            }
+        }
         let feat = parse_features(features)?;
         // Resolve before I/O so the selective path inflates only this sheet.
         let sheet_idx = resolve_sheet_index(idx_or_name, &self.sheet_names)?;
+        let cache_key = (sheet_idx, feat.0 as u64, header_row);
+
+        if let Ok(guard) = self.cached_sheets.lock() {
+            if let Some(cached) = guard.get(&cache_key) {
+                return Ok(cached);
+            }
+        }
+
         let path = self.path.clone();
         let password = self.password.clone();
         let wb = py
             .detach(|| {
-                read_workbook_turbo_sheet_with_password(&path, feat, sheet_idx, password.as_deref())
+                read_workbook_turbo_sheet_with_options(
+                    &path,
+                    feat,
+                    sheet_idx,
+                    password.as_deref(),
+                    header_row,
+                )
             })
             .map_err(turbo_err_to_py)?;
 
@@ -1318,7 +1431,12 @@ impl PyTurboReader {
             None
         };
 
-        Ok(PyTurboSheet::from_parts(sheet, style_table))
+        let result = PyTurboSheet::from_parts(sheet, style_table);
+        let cell_count = result.nrows * result.ncols;
+        if let Ok(mut guard) = self.cached_sheets.lock() {
+            guard.insert(cache_key, result.clone(), cell_count);
+        }
+        Ok(result)
     }
 
     /// Workbook-level defined names from the last load that requested them.
@@ -1602,6 +1720,140 @@ fn resolve_sheet_index(idx_or_name: &Bound<'_, PyAny>, names: &[String]) -> PyRe
     ))
 }
 
+pub fn sniff_magic_bytes(path: &str) -> TurboResult<()> {
+    let mut file = std::fs::File::open(path)?;
+    use std::io::Read;
+    let mut magic = [0u8; 8];
+    let n = file.read(&mut magic)?;
+    if n >= 4 && &magic[..4] == b"PK\x03\x04" {
+        return Ok(());
+    }
+    if n >= 8 && &magic[..8] == b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1" {
+        return Err(TurboError::Refused(
+            "legacy binary Excel (.xls) format is not supported by turbo engine; use read_excel() for legacy BIFF formats".into(),
+        ));
+    }
+    if n < 4 {
+        return Err(TurboError::Format(
+            "file is too short to be a valid XLSX archive".into(),
+        ));
+    }
+    Err(TurboError::Format(format!(
+        "not a valid OOXML/ZIP archive: unexpected header {:02x?}",
+        &magic[..n.min(4)]
+    )))
+}
+
+#[pyclass(name = "SheetStream", module = "kyrax._kyrax")]
+pub struct PySheetStream {
+    inner: std::sync::Mutex<Option<crate::turbo::stream::SheetStream>>,
+    pending: std::sync::Mutex<Option<(arrow_array::RecordBatch, usize)>>,
+    chunk_size: usize,
+    opts: crate::turbo::stream::StreamOptions,
+}
+
+#[pymethods]
+impl PySheetStream {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        // First check pending sliced batch
+        if let Ok(mut pending_guard) = self.pending.lock() {
+            if let Some((batch, offset)) = pending_guard.take() {
+                let remaining = batch.num_rows() - offset;
+                let take_len = remaining.min(self.chunk_size);
+                let sub = batch.slice(offset, take_len);
+                let next_offset = offset + take_len;
+                if next_offset < batch.num_rows() {
+                    *pending_guard = Some((batch, next_offset));
+                }
+                #[cfg(feature = "pyarrow")]
+                {
+                    let py_batch = record_batch_to_py(py, sub)?;
+                    return Ok(Some(py_batch));
+                }
+                #[cfg(not(feature = "pyarrow"))]
+                {
+                    return Err(PyValueError::new_err("pyarrow feature is not enabled"));
+                }
+            }
+        }
+
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let stream = match guard.as_mut() {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let opts = self.opts.clone();
+        let maybe_batch = py.detach(|| stream.next_batch(&opts)).map_err(turbo_err_to_py)?;
+        match maybe_batch {
+            Some(batch) => {
+                let num_rows = batch.num_rows();
+                if self.chunk_size > 0 && num_rows > self.chunk_size {
+                    let sub = batch.slice(0, self.chunk_size);
+                    if let Ok(mut pending_guard) = self.pending.lock() {
+                        *pending_guard = Some((batch, self.chunk_size));
+                    }
+                    #[cfg(feature = "pyarrow")]
+                    {
+                        let py_batch = record_batch_to_py(py, sub)?;
+                        Ok(Some(py_batch))
+                    }
+                    #[cfg(not(feature = "pyarrow"))]
+                    {
+                        Err(PyValueError::new_err("pyarrow feature is not enabled"))
+                    }
+                } else {
+                    #[cfg(feature = "pyarrow")]
+                    {
+                        let py_batch = record_batch_to_py(py, batch)?;
+                        Ok(Some(py_batch))
+                    }
+                    #[cfg(not(feature = "pyarrow"))]
+                    {
+                        Err(PyValueError::new_err("pyarrow feature is not enabled"))
+                    }
+                }
+            }
+            None => {
+                *guard = None;
+                Ok(None)
+            }
+        }
+    }
+}
+
+#[pyfunction(name = "read_excel_turbo_iter")]
+#[pyo3(signature = (path, sheet_idx = 0, chunk_size = 10000))]
+pub fn py_read_excel_turbo_iter(
+    py: Python<'_>,
+    path: &str,
+    sheet_idx: usize,
+    chunk_size: usize,
+) -> PyResult<PySheetStream> {
+    sniff_magic_bytes(path).map_err(turbo_err_to_py)?;
+    let path_buf = path.to_string();
+    let opts = crate::turbo::stream::StreamOptions {
+        batch_rows: chunk_size,
+        ..Default::default()
+    };
+    let stream_opts = opts.clone();
+    let stream = py
+        .detach(|| crate::turbo::stream::SheetStream::open(&path_buf, sheet_idx, stream_opts))
+        .map_err(turbo_err_to_py)?;
+    Ok(PySheetStream {
+        inner: std::sync::Mutex::new(Some(stream)),
+        pending: std::sync::Mutex::new(None),
+        chunk_size,
+        opts,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -1612,6 +1864,7 @@ fn resolve_sheet_index(idx_or_name: &Bound<'_, PyAny>, names: &[String]) -> PyRe
 #[pyfunction(name = "read_excel_turbo")]
 #[pyo3(signature = (path, password = None))]
 pub fn py_read_excel_turbo(path: &str, password: Option<String>) -> PyResult<PyTurboReader> {
+    sniff_magic_bytes(path).map_err(turbo_err_to_py)?;
     let sheet_names =
         list_sheet_names_with_password(path, password.as_deref()).map_err(turbo_err_to_py)?;
     Ok(PyTurboReader {
@@ -1624,6 +1877,7 @@ pub fn py_read_excel_turbo(path: &str, password: Option<String>) -> PyResult<PyT
         date1904: false,
         persons: None,
         vba: None,
+        cached_sheets: std::sync::Mutex::new(TurboReaderCache::default()),
     })
 }
 

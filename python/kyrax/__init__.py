@@ -56,11 +56,43 @@ try:
 except ImportError:
     _encryption_info = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
 try:
-    from ._kyrax import EditableSheet, EditableWorkbook, edit_excel
+    from ._kyrax import (
+        Cell,
+        EditableSheet,
+        EditableWorkbook,
+        SheetStream,
+        column_index_from_string,
+        coordinate_to_tuple,
+        edit_excel,
+        get_column_letter,
+        quote_sheetname,
+        range_boundaries,
+        read_excel_turbo_iter,
+    )
+    load_workbook = edit_excel
+    Workbook = EditableWorkbook
 except ImportError:
     edit_excel = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    load_workbook = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     EditableWorkbook = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
+    Workbook = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
     EditableSheet = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
+    Cell = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
+    SheetStream = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
+    read_excel_turbo_iter = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    get_column_letter = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    column_index_from_string = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    coordinate_to_tuple = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    range_boundaries = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    quote_sheetname = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+
+import sys
+
+if "pandas" in sys.modules:
+    try:
+        from . import pandas as _pandas
+    except Exception:
+        pass
 
 
 def validate_excel(path: Path | str) -> dict:
@@ -102,36 +134,29 @@ def repair_excel(
     return _repair_excel(str(path), str(out_path), severity=severity)
 
 
-def load_workbook(filename: str | Path, edit_mode: bool = False):
-    """Load an Excel workbook.
+def load_workbook(
+    filename: Path | str,
+    edit_mode: bool | None = None,
+    read_only: bool = False,
+    **kwargs: Any,
+) -> Any:
+    """Load an Excel workbook (openpyxl-compatible entry point).
 
-    With ``edit_mode=False`` (default) this returns an :class:`ExcelReader` for
-    reading. With ``edit_mode=True`` it returns an :class:`EditableWorkbook`
-    (backed by :func:`edit_excel`) that records byte-preserving edits and
-    applies them on :meth:`EditableWorkbook.save`:
+    By default (or when ``edit_mode=True``), returns an :class:`EditableWorkbook` for
+    in-place editing, sheet creation/deletion, and cell mutation.
 
-    - ``wb[sheet].set_cell(row, col, value)`` — 1-based cell edit
-    - ``wb[sheet].set_cell_style(row, col, ...)`` — 1-based cell style
-    - ``wb[sheet].insert_rows(idx, amount=1)`` / ``insert_cols(...)`` — insert
-      blank rows/columns at 1-based ``idx``, shifting the grid down/right
-    - ``wb[sheet].delete_rows(idx, amount=1)`` / ``delete_cols(...)`` — delete
-      rows/columns starting at 1-based ``idx``, shifting the grid up/left
-    - ``wb[sheet].move_range(range_string, rows=0, cols=0, translate=False)`` —
-      relocate a rectangular block by ``rows``/``cols`` without shifting the
-      rest of the sheet; ``translate=True`` also shifts formula references
-      inside the moved range
-
-    Shifts are applied before cell edits (an edit coordinate is final while a
-    shift moves the grid under it). ``save`` is all-or-nothing: a refusal
-    (implicit-numbered row/cell at or below the shift point, a grid limit
-    exceeded, a shared-formula master orphaned, or a table header row deleted)
-    raises ``InvalidParametersError`` and leaves the destination untouched.
+    If ``read_only=True`` or ``edit_mode=False``, returns a :class:`TurboReader`
+    (or Calamine-backed reader) for high-throughput read-only workloads.
     """
-    if edit_mode:
-        if edit_excel is None:
-            raise NotImplementedError("edit_excel is not available in this build")
-        return edit_excel(str(filename))
-    return read_excel(filename)
+    if read_only or edit_mode is False:
+        if kwargs:
+            return read_excel(filename, **kwargs)
+        return read_excel_turbo(filename)
+    if kwargs:
+        raise TypeError(f"unsupported arguments: {sorted(kwargs)}")
+    if edit_excel is None:
+        raise NotImplementedError("edit_excel is not available in this build")
+    return edit_excel(str(filename))
 
 
 DType = Literal["null", "int", "float", "string", "boolean", "datetime", "date", "duration"]
@@ -1036,6 +1061,7 @@ class TurboReader:
         idx_or_name: int | str,
         *,
         features: list[str] | str = "values",
+        header_row: int | None = 0,
     ) -> TurboSheet:
         """Load a sheet with selective feature extraction.
 
@@ -1046,8 +1072,9 @@ class TurboReader:
             charts, images, pivots, vba}.
             Values are always included; unrequested features are not computed.
             ``comments`` also loads threaded comments + persons.
+        :param header_row: 0-based header row index (default 0), or None for headerless data.
         """
-        return TurboSheet(self._reader.load_sheet(idx_or_name, features=features))
+        return TurboSheet(self._reader.load_sheet(idx_or_name, features=features, header_row=header_row))
 
     def defined_names(self) -> list[dict] | None:
         """Workbook defined names from the last load that requested them."""
@@ -1145,6 +1172,7 @@ def write_excel_turbo(
     string_mode: Literal["inline", "sst", "auto"] = "inline",
     emit_cached_values: bool = True,
     date1904: bool = False,
+    date_iso: bool = False,
     features: list[str] | str | None = None,
     active_tab: int = 0,
     named_styles: list[dict] | None = None,
@@ -1187,6 +1215,7 @@ def write_excel_turbo(
         string_mode=string_mode,
         emit_cached_values=emit_cached_values,
         date1904=date1904,
+        date_iso=date_iso,
         features=features,
         active_tab=active_tab,
         named_styles=named_styles,
@@ -1208,6 +1237,7 @@ def write_excel_turbo_stream(
     string_mode: Literal["inline", "sst", "auto"] = "inline",
     emit_cached_values: bool = True,
     date1904: bool = False,
+    date_iso: bool = False,
     features: list[str] | str | None = None,
     active_tab: int = 0,
     named_styles: list[dict] | None = None,
@@ -1240,6 +1270,7 @@ def write_excel_turbo_stream(
         string_mode=string_mode,
         emit_cached_values=emit_cached_values,
         date1904=date1904,
+        date_iso=date_iso,
         features=features,
         active_tab=active_tab,
         named_styles=named_styles,
@@ -1260,6 +1291,7 @@ def write_excel_turbo_bytes(
     string_mode: Literal["inline", "sst", "auto"] = "inline",
     emit_cached_values: bool = True,
     date1904: bool = False,
+    date_iso: bool = False,
     features: list[str] | str | None = None,
     active_tab: int = 0,
     named_styles: list[dict] | None = None,
@@ -1278,6 +1310,7 @@ def write_excel_turbo_bytes(
         string_mode=string_mode,
         emit_cached_values=emit_cached_values,
         date1904=date1904,
+        date_iso=date_iso,
         features=features,
         active_tab=active_tab,
         named_styles=named_styles,
@@ -1363,4 +1396,12 @@ def __getattr__(name: str):
         import importlib
 
         return importlib.import_module(f"{__name__}.io")
+    if name == "utils":
+        import importlib
+
+        return importlib.import_module(f"{__name__}.utils")
+    if name == "pandas":
+        import importlib
+
+        return importlib.import_module(f"{__name__}.pandas")
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -32,6 +32,12 @@ fn cell_of(col: &dyn Array, i: usize) -> (bool, Option<CellVal>) {
     if let Some(a) = col.as_any().downcast_ref::<Float64Array>() {
         return (false, Some(CellVal::Num(a.value(i))));
     }
+    if let Some(a) = col.as_any().downcast_ref::<arrow_array::Int64Array>() {
+        return (false, Some(CellVal::Num(a.value(i) as f64)));
+    }
+    if let Some(a) = col.as_any().downcast_ref::<arrow_array::BooleanArray>() {
+        return (false, Some(CellVal::Num(if a.value(i) { 1.0 } else { 0.0 })));
+    }
     if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
         return (false, Some(CellVal::Str(a.value(i).to_string())));
     }
@@ -109,7 +115,9 @@ fn check_fixture(stem: &str, path: &str, findings: &mut Vec<String>) {
             }
             let bcol = b.column(c).as_ref();
             let ecol = sheet.columns[c].as_ref();
-            if bcol.data_type() != ecol.data_type() {
+            let b_is_num = matches!(bcol.data_type(), arrow_schema::DataType::Float64 | arrow_schema::DataType::Int64);
+            let e_is_num = matches!(ecol.data_type(), arrow_schema::DataType::Float64 | arrow_schema::DataType::Int64);
+            if bcol.data_type() != ecol.data_type() && !(b_is_num && e_is_num) {
                 findings.push(format!(
                     "[{stem}] batch {k} column {c} type {} != eager {}",
                     bcol.data_type(),

@@ -429,7 +429,9 @@ fn cell_value(cv: &CellValue) -> Option<CalcValue> {
             CalcError::from_str_ci(s).unwrap_or(CalcError::Error),
         )),
         CellValue::Str(s) => Some(CalcValue::text(s.as_str())),
-        CellValue::DateSerial(n) => Some(CalcValue::Number(*n)),
+        CellValue::DateSerial(n) | CellValue::Time(n) | CellValue::Duration(n) => {
+            Some(CalcValue::Number(*n))
+        }
         CellValue::Rich(_) => None,
         CellValue::Formula { cached, .. } => Some(match cached {
             Some(CachedValue::Number(n)) => CalcValue::Number(*n),

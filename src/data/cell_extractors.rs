@@ -26,6 +26,8 @@ pub(super) fn extract_float<DT: CellType + DataType>(cell: &DT) -> Option<f64> {
 pub(super) fn extract_string<DT: CellType + DataType>(cell: &DT) -> Option<String> {
     if cell.is_string() {
         cell.get_string().map(str::to_string)
+    } else if cell.is_error() {
+        cell.get_error().map(|e| e.to_string())
     } else if cell.is_datetime() {
         cell.get_datetime()
             .and_then(|dt| dt.as_datetime())

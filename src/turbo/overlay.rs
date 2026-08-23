@@ -1,8 +1,9 @@
-//! Sparse overlay table for edit_excel / load_workbook (Plan 01).
+﻿//! Sparse overlay table for edit_excel / load_workbook (Plan 01).
 
 use ahash::{AHashMap, AHashSet};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use crate::turbo::error::{TurboError, TurboResult};
 use crate::turbo::fixup::{
@@ -203,11 +204,82 @@ impl SheetOp {
     }
 }
 
+pub struct StructureRewriteResult {
+    pub workbook_xml: Vec<u8>,
+    pub wb_rels_xml: Option<Vec<u8>>,
+    pub content_types_xml: Option<Vec<u8>>,
+    pub new_parts: AHashMap<String, String>,
+    pub deleted_entry_paths: AHashSet<String>,
+}
+
+fn esc_attr(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn extract_xml_attr_str(tag: &str, attr_name: &str) -> Option<String> {    let needle = format!("{attr_name}=\"");
+    if let Some(pos) = tag.find(&needle) {
+        let val_start = pos + needle.len();
+        if let Some(end_quote) = tag[val_start..].find('"') {
+            return Some(tag[val_start..val_start + end_quote].to_string());
+        }
+    }
+    let needle_sq = format!("{attr_name}='");
+    if let Some(pos) = tag.find(&needle_sq) {
+        let val_start = pos + needle_sq.len();
+        if let Some(end_quote) = tag[val_start..].find('\'') {
+            return Some(tag[val_start..val_start + end_quote].to_string());
+        }
+    }
+    None
+}
+
+/// Copy `xml` verbatim except dropping `<tag ...>` elements for which `drop`
+/// returns true. Non-element bytes (declaration, whitespace, containers) are
+/// preserved byte-for-byte. Returns None when nothing was dropped.
+fn filter_empty_elements<F: Fn(&str) -> bool>(xml: &str, tag: &str, drop: F) -> Option<String> {
+    let open = format!("<{}", tag);
+    let mut out = String::with_capacity(xml.len());
+    let mut pos = 0usize;
+    let mut dropped = false;
+    while let Some(rel) = xml[pos..].find(&open) {
+        let s = pos + rel;
+        // Element boundary: next '>'. Attr values escape '>' as "&gt;".
+        let e_rel = xml[s..].find('>')?;
+        let e = s + e_rel + 1;
+        if drop(&xml[s + open.len()..e - 1]) {
+            dropped = true;
+            out.push_str(&xml[pos..s]);
+        } else {
+            out.push_str(&xml[pos..e]);
+        }
+        pos = e;
+    }
+    if !dropped {
+        return None;
+    }
+    out.push_str(&xml[pos..]);
+    Some(out)
+}
+
 pub struct WorkbookOverlay {
     pub archive_map: ArchiveMap,
     pub sheet_overlays: AHashMap<String, SheetOverlay>,
     pub new_sheets: Vec<Sheet>,
     pub deleted_sheets: AHashSet<String>,
+    pub renamed_sheets: Vec<(String, String)>,
+    pub structure_dirty: bool,
+    pub hydrated: AHashMap<String, Arc<Sheet>>,
 }
 
 impl WorkbookOverlay {
@@ -217,7 +289,340 @@ impl WorkbookOverlay {
             sheet_overlays: AHashMap::default(),
             new_sheets: Vec::new(),
             deleted_sheets: AHashSet::default(),
+            renamed_sheets: Vec::new(),
+            structure_dirty: false,
+            hydrated: AHashMap::default(),
         }
+    }
+
+    pub fn new_blank() -> TurboResult<Self> {
+        let wb = crate::turbo::write::model::Workbook::new();
+        let bytes = crate::turbo::write::writer::write_workbook_bytes(&wb)
+            .map_err(|e| TurboError::Format(format!("failed to serialize blank workbook: {e}")))?;
+        let archive_map = ArchiveMap::parse(Arc::new(bytes))?;
+        Ok(Self::new(archive_map))
+    }
+
+    pub fn sheet_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for n in &self.archive_map.sheet_names {
+            if !self.deleted_sheets.contains(n) {
+                names.push(n.clone());
+            }
+        }
+        for s in &self.new_sheets {
+            if !self.deleted_sheets.contains(&s.name) && !names.contains(&s.name) {
+                names.push(s.name.clone());
+            }
+        }
+        names
+    }
+
+    pub fn rename_sheet(&mut self, old_name: &str, new_name: &str) -> TurboResult<()> {
+        if old_name == new_name {
+            return Ok(());
+        }
+        self.structure_dirty = true;
+        self.renamed_sheets.push((old_name.to_string(), new_name.to_string()));
+        if let Some(target) = self.archive_map.sheet_name_map.remove(old_name) {
+            self.archive_map.sheet_name_map.insert(new_name.to_string(), target);
+        }
+        for n in &mut self.archive_map.sheet_names {
+            if n == old_name {
+                *n = new_name.to_string();
+            }
+        }
+        if let Some(so) = self.sheet_overlays.remove(old_name) {
+            self.sheet_overlays.insert(new_name.to_string(), so);
+        }
+        for s in &mut self.new_sheets {
+            if s.name == old_name {
+                s.name = new_name.to_string();
+            }
+        }
+        if let Some(h) = self.hydrated.remove(old_name) {
+            self.hydrated.insert(new_name.to_string(), h);
+        }
+        Ok(())
+    }
+
+    pub fn create_sheet(&mut self, title: &str, index: Option<usize>) -> TurboResult<()> {
+        self.structure_dirty = true;
+        let mut sheet = Sheet::new(title);
+        sheet.name = title.to_string();
+        if let Some(idx) = index {
+            let clamped = idx.min(self.new_sheets.len());
+            self.new_sheets.insert(clamped, sheet);
+        } else {
+            self.new_sheets.push(sheet);
+        }
+        self.deleted_sheets.remove(title);
+        Ok(())
+    }
+
+    pub fn delete_sheet(&mut self, name: &str) -> TurboResult<()> {
+        self.structure_dirty = true;
+        self.deleted_sheets.insert(name.to_string());
+        self.new_sheets.retain(|s| s.name != name);
+        self.hydrated.remove(name);
+        Ok(())
+    }
+
+    pub fn copy_worksheet(&mut self, src_name: &str, target_title: &str) -> TurboResult<()> {
+        let hydrated = self.hydrated_sheet(src_name)?;
+        let mut new_sheet = match hydrated {
+            Some(src) => (*src).clone(),
+            None => Sheet::new(target_title),
+        };
+        new_sheet.name = target_title.to_string();
+        self.create_sheet(target_title, None)?;
+
+        if let Some(src_ov) = self.sheet_overlays.get(src_name).cloned() {
+            let target_ov = self.sheet_overlays.entry(target_title.to_string()).or_default();
+            target_ov.modified_cells = src_ov.modified_cells;
+            target_ov.modified_styles = src_ov.modified_styles;
+            target_ov.ops = src_ov.ops;
+            target_ov.is_dirty = true;
+        }
+        self.hydrated.insert(target_title.to_string(), Arc::new(new_sheet));
+        Ok(())
+    }
+
+    pub fn hydrated_sheet(&mut self, sheet_name: &str) -> TurboResult<Option<Arc<Sheet>>> {
+        if let Some(s) = self.hydrated.get(sheet_name) {
+            return Ok(Some(Arc::clone(s)));
+        }
+        if let Some(s) = self.new_sheets.iter().find(|s| s.name == sheet_name) {
+            let arc = Arc::new(s.clone());
+            self.hydrated.insert(sheet_name.to_string(), Arc::clone(&arc));
+            return Ok(Some(arc));
+        }
+        let Some(target) = self.archive_map.sheet_name_map.get(sheet_name) else {
+            return Ok(None);
+        };
+        let Some(xml) = inflate_entry(&self.archive_map, target)? else {
+            return Ok(None);
+        };
+        let sheet = hydrate_sheet_from_xml(&xml, &self.archive_map.shared_strings)?;
+        let arc = Arc::new(sheet);
+        self.hydrated.insert(sheet_name.to_string(), Arc::clone(&arc));
+        Ok(Some(arc))
+    }
+
+    pub fn rewrite_workbook_structure(&mut self) -> TurboResult<StructureRewriteResult> {
+        let mut new_parts: AHashMap<String, String> = AHashMap::default();
+        let mut deleted_entry_paths: AHashSet<String> = AHashSet::default();
+
+        for deleted_name in &self.deleted_sheets {
+            if let Some(target) = self.archive_map.sheet_name_map.get(deleted_name) {
+                deleted_entry_paths.insert(target.clone());
+                if let Some(stem) = target.strip_prefix("xl/worksheets/") {
+                    deleted_entry_paths.insert(format!("xl/worksheets/_rels/{stem}.rels"));
+                }
+            }
+        }
+
+        let wb_raw = inflate_entry(&self.archive_map, "xl/workbook.xml")?
+            .ok_or_else(|| TurboError::Format("xl/workbook.xml not found in archive".into()))?;
+        let wb_str = String::from_utf8_lossy(&wb_raw);
+
+        let mut existing_sheets: Vec<(String, u32, String)> = Vec::new();
+        let mut max_sheet_id = 0u32;
+        let mut max_r_id_num = 0u32;
+
+        if let Some(sheets_start) = wb_str.find("<sheets") {
+            if let Some(open_tag_end) = wb_str[sheets_start..].find('>') {
+                let open_tag_end = sheets_start + open_tag_end;
+                if let Some(sheets_close) = wb_str[open_tag_end..].find("</sheets>") {
+                    let sheets_close = open_tag_end + sheets_close;
+                    let inner = &wb_str[open_tag_end + 1..sheets_close];
+                    for chunk in inner.split("<sheet") {
+                        if chunk.trim().is_empty() {
+                            continue;
+                        }
+                        let tag = if let Some(end) = chunk.find("/>").or_else(|| chunk.find('>')) {
+                            &chunk[..end]
+                        } else {
+                            chunk
+                        };
+                        let name = extract_xml_attr_str(tag, "name");
+                        let sheet_id_str = extract_xml_attr_str(tag, "sheetId");
+                        let rid = extract_xml_attr_str(tag, "r:id").or_else(|| extract_xml_attr_str(tag, "id"));
+                        if let (Some(n), Some(s_id), Some(r)) = (name, sheet_id_str, rid) {
+                            let sid: u32 = s_id.parse().unwrap_or(1);
+                            if sid > max_sheet_id {
+                                max_sheet_id = sid;
+                            }
+                            if let Some(num_str) = r.strip_prefix("rId") {
+                                if let Ok(num) = num_str.parse::<u32>() {
+                                    if num > max_r_id_num {
+                                        max_r_id_num = num;
+                                    }
+                                }
+                            }
+                            existing_sheets.push((n, sid, r));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fresh relationship ids must not collide with NON-sheet relationships
+        // (theme/styles/sharedStrings often hold higher rIds than the sheets),
+        // so take the maximum across the whole workbook rels part.
+        if let Some(rels_raw) = inflate_entry(&self.archive_map, "xl/_rels/workbook.xml.rels")? {
+            let rels_str = String::from_utf8_lossy(&rels_raw);
+            let mut sp = 0usize;
+            while let Some(rel) = rels_str[sp..].find("Id=\"rId") {
+                let s = sp + rel + 7;
+                let digits = rels_str[s..].find('"').unwrap_or(0);
+                if digits > 0 {
+                    if let Ok(n) = rels_str[s..s + digits].parse::<u32>() {
+                        if n > max_r_id_num {
+                            max_r_id_num = n;
+                        }
+                    }
+                }
+                sp = s;
+            }
+        }
+
+        let final_names = self.sheet_names();
+        let mut final_sheet_entries: Vec<(String, u32, String)> = Vec::new();
+        let mut assigned_parts_count = 1u32;
+
+        for name in &final_names {
+            let existing = existing_sheets.iter().find(|(n, _, _)| {
+                n == name || self.renamed_sheets.iter().any(|(old, new)| old == n && new == name)
+            });
+
+            if let Some((_, sid, rid)) = existing {
+                final_sheet_entries.push((name.clone(), *sid, rid.clone()));
+            } else {
+                max_sheet_id += 1;
+                max_r_id_num += 1;
+                let sid = max_sheet_id;
+                let rid = format!("rId{}", max_r_id_num);
+                let part_path = loop {
+                    let path = format!("xl/worksheets/sheet{assigned_parts_count}.xml");
+                    assigned_parts_count += 1;
+                    if !self.archive_map.entries.contains_key(&path) && !new_parts.values().any(|p| p == &path) {
+                        break path;
+                    }
+                };
+                new_parts.insert(name.clone(), part_path.clone());
+                self.archive_map.sheet_name_map.insert(name.clone(), part_path);
+                final_sheet_entries.push((name.clone(), sid, rid));
+            }
+        }
+
+        let mut rewritten_wb = wb_str.to_string();
+        if let Some(sheets_start) = rewritten_wb.find("<sheets") {
+            if let Some(open_tag_end) = rewritten_wb[sheets_start..].find('>') {
+                let open_tag_end = sheets_start + open_tag_end;
+                if let Some(sheets_close) = rewritten_wb[open_tag_end..].find("</sheets>") {
+                    let sheets_close = open_tag_end + sheets_close;
+                    let mut inner = String::new();
+                    for (n, sid, rid) in &final_sheet_entries {
+                        inner.push_str(&format!(
+                            "<sheet name=\"{}\" sheetId=\"{}\" r:id=\"{}\"/>",
+                            esc_attr(n),
+                            sid,
+                            rid
+                        ));
+                    }
+                    rewritten_wb.replace_range(open_tag_end + 1..sheets_close, &inner);
+                }
+            }
+        }
+
+        let wb_rels_xml = if let Some(rels_raw) = inflate_entry(&self.archive_map, "xl/_rels/workbook.xml.rels")? {
+            let rels_str = String::from_utf8_lossy(&rels_raw);
+            let deleted_rids: Vec<String> = existing_sheets
+                .iter()
+                .filter(|(n, _, _)| self.deleted_sheets.contains(n))
+                .map(|(_, _, r)| r.clone())
+                .collect();
+            let mut additions = String::new();
+            for (name, part_path) in &new_parts {
+                if let Some((_, _, rid)) = final_sheet_entries.iter().find(|(n, _, _)| n == name) {
+                    let rel_target = part_path.strip_prefix("xl/").unwrap_or(part_path);
+                    additions.push_str(&format!(
+                        "<Relationship Id=\"{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"{}\"/>",
+                        rid,
+                        rel_target
+                    ));
+                }
+            }
+            let filtered = filter_empty_elements(&rels_str, "Relationship", |attrs| {
+                if let Some(t) = extract_xml_attr_str(attrs, "Target") {
+                    let resolved = if t.starts_with("worksheets/") {
+                        format!("xl/{t}")
+                    } else if t.starts_with("/xl/") {
+                        t[1..].to_string()
+                    } else {
+                        t.clone()
+                    };
+                    if deleted_entry_paths.contains(&resolved) {
+                        return true;
+                    }
+                }
+                if let Some(i) = extract_xml_attr_str(attrs, "Id") {
+                    if deleted_rids.iter().any(|r| *r == i) {
+                        return true;
+                    }
+                }
+                false
+            });
+            if filtered.is_none() && additions.is_empty() {
+                None
+            } else {
+                let mut rewritten_rels = filtered.unwrap_or_else(|| rels_str.to_string());
+                if let Some(ins) = rewritten_rels.rfind("</Relationships>") {
+                    rewritten_rels.insert_str(ins, &additions);
+                }
+                Some(rewritten_rels.into_bytes())
+            }
+        } else {
+            None
+        };
+
+        let content_types_xml = if let Some(ct_raw) = inflate_entry(&self.archive_map, "[Content_Types].xml")? {
+            let ct_str = String::from_utf8_lossy(&ct_raw);
+            let mut additions = String::new();
+            for part_path in new_parts.values() {
+                additions.push_str(&format!(
+                    "<Override PartName=\"/{}\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>",
+                    part_path
+                ));
+            }
+            let filtered = filter_empty_elements(&ct_str, "Override", |attrs| {
+                if let Some(p) = extract_xml_attr_str(attrs, "PartName") {
+                    let clean_p = p.strip_prefix('/').unwrap_or(&p);
+                    return deleted_entry_paths.contains(clean_p);
+                }
+                false
+            });
+            if filtered.is_none() && additions.is_empty() {
+                None
+            } else {
+                let mut rewritten_ct = filtered.unwrap_or_else(|| ct_str.to_string());
+                if let Some(ins) = rewritten_ct.rfind("</Types>") {
+                    rewritten_ct.insert_str(ins, &additions);
+                }
+                Some(rewritten_ct.into_bytes())
+            }
+        } else {
+            None
+        };
+
+        Ok(StructureRewriteResult {
+            workbook_xml: rewritten_wb.into_bytes(),
+            wb_rels_xml,
+            content_types_xml,
+            new_parts,
+            deleted_entry_paths,
+        })
     }
 
     pub fn set_cell(&mut self, sheet_name: &str, row: u32, col: u32, val: CellValue) {
@@ -290,8 +695,28 @@ impl WorkbookOverlay {
             .move_range(r1, c1, r2, c2, rows, cols, translate);
     }
 
-    pub fn save(&self) -> TurboResult<Vec<u8>> {
-        // Build set of modified ZIP entry paths and resolve style descriptors.
+    pub fn save(&mut self) -> TurboResult<Vec<u8>> {
+        let mut rewritten_parts: AHashMap<String, Vec<u8>> = AHashMap::default();
+        let mut deleted_entry_paths: AHashSet<String> = AHashSet::default();
+        let mut assigned_new_parts: AHashMap<String, String> = AHashMap::default();
+
+        if self.structure_dirty
+            || !self.deleted_sheets.is_empty()
+            || !self.new_sheets.is_empty()
+            || !self.renamed_sheets.is_empty()
+        {
+            let res = self.rewrite_workbook_structure()?;
+            rewritten_parts.insert("xl/workbook.xml".to_string(), res.workbook_xml);
+            if let Some(wb_rels) = res.wb_rels_xml {
+                rewritten_parts.insert("xl/_rels/workbook.xml.rels".to_string(), wb_rels);
+            }
+            if let Some(ct) = res.content_types_xml {
+                rewritten_parts.insert("[Content_Types].xml".to_string(), ct);
+            }
+            deleted_entry_paths = res.deleted_entry_paths;
+            assigned_new_parts = res.new_parts;
+        }
+
         let mut modified_entry_paths = AHashSet::default();
         let mut style_engine = StyleEngine::new();
         let mut sheet_resolved_styles: AHashMap<String, AHashMap<(u32, u32), u32>> =
@@ -305,7 +730,10 @@ impl WorkbookOverlay {
                 } else if sheet_name.starts_with("xl/") {
                     modified_entry_paths.insert(sheet_name.clone());
                 } else {
-                    modified_entry_paths.insert(format!("xl/worksheets/{sheet_name}.xml"));
+                    let p = assigned_new_parts.get(sheet_name).cloned().unwrap_or_else(|| {
+                        format!("xl/worksheets/{sheet_name}.xml")
+                    });
+                    modified_entry_paths.insert(p);
                 }
             }
 
@@ -324,28 +752,14 @@ impl WorkbookOverlay {
             modified_entry_paths.insert("xl/styles.xml".to_string());
         }
 
-        // ------------------------------------------------------------------
-        // Phase 1 — render every dirty part IN MEMORY before anything is
-        // written. ALL-OR-NOTHING: a mutate/fixup refusal aborts the whole
-        // save with a clear reason before a single part reaches the zip.
-        //
-        // For each sheet, the original part is inflated once, then every
-        // recorded op is applied in user order as: mutate splice → table part
-        // fixups → workbook defined-name fixups → sheet metadata fixup. Cell
-        // edits are spliced LAST, because an edit coordinate is final while a
-        // shift moves the grid under it.
-        // ------------------------------------------------------------------
         let mut rendered: AHashMap<String, Vec<u8>> = AHashMap::default();
         let mut table_edit: AHashMap<String, Vec<u8>> = AHashMap::default();
         let mut pivot_table_edit: AHashMap<String, Vec<u8>> = AHashMap::default();
         let mut pivot_cache_edit: AHashMap<String, Vec<u8>> = AHashMap::default();
         let mut pivot_cache_map: Option<std::collections::HashMap<u32, String>> = None;
-        let mut workbook_bytes: Option<Vec<u8>> = None;
-        let mut workbook_modified = false;
+        let mut workbook_bytes: Option<Vec<u8>> = rewritten_parts.remove("xl/workbook.xml");
+        let mut workbook_modified = workbook_bytes.is_some();
 
-        // Any cell edit or grid mutation can invalidate cached formula results.
-        // Computed once up front: the splice path and the cross-sheet cache pass
-        // both consult it.
         let formula_affected = self
             .sheet_overlays
             .values()
@@ -362,23 +776,20 @@ impl WorkbookOverlay {
                     if sheet_name.starts_with("xl/") {
                         sheet_name.clone()
                     } else {
-                        format!("xl/worksheets/{sheet_name}.xml")
+                        assigned_new_parts.get(sheet_name).cloned().unwrap_or_else(|| {
+                            format!("xl/worksheets/{sheet_name}.xml")
+                        })
                     }
                 }
             };
 
             let original_xml = inflate_entry(&self.archive_map, &entry_name)?;
 
-            // Pivot parts owned by this sheet (pivot table parts via the sheet
-            // rels, plus each one's cache definition part). Resolved once, like
-            // table parts: ops never add or remove pivot parts, so the rels are
-            // stable across the op sequence.
             let pivot_parts =
                 sheet_pivot_parts(&self.archive_map, &entry_name, &mut pivot_cache_map)?;
 
             let mut sheet_xml: Option<Vec<u8>> = original_xml;
             if !overlay.ops.is_empty() {
-                // Mutating a sheet requires its source XML to splice.
                 let Some(mut buf) = sheet_xml.take() else {
                     return Err(TurboError::Refused(format!(
                         "cannot {} in sheet '{}': the sheet has no source XML to splice",
@@ -386,26 +797,17 @@ impl WorkbookOverlay {
                         sheet_name
                     )));
                 };
-                // Table parts are resolved once against the original sheet tail
-                // (ops never add or remove table parts, so the rids are stable).
                 let table_parts = sheet_table_parts(&self.archive_map, &entry_name, &buf);
 
                 for op in &overlay.ops {
-                    // 1. mutate splice (grid + dimension + shared-formula refs).
                     let mutated =
                         apply_mutate(&buf, op).ok_or_else(|| refuse_sheet_op(sheet_name, op))?;
                     buf = mutated.into_owned();
 
-                    // A move_range performs its OWN grid splice and its own
-                    // sheet-tail fixups (merges, hyperlinks, DV, CF). Tables and
-                    // workbook defined names do not follow moved cells — a
-                    // relocation leaves them in place by design.
                     if matches!(op, SheetOp::MoveRange { .. }) {
                         continue;
                     }
 
-                    // 2. table parts (fixup refuses on a header-row delete /
-                    //    fully-emptied table). Sequential: op N sees op N-1's bytes.
                     for tp in &table_parts {
                         let cur: Cow<'_, [u8]> = match table_edit.get(tp) {
                             Some(prev) => Cow::Borrowed(prev.as_slice()),
@@ -423,11 +825,6 @@ impl WorkbookOverlay {
                         }
                     }
 
-                    // 2.5 pivot parts. The pivot table's own `<location>` shifts
-                    // when this sheet (the pivot's host) is mutated; the cache's
-                    // `<worksheetSource ref>` shifts when this sheet is the cache
-                    // SOURCE, and the cache is tagged refreshOnLoad because its
-                    // materialised records are now stale.
                     for (pt_part, cache_part) in &pivot_parts {
                         let cur: Cow<'_, [u8]> = match pivot_table_edit.get(pt_part) {
                             Some(prev) => Cow::Borrowed(prev.as_slice()),
@@ -461,8 +858,6 @@ impl WorkbookOverlay {
                         }
                     }
 
-                    // 3. workbook defined names (inflated once; only shipped when
-                    //    actually modified, so no-op saves stay byte-identical).
                     if workbook_bytes.is_none() {
                         workbook_bytes = inflate_entry(&self.archive_map, "xl/workbook.xml")?;
                     }
@@ -475,8 +870,6 @@ impl WorkbookOverlay {
                         }
                     }
 
-                    // 4. sheet metadata fixup (merges, hyperlinks, autoFilter,
-                    //    DV/CF, breaks, panes/selections).
                     let fixed = fixup_sheet_xml(&buf, op.axis(), op.at(), op.delta())
                         .ok_or_else(|| refuse_sheet_op(sheet_name, op))?;
                     buf = fixed.into_owned();
@@ -487,9 +880,7 @@ impl WorkbookOverlay {
             // Pivot-cache staleness (edit / move_range gaps): a cell edit or a
             // moved range that touches a cache's source range makes its
             // materialised records stale, so the cache is tagged refreshOnLoad
-            // and Excel rebuilds it on open. Insert/delete staleness is already
-            // handled inside `fixup_pivot_cache_xml` (which tags the cache only
-            // when the source range itself moved).
+            // and Excel rebuilds it on open.
             if !overlay.modified_cells.is_empty()
                 || overlay
                     .ops
@@ -519,7 +910,6 @@ impl WorkbookOverlay {
             let mut sheet = Sheet::new(sheet_name);
             sheet.name = sheet_name.clone();
 
-            // Apply overlay cell modifications onto hydrated Sheet
             for (&(row, col), val) in &overlay.modified_cells {
                 let r_idx = match sheet.rows.binary_search_by(|r| r.row.cmp(&row)) {
                     Ok(i) => i,
@@ -530,28 +920,38 @@ impl WorkbookOverlay {
                 };
                 let r = &mut sheet.rows[r_idx];
                 match r.cells.binary_search_by(|c| c.col.cmp(&col)) {
-                    Ok(c_idx) => r.cells[c_idx].value = val.clone(),
-                    Err(c_idx) => r.cells.insert(c_idx, Cell::new(col, val.clone())),
+                    Ok(c_idx) => {
+                        r.cells[c_idx].value = val.clone();
+                        if let Some(desc) = overlay.modified_styles.get(&(row, col)) {
+                            r.cells[c_idx].style_desc = Some(Box::new(desc.clone()));
+                        }
+                    }
+                    Err(c_idx) => {
+                        let mut cell = Cell::new(col, val.clone());
+                        if let Some(desc) = overlay.modified_styles.get(&(row, col)) {
+                            cell.style_desc = Some(Box::new(desc.clone()));
+                        }
+                        r.cells.insert(c_idx, cell);
+                    }
                 }
             }
 
             let mut sst = SstBuilder::new();
             let xml = write_worksheet(&sheet, false, false, &mut sst);
-            rendered.insert(entry_name.clone(), xml);
+            rendered.insert(entry_name, xml);
         }
 
-        // ------------------------------------------------------------------
-        // Phase 1.6 — stale formula caches. A cell edit or grid mutation can
-        // leave cached `<v>` formula results stale (the splice never recomputes
-        // them). Two moves, both gated on the upfront `formula_affected` flag:
-        //   1. force `calcPr fullCalcOnLoad="1"` in `xl/workbook.xml`
-        //      (schema-safe; a source that already sets it stays byte-identical,
-        //      so the OVR-01/02 member-identity invariants hold), and
-        //   2. strip every cached `<v>` from formula cells in every worksheet
-        //      part, so no stale result survives even before Excel recalcs.
-        // Runs BEFORE the content_changed computation so a forced workbook
-        // rewrite is also seen by the signature-invalidation gate.
-        // ------------------------------------------------------------------
+        for new_sheet in &self.new_sheets {
+            let part_path = assigned_new_parts.get(&new_sheet.name).cloned().unwrap_or_else(|| {
+                format!("xl/worksheets/{}.xml", new_sheet.name)
+            });
+            if !rendered.contains_key(&part_path) {
+                let mut sst = SstBuilder::new();
+                let xml = write_worksheet(new_sheet, false, false, &mut sst);
+                rendered.insert(part_path, xml);
+            }
+        }
+
         if formula_affected {
             if workbook_bytes.is_none() {
                 workbook_bytes = inflate_entry(&self.archive_map, "xl/workbook.xml")?;
@@ -563,20 +963,16 @@ impl WorkbookOverlay {
                 }
             }
 
-            // Strip every cached `<v>` result from formula cells across ALL
-            // worksheet parts. Dirty sheets are already in `rendered`; rewrite
-            // those in place. Pass-through sheets that actually contain a cached
-            // formula result are added to `rendered` so the ZIP emits the
-            // stripped bytes (a sheet with no cached results stays byte-identical
-            // and untouched — OVR-01/02 member identity is preserved).
+            // Strip cached <v> from already-rendered dirty sheets too.
             let rendered_names: Vec<String> = rendered.keys().cloned().collect();
             for name in rendered_names {
                 if let Some(stripped) = strip_formula_cached_values(&rendered[&name]) {
                     rendered.insert(name, stripped);
                 }
             }
-            for entry_name in self.archive_map.sheet_name_map.values() {
-                if rendered.contains_key(entry_name) || self.deleted_sheets.contains(entry_name) {
+            for (name, entry_name) in &self.archive_map.sheet_name_map {
+                let _ = name;
+                if rendered.contains_key(entry_name) {
                     continue;
                 }
                 if let Some(orig) = inflate_entry(&self.archive_map, entry_name)? {
@@ -587,13 +983,6 @@ impl WorkbookOverlay {
             }
         }
 
-        // ------------------------------------------------------------------
-        // Phase 1.5 — invalidate any digital signature, but ONLY when a real
-        // content edit actually changed the package. A no-op save keeps the
-        // (still valid) signature and stays byte-identical. Every refusal here
-        // happens before ZipWriter is constructed, so a malformed signed
-        // package can never emit a partial archive.
-        // ------------------------------------------------------------------
         let content_changed = !rendered.is_empty()
             || !table_edit.is_empty()
             || !pivot_table_edit.is_empty()
@@ -601,21 +990,19 @@ impl WorkbookOverlay {
             || workbook_modified
             || styles_modified
             || !self.deleted_sheets.is_empty()
-            || !self.new_sheets.is_empty();
+            || !self.new_sheets.is_empty()
+            || !rewritten_parts.is_empty();
         let signature_removal = if content_changed {
             strip_signature_metadata(&self.archive_map)?
         } else {
             None
         };
 
-        // ------------------------------------------------------------------
-        // Phase 2 — write the zip. Nothing refuses here; every part is ready.
-        // ------------------------------------------------------------------
         let mut zip = ZipWriter::new();
 
-        // Copy all untouched parts from ArchiveMap verbatim.
         for entry_name in &self.archive_map.entry_order {
-            if self.deleted_sheets.contains(entry_name)
+            if deleted_entry_paths.contains(entry_name)
+                || rewritten_parts.contains_key(entry_name)
                 || modified_entry_paths.contains(entry_name)
                 || rendered.contains_key(entry_name)
                 || table_edit.contains_key(entry_name)
@@ -639,7 +1026,7 @@ impl WorkbookOverlay {
                     let payload = self.archive_map.source_bytes[start..end].to_vec();
                     zip.add_precompressed(PrecompressedPart {
                         name: entry.name.clone(),
-                        method: entry.compression_method, // CRITICAL: Preserves STORE (0) vs DEFLATE (8)
+                        method: entry.compression_method,
                         crc32: entry.crc32,
                         uncomp_size: entry.uncompressed_size,
                         data: payload,
@@ -648,7 +1035,6 @@ impl WorkbookOverlay {
             }
         }
 
-        // Add rendered sheets, then edited table parts, then the workbook.
         for (name, bytes) in &rendered {
             zip.add(name, bytes);
         }
@@ -661,21 +1047,20 @@ impl WorkbookOverlay {
         for (name, bytes) in &pivot_cache_edit {
             zip.add(name, bytes);
         }
+        for (name, bytes) in &rewritten_parts {
+            zip.add(name, bytes);
+        }
         if workbook_modified {
             if let Some(wb) = &workbook_bytes {
                 zip.add("xl/workbook.xml", wb);
             }
         }
 
-        // Rewritten signature metadata (fixed order for deterministic output).
         if let Some(sr) = &signature_removal {
             zip.add("_rels/.rels", &sr.rels);
             zip.add("[Content_Types].xml", &sr.content_types);
         }
 
-        // Append-only splice of xl/styles.xml: insert new font/fill/border/xf
-        // records at the end of each pool, bump count= attributes, and leave
-        // every pre-existing record byte-identical. This ensures existing s=
         // indices on pass-through cells remain valid.
         if styles_modified {
             let original_styles = self
@@ -817,7 +1202,7 @@ struct SignatureRemoval {
 /// rewrites of `_rels/.rels` and `[Content_Types].xml` that invalidate it.
 /// `Ok(None)` when the archive is unsigned (the common case costs one entry-name
 /// listing, no inflate). A signed archive that is missing or has malformed
-/// metadata it would have to rewrite refuses with `Format` — this is called
+/// metadata it would have to rewrite refuses with `Format` â€” this is called
 /// before any ZIP emission, so a bad signed package can never produce a partial
 /// archive.
 fn strip_signature_metadata(map: &ArchiveMap) -> TurboResult<Option<SignatureRemoval>> {
@@ -843,7 +1228,7 @@ fn strip_signature_metadata(map: &ArchiveMap) -> TurboResult<Option<SignatureRem
 /// recomputes every formula on load instead of presenting a stale cached `<v>`
 /// as current (the splice never recomputes formula results). Returns
 /// `Cow::Borrowed` when the property is already `"1"` (byte-identical no-op, so
-/// openpyxl-authored sources — which default to `"1"` — keep every member
+/// openpyxl-authored sources â€” which default to `"1"` â€” keep every member
 /// byte-identical), and a spliced owned buffer otherwise. A malformed workbook
 /// refuses with `Format` before any output is emitted.
 fn ensure_full_calc_on_load(xml: &[u8]) -> TurboResult<Cow<'_, [u8]>> {
@@ -926,9 +1311,9 @@ fn insert_calc_pr(xml: &[u8]) -> TurboResult<Vec<u8>> {
 /// Strip every cached `<v>` result from formula cells in a worksheet part.
 ///
 /// A formula cell is a `<c>` whose content contains an `<f>` element; its cached
-/// result (a `<v>…</v>` element, or a self-closing `<v />`) is a materialised
+/// result (a `<v>â€¦</v>` element, or a self-closing `<v />`) is a materialised
 /// value that becomes stale the moment the grid shifts. This helper excises only
-/// those `<v>` elements and preserves every other byte exactly — formula text,
+/// those `<v>` elements and preserves every other byte exactly â€” formula text,
 /// attributes, and non-formula cells are untouched.
 ///
 /// Returns `None` when nothing changed (no cached value found, or no formulas),
@@ -937,13 +1322,13 @@ fn strip_formula_cached_values(xml: &[u8]) -> Option<Vec<u8>> {
     let mut removes: Vec<(usize, usize)> = Vec::new();
     let mut i = 0usize;
     while i < xml.len() {
-        // A formula cell is `<c` … `</c>` whose body contains `<f`.
+        // A formula cell is `<c` â€¦ `</c>` whose body contains `<f`.
         let Some(o) = memchr::memmem::find(&xml[i..], b"<c") else {
             break;
         };
         let cs = i + o;
-        // Only a real cell element: `<c>` / `<c r=…>` / `<c …>`. A following `o`
-        // means `<cols>`/`<col>` — skip the tag.
+        // Only a real cell element: `<c>` / `<c r=â€¦>` / `<c â€¦>`. A following `o`
+        // means `<cols>`/`<col>` â€” skip the tag.
         match xml.get(cs + 2) {
             Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n') | Some(b'/') => {}
             _ => {
@@ -969,7 +1354,7 @@ fn strip_formula_cached_values(xml: &[u8]) -> Option<Vec<u8>> {
             i = ce;
             continue;
         }
-        // This cell holds a formula: remove every `<v …>…</v>` and `<v …/>`.
+        // This cell holds a formula: remove every `<v â€¦>â€¦</v>` and `<v â€¦/>`.
         let mut j = 0usize;
         while j < body.len() {
             let Some(vo) = memchr::memmem::find(&body[j..], b"<v") else {
@@ -1037,8 +1422,8 @@ fn sheet_table_parts(map: &ArchiveMap, sheet_entry: &str, sheet_xml: &[u8]) -> V
 }
 
 /// Resolve every pivot table part owned by `sheet_entry` (via the sheet's rels)
-/// and, for each, the cache definition part it references (its `cacheId` →
-/// workbook `<pivotCaches>` → workbook rels → part path). The workbook cache
+/// and, for each, the cache definition part it references (its `cacheId` â†’
+/// workbook `<pivotCaches>` â†’ workbook rels â†’ part path). The workbook cache
 /// map is built once and cached. `Ok(())` with an empty vec when the sheet has
 /// no pivots or the workbook has no resolvable caches.
 fn sheet_pivot_parts(
@@ -1075,7 +1460,7 @@ fn sheet_pivot_parts(
     Ok(out)
 }
 
-/// Workbook-level `cacheId → cache definition part path`, from workbook.xml's
+/// Workbook-level `cacheId â†’ cache definition part path`, from workbook.xml's
 /// `<pivotCaches>` + the workbook rels. `Ok(None)` when the workbook has no
 /// pivot caches (or no workbook to read).
 fn workbook_pivot_caches(
@@ -1206,7 +1591,7 @@ fn apply_mutate<'a>(xml: &'a [u8], op: &SheetOp) -> Option<Cow<'a, [u8]>> {
 fn refuse_sheet_op(sheet_name: &str, op: &SheetOp) -> TurboError {
     match op {
         SheetOp::MoveRange { .. } => TurboError::Refused(format!(
-            "cannot {} in sheet '{}': refused because it would corrupt the worksheet — \
+            "cannot {} in sheet '{}': refused because it would corrupt the worksheet â€” \
              a destination corner would leave the grid (rows 1..=1,048,576, columns 1..=16,384), \
              an implicit-numbered row/cell lies inside the moved region, or a shared-formula ref= \
              would leave the grid",
@@ -1214,7 +1599,7 @@ fn refuse_sheet_op(sheet_name: &str, op: &SheetOp) -> TurboError {
             sheet_name
         )),
         _ => TurboError::Refused(format!(
-            "cannot {} in sheet '{}': refused because it would corrupt the worksheet — an \
+            "cannot {} in sheet '{}': refused because it would corrupt the worksheet â€” an \
              implicit-numbered row/cell at or below the shift point, a grid limit (1,048,576 rows \
              / 16,384 columns) would be exceeded, or a shared-formula master would be orphaned",
             op.human(),
@@ -1226,7 +1611,7 @@ fn refuse_sheet_op(sheet_name: &str, op: &SheetOp) -> TurboError {
 /// Refusal reason for a table-part fixup (header-row delete / emptied table).
 fn refuse_table_op(sheet_name: &str, table_part: &str, op: &SheetOp) -> TurboError {
     TurboError::Refused(format!(
-        "cannot {} in sheet '{}': refused because it would corrupt table part '{}' — it would \
+        "cannot {} in sheet '{}': refused because it would corrupt table part '{}' â€” it would \
          delete the table's header row or delete every column of the table",
         op.human(),
         sheet_name,
@@ -1326,7 +1711,7 @@ fn splice_sheet_data_body(
         if row_self_closing {
             match my_cells {
                 Some(cells) if !cells.is_empty() => {
-                    // `<row .../>` → `<row ...>cells</row>`, attributes preserved.
+                    // `<row .../>` â†’ `<row ...>cells</row>`, attributes preserved.
                     out.extend_from_slice(&body[row_start..tag_end - 1]);
                     push(out, b">");
                     for (col, val) in &cells {
@@ -1496,7 +1881,7 @@ fn emit_cell(out: &mut Vec<u8>, row: u32, col: u32, val: &CellValue, s_attr: Opt
         CellValue::Empty => {
             push(out, b"/>");
         }
-        CellValue::Number(n) | CellValue::DateSerial(n) => {
+        CellValue::Number(n) | CellValue::DateSerial(n) | CellValue::Time(n) | CellValue::Duration(n) => {
             push(out, b"><v>");
             write_f64(out, *n);
             push(out, b"</v></c>");
@@ -1709,7 +2094,7 @@ fn parse_dimension_ref(s: &str) -> Option<(u32, u32, u32, u32)> {
     }
 }
 
-/// `"B12"` → `(row, col)` 1-based. `$` is tolerated.
+/// `"B12"` â†’ `(row, col)` 1-based. `$` is tolerated.
 fn parse_a1_ref(s: &str) -> Option<(u32, u32)> {
     let bytes: Vec<u8> = s.bytes().filter(|&b| b != b'$').collect();
     let col = col_from_ref_bytes(&bytes)? as u32 + 1;
@@ -1986,7 +2371,7 @@ fn parse_cell_body(
         // cache would be dropped entirely.
         //
         // `t="e"`/`t="str"` caches hold text and must be XML-decoded (`A&amp;B`
-        // → `A&B`) so a later emit's `write_escaped_text` re-escapes to the
+        // â†’ `A&B`) so a later emit's `write_escaped_text` re-escapes to the
         // original bytes. `t="s"` is a shared-string index (some producers
         // write formula results that way), resolved through the SST like the
         // non-formula branch below.
@@ -2217,7 +2602,7 @@ fn splice_styles_xml_pools(
             result = updated;
         }
 
-        // Update count="N" → count="N+new_count"
+        // Update count="N" â†’ count="N+new_count"
         let new_total = orig_count + new_count;
         let old_count_str = format!("count=\"{}\"", orig_count);
         let new_count_str = format!("count=\"{}\"", new_total);

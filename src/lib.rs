@@ -96,12 +96,15 @@ fn _kyrax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // turbo fast-path (read)
     {
         use crate::turbo::python::{
-            PyTurboReader, PyTurboSheet, py_is_encrypted, py_read_excel_turbo,
+            PySheetStream, PyTurboReader, PyTurboSheet, py_is_encrypted, py_read_excel_turbo,
+            py_read_excel_turbo_iter,
         };
         m.add_function(wrap_pyfunction!(py_read_excel_turbo, m)?)?;
+        m.add_function(wrap_pyfunction!(py_read_excel_turbo_iter, m)?)?;
         m.add_function(wrap_pyfunction!(py_is_encrypted, m)?)?;
         m.add_class::<PyTurboReader>()?;
         m.add_class::<PyTurboSheet>()?;
+        m.add_class::<PySheetStream>()?;
     }
 
     // C1c encrypted-workbook metadata (requires the `encryption` feature)
@@ -114,15 +117,24 @@ fn _kyrax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // turbo write path (W1 silo A core)
     {
         use crate::turbo::write::python::{
-            PyEditableSheet, PyEditableWorkbook, py_edit_excel, py_write_excel_turbo,
-            py_write_excel_turbo_bytes, py_write_excel_turbo_stream,
+            PyCell, PyEditableSheet, PyEditableWorkbook, PySheetRowIter,
+            py_column_index_from_string, py_coordinate_to_tuple, py_edit_excel,
+            py_get_column_letter, py_quote_sheetname, py_range_boundaries,
+            py_write_excel_turbo, py_write_excel_turbo_bytes, py_write_excel_turbo_stream,
         };
         m.add_function(wrap_pyfunction!(py_write_excel_turbo, m)?)?;
         m.add_function(wrap_pyfunction!(py_write_excel_turbo_stream, m)?)?;
         m.add_function(wrap_pyfunction!(py_write_excel_turbo_bytes, m)?)?;
         m.add_function(wrap_pyfunction!(py_edit_excel, m)?)?;
+        m.add_function(wrap_pyfunction!(py_get_column_letter, m)?)?;
+        m.add_function(wrap_pyfunction!(py_column_index_from_string, m)?)?;
+        m.add_function(wrap_pyfunction!(py_coordinate_to_tuple, m)?)?;
+        m.add_function(wrap_pyfunction!(py_range_boundaries, m)?)?;
+        m.add_function(wrap_pyfunction!(py_quote_sheetname, m)?)?;
         m.add_class::<PyEditableWorkbook>()?;
         m.add_class::<PyEditableSheet>()?;
+        m.add_class::<PyCell>()?;
+        m.add_class::<PySheetRowIter>()?;
     }
 
     // C2 validate & repair

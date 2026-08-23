@@ -201,7 +201,7 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
         for ns in &wb.named_styles {
             eng.register_named_style(&ns.name, &ns.desc, ns.builtin_id);
         }
-        resolve_workbook_styles(&mut eng, &mut sheets);
+        resolve_workbook_styles(&mut eng, &mut sheets, &wb.options);
         for sh in &mut sheets {
             for cf in &mut sh.conditional_formatting {
                 cf.register_dxfs(&mut eng);
@@ -314,6 +314,8 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
                 features,
                 &interner,
                 &pivot_assigns[i],
+                wb.options.date_iso,
+                wb.options.date1904,
                 &mut xml_scratch,
             );
             pivot_wirings.extend(emit.pivot_wirings);
@@ -407,6 +409,8 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
             }
         }
 
+        let date_iso = wb.options.date_iso;
+        let date1904 = wb.options.date1904;
         use rayon::prelude::*;
         for (batch_start, batch_end) in batches {
             let indices: Vec<usize> = (batch_start..batch_end).collect();
@@ -425,6 +429,8 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
                         features,
                         &interner,
                         &pivot_assigns[i],
+                        date_iso,
+                        date1904,
                         &mut xml,
                     );
                     let mut parts =
@@ -665,7 +671,7 @@ pub fn save_workbook_stream<W: io::Write + Seek>(wb: &Workbook, w: W) -> io::Res
         for ns in &wb.named_styles {
             eng.register_named_style(&ns.name, &ns.desc, ns.builtin_id);
         }
-        resolve_workbook_styles(&mut eng, &mut sheets);
+        resolve_workbook_styles(&mut eng, &mut sheets, &wb.options);
         for sh in &mut sheets {
             for cf in &mut sh.conditional_formatting {
                 cf.register_dxfs(&mut eng);
@@ -771,6 +777,8 @@ pub fn save_workbook_stream<W: io::Write + Seek>(wb: &Workbook, w: W) -> io::Res
                 features,
                 &interner,
                 &pivot_assigns[i],
+                wb.options.date_iso,
+                wb.options.date1904,
                 &mut xml_scratch,
             )?;
             pivot_wirings.extend(emit.pivot_wirings);
@@ -946,6 +954,8 @@ fn write_sheet_package_stream<W: io::Write + Seek>(
     features: WriteFeatures,
     interner: &MediaInterner,
     pivot_assigns: &[PivotAssign],
+    date_iso: bool,
+    date1904: bool,
     chunk_buf: &mut Vec<u8>,
 ) -> io::Result<SheetEmit> {
     zip.start_entry(sheet_path, METHOD_DEFLATE)?;
@@ -1114,7 +1124,7 @@ fn write_sheet_package_stream<W: io::Write + Seek>(
     chunk_buf.clear();
 
     for row in &sheet.rows {
-        write_row(chunk_buf, row, use_sst, emit_cache, sst);
+        write_row(chunk_buf, row, use_sst, emit_cache, sst, date_iso, date1904);
         if !chunk_buf.is_empty() {
             zip.write_chunk(chunk_buf)?;
             chunk_buf.clear();
@@ -1529,11 +1539,7 @@ fn workbook_needs_style_resolve(wb: &Workbook) -> bool {
 }
 
 /// Resolve pending StyleDescs and auto date xfs. Mutates sheets in place.
-fn resolve_workbook_styles(eng: &mut StyleEngine, sheets: &mut [Sheet]) {
-    // Date xf cache (date-only vs datetime)
-    let mut date_xf: Option<u32> = None;
-    let mut datetime_xf: Option<u32> = None;
-
+pub fn resolve_workbook_styles(eng: &mut StyleEngine, sheets: &mut [Sheet], options: &WriteOptions) {
     for sh in sheets.iter_mut() {
         // Row style descs
         for (row_num, desc) in std::mem::take(&mut sh.row_style_descs) {
@@ -1562,30 +1568,35 @@ fn resolve_workbook_styles(eng: &mut StyleEngine, sheets: &mut [Sheet]) {
                     // ledger 14: omit s=0
                     cell.style = None;
                 }
-                // Date display: attach numFmt xf when DateSerial has no style
-                if matches!(cell.value, CellValue::DateSerial(_)) && cell.style.is_none() {
-                    let serial = match cell.value {
-                        CellValue::DateSerial(n) => n,
-                        _ => unreachable!(),
+                // Date/time display: attach numFmt xf when DateSerial/Time/Duration has no style
+                if !options.date_iso && cell.style.is_none() {
+                    let inferred_fmt = match cell.value {
+                        CellValue::DateSerial(n) => {
+                            let has_time = (n.fract()).abs() > 1e-12;
+                            if has_time {
+                                Some(DATETIME_NUM_FMT)
+                            } else {
+                                Some(DATE_NUM_FMT)
+                            }
+                        }
+                        CellValue::Time(t) => {
+                            if ((t * 86400.0).round() % 60.0).abs() > 1e-6 {
+                                Some("hh:mm:ss")
+                            } else {
+                                Some("hh:mm")
+                            }
+                        }
+                        CellValue::Duration(_) => Some("[h]:mm:ss"),
+                        _ => None,
                     };
-                    let has_time = (serial.fract()).abs() > 1e-12;
-                    let idx = if has_time {
-                        *datetime_xf.get_or_insert_with(|| {
-                            eng.resolve(&StyleDesc {
-                                num_fmt: Some(DATETIME_NUM_FMT.into()),
-                                ..Default::default()
-                            })
-                        })
-                    } else {
-                        *date_xf.get_or_insert_with(|| {
-                            eng.resolve(&StyleDesc {
-                                num_fmt: Some(DATE_NUM_FMT.into()),
-                                ..Default::default()
-                            })
-                        })
-                    };
-                    if idx != 0 {
-                        cell.style = Some(idx);
+                    if let Some(fmt) = inferred_fmt {
+                        let idx = eng.resolve(&StyleDesc {
+                            num_fmt: Some(fmt.into()),
+                            ..Default::default()
+                        });
+                        if idx != 0 {
+                            cell.style = Some(idx);
+                        }
                     }
                 }
             }
@@ -1992,6 +2003,8 @@ pub fn write_worksheet(
         WriteFeatures::ALL,
         &interner,
         &[],
+        false,
+        false,
         &mut out,
     );
     out
@@ -2048,6 +2061,8 @@ fn write_sheet_package(
     features: WriteFeatures,
     interner: &MediaInterner,
     pivot_assigns: &[PivotAssign],
+    date_iso: bool,
+    date1904: bool,
     out: &mut Vec<u8>,
 ) -> SheetEmit {
     let need_r = sheet_needs_r_ns(sheet);
@@ -2214,7 +2229,7 @@ fn write_sheet_package(
 
     push(out, b"<sheetData>");
     for row in &sheet.rows {
-        write_row(out, row, use_sst, emit_cache, sst);
+        write_row(out, row, use_sst, emit_cache, sst, date_iso, date1904);
     }
     push(out, b"</sheetData>");
 
@@ -2512,12 +2527,53 @@ fn estimate_sheet_size(sheet: &Sheet) -> usize {
     cells.saturating_mul(48).saturating_add(1024)
 }
 
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m as u32, d as u32)
+}
+
+fn serial_parts(serial: f64, date1904: bool) -> (i64, u32, u32, f64) {
+    let base = serial.floor();
+    let z = if date1904 {
+        base as i64 - 24_107
+    } else {
+        let d = if base <= 59.0 { base + 1.0 } else { base };
+        d as i64 - 25_569
+    };
+    let (y, m, d) = civil_from_days(z);
+    (y, m, d, (serial - base).max(0.0))
+}
+
+fn format_iso_datetime(serial: f64, date1904: bool) -> Option<String> {
+    let (y, m, d, frac) = serial_parts(serial, date1904);
+    if frac.abs() < 1e-10 {
+        Some(format!("{y:04}-{m:02}-{d:02}"))
+    } else {
+        let total_seconds = (frac * 86400.0).round() as u64;
+        let hours = (total_seconds / 3600) % 24;
+        let minutes = (total_seconds % 3600) / 60;
+        let seconds = total_seconds % 60;
+        Some(format!("{y:04}-{m:02}-{d:02}T{hours:02}:{minutes:02}:{seconds:02}"))
+    }
+}
+
 fn write_row(
     out: &mut Vec<u8>,
     row: &Row,
     use_sst: bool,
     emit_cache: bool,
     sst: &mut SstAccess<'_>,
+    date_iso: bool,
+    date1904: bool,
 ) {
     let has_attrs = row.height.is_some() || row.hidden || row.style.is_some();
     if row.cells.is_empty() && !has_attrs {
@@ -2546,7 +2602,7 @@ fn write_row(
     push(out, br#"">"#);
 
     for cell in &row.cells {
-        write_cell(out, row.row, cell, use_sst, emit_cache, sst);
+        write_cell(out, row.row, cell, use_sst, emit_cache, sst, date_iso, date1904);
     }
     push(out, b"</row>");
 }
@@ -2568,6 +2624,8 @@ fn write_cell(
     use_sst: bool,
     emit_cache: bool,
     sst: &mut SstAccess<'_>,
+    date_iso: bool,
+    date1904: bool,
 ) {
     if let CellValue::Empty = &cell.value {
         if cell.style.is_none() || cell.style == Some(0) {
@@ -2580,13 +2638,27 @@ fn write_cell(
         return;
     }
 
+    if date_iso {
+        if let CellValue::DateSerial(n) = &cell.value {
+            if let Some(iso) = format_iso_datetime(*n, date1904) {
+                push(out, br#"<c r=""#);
+                write_coord(out, row, cell.col);
+                write_style_attr(out, cell.style);
+                push(out, br#"" t="d"><v>"#);
+                push_str(out, &iso);
+                push(out, br#"</v></c>"#);
+                return;
+            }
+        }
+    }
+
     push(out, br#"<c r=""#);
     write_coord(out, row, cell.col);
     write_style_attr(out, cell.style);
 
     match &cell.value {
         CellValue::Empty => unreachable!(),
-        CellValue::Number(n) | CellValue::DateSerial(n) => {
+        CellValue::Number(n) | CellValue::DateSerial(n) | CellValue::Time(n) | CellValue::Duration(n) => {
             push(out, br#""><v>"#);
             write_f64(out, *n);
             push(out, br#"</v></c>"#);
@@ -2911,6 +2983,8 @@ mod tests {
             WriteFeatures::MERGES,
             &MediaInterner::new(),
             &[],
+            false,
+            false,
             &mut out,
         );
         let s = String::from_utf8_lossy(&out);
@@ -2935,6 +3009,8 @@ mod tests {
             WriteFeatures::CORE,
             &MediaInterner::new(),
             &[],
+            false,
+            false,
             &mut out,
         );
         let s = String::from_utf8_lossy(&out);

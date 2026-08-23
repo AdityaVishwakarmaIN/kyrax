@@ -316,7 +316,7 @@ pub fn list_sheet_names_with_password(
 /// Inflates and scans **every** worksheet. Prefer
 /// [`read_workbook_turbo_sheet`] when only one sheet is needed.
 pub fn read_workbook_turbo(path: &str, features: Features) -> TurboResult<TurboWorkbook> {
-    read_workbook_turbo_filtered(path, features, None, None)
+    read_workbook_turbo_filtered(path, features, None, None, Some(0))
 }
 
 /// Like [`read_workbook_turbo`], but opens an encrypted workbook with `password`.
@@ -328,7 +328,7 @@ pub fn read_workbook_turbo_with_password(
     features: Features,
     password: Option<&str>,
 ) -> TurboResult<TurboWorkbook> {
-    read_workbook_turbo_filtered(path, features, None, password)
+    read_workbook_turbo_filtered(path, features, None, password, Some(0))
 }
 
 /// Like [`read_workbook_turbo`], but inflate+scan only the sheet at `sheet_idx`
@@ -341,7 +341,7 @@ pub fn read_workbook_turbo_sheet(
     features: Features,
     sheet_idx: usize,
 ) -> TurboResult<TurboWorkbook> {
-    read_workbook_turbo_filtered(path, features, Some(sheet_idx), None)
+    read_workbook_turbo_filtered(path, features, Some(sheet_idx), None, Some(0))
 }
 
 /// Like [`read_workbook_turbo_sheet`], but opens an encrypted workbook with `password`.
@@ -351,7 +351,18 @@ pub fn read_workbook_turbo_sheet_with_password(
     sheet_idx: usize,
     password: Option<&str>,
 ) -> TurboResult<TurboWorkbook> {
-    read_workbook_turbo_filtered(path, features, Some(sheet_idx), password)
+    read_workbook_turbo_filtered(path, features, Some(sheet_idx), password, Some(0))
+}
+
+/// Like [`read_workbook_turbo_sheet_with_password`], with optional `header_row`.
+pub fn read_workbook_turbo_sheet_with_options(
+    path: &str,
+    features: Features,
+    sheet_idx: usize,
+    password: Option<&str>,
+    header_row: Option<usize>,
+) -> TurboResult<TurboWorkbook> {
+    read_workbook_turbo_filtered(path, features, Some(sheet_idx), password, header_row)
 }
 
 /// Internal entry: `only_sheet = None` parses all sheets; `Some(i)` parses only sheet `i`.
@@ -360,6 +371,7 @@ fn read_workbook_turbo_filtered(
     features: Features,
     only_sheet: Option<usize>,
     password: Option<&str>,
+    header_row: Option<usize>,
 ) -> TurboResult<TurboWorkbook> {
     let features = features.union(Features::VALUES);
     let zip = open_package_bytes(path, password)?;
@@ -368,15 +380,9 @@ fn read_workbook_turbo_filtered(
     let shared = read_entry(&zip, "xl/sharedStrings.xml")?.map(|sx| parse_shared_strings(&sx));
 
     // Styles: STYLES needs full table; COND_FORMAT needs dxfs (same parse is fine)
-    let need_styles =
-        features.contains(Features::STYLES) || features.contains(Features::COND_FORMAT);
-    let style_table = if need_styles {
-        match read_entry(&zip, "xl/styles.xml")? {
-            Some(sx) => Some(parse_style_table(&sx)),
-            None => Some(parse_style_table(b"")),
-        }
-    } else {
-        None
+    let style_table = match read_entry(&zip, "xl/styles.xml")? {
+        Some(sx) => Some(parse_style_table(&sx)),
+        None => None,
     };
 
     // Workbook.xml: sheet order + optional defined names + always date1904
@@ -559,8 +565,9 @@ fn read_workbook_turbo_filtered(
         };
 
         // Missing sheetData (rare): treat as empty grid
+        let has_header = header_row.is_some();
         let partial = match sheet_data_region(&sheet_xml) {
-            Ok(_) => parse_parallel(&sheet_xml, nthreads, shared.as_ref(), scan_feat)?,
+            Ok(_) => parse_parallel(&sheet_xml, nthreads, shared.as_ref(), scan_feat, has_header)?,
             Err(_) => {
                 sheets.push(empty_sheet(
                     meta.name.clone(),
@@ -573,7 +580,7 @@ fn read_workbook_turbo_filtered(
         };
         let row_dims_from_scan = partial.row_dims.clone();
         let (column_names, columns, style_indices, mut formulas, cell_errors, nrows, ncols) =
-            partial.into_arrow_columns()?;
+            partial.into_arrow_columns(style_table.as_ref(), date1904)?;
         // Flag on → always Some (empty batch when the sheet has no formulas).
         // Flag off → None (scan skips formula capture so the Option is empty).
         if features.contains(Features::FORMULAS) {

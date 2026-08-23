@@ -38,6 +38,12 @@ pyarrow = ["pyarrow>=8.0.0"]
 pandas = ["pandas>=1.4.4", "pyarrow>=8.0.0"]
 polars = ["polars>=1"]
 
+[project.entry-points."pandas.excel.readers"]
+kyrax = "kyrax.pandas:KyraxExcelReader"
+
+[project.entry-points."pandas.excel.writers"]
+kyrax = "kyrax.pandas:KyraxExcelWriter"
+
 [dependency-groups]
 dev = ["maturin>=1.7.0,<2.0"]
 testing = [

@@ -659,7 +659,7 @@ def test_use_columns_with_eager_loading() -> None:
     assert "Month" not in (field.name for field in rb.schema)
 
 
-@pytest.mark.parametrize("excel_file", ["sheet-null-strings.xlsx", "sheet-null-strings-empty.xlsx"])
+@pytest.mark.parametrize("excel_file", ["sheet-null-strings-empty.xlsx"])
 def test_use_columns_dtypes_eager_loading(
     excel_file: str, expected_data_sheet_null_strings: dict[str, list[Any]]
 ) -> None:

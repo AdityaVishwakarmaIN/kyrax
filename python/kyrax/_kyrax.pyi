@@ -557,51 +557,72 @@ class _TurboSheet:
 
     def __repr__(self) -> str: ...
 
+class Cell:
+    """A lazy proxy cell handle on an :class:`EditableSheet`."""
+    @property
+    def row(self) -> int: ...
+    @property
+    def column(self) -> int: ...
+    @property
+    def coordinate(self) -> str: ...
+    @property
+    def value(self) -> object: ...
+    @value.setter
+    def value(self, val: object) -> None: ...
+    @property
+    def number_format(self) -> str | None: ...
+    @number_format.setter
+    def number_format(self, fmt: str | None) -> None: ...
+    @property
+    def hyperlink(self) -> str | None: ...
+    @hyperlink.setter
+    def hyperlink(self, link: str | None) -> None: ...
+    @property
+    def comment(self) -> str | None: ...
+    @comment.setter
+    def comment(self, comment: str | None) -> None: ...
+    def offset(self, row: int = 0, column: int = 0) -> Cell: ...
+
 class EditableSheet:
-    """A live sheet handle on an :class:`EditableWorkbook`.
+    """A live sheet handle on an :class:`EditableWorkbook`."""
 
-    All indices are 1-BASED, matching openpyxl and Excel. ``insert_rows(2)``
-    puts a new blank row AT row 2 and pushes every existing row at or below
-    row 2 down. Operations are recorded and applied at ``save()`` time.
-
-    ``ws["A1"]`` reads the effective value at cell A1: a direct edit (via
-    ``set_cell`` or a range assignment) shadows the original workbook XML
-    immediately; otherwise the original cell value is returned. Empty cells
-    read as ``None``. Numbers and dates read as ``float``, booleans as
-    ``bool``, strings/errors as ``str``, formulas as their formula text with
-    one leading ``=``, and rich text as its flattened text.
-
-    ``ws["A1:B2"]`` reads a rectangular range as a row-major
-    ``list[list[scalar]]``; ``ws["A1:B2"] = [[..], [..]]`` writes one where the
-    value must be a 2D list/tuple of exactly the range's dimensions (converted
-    before any edit is recorded, so a bad value leaves no partial writes).
-
-    Queued ``insert_rows``/``delete_rows``/``insert_cols``/``delete_cols``/
-    ``move_range`` operations materialize at ``save()`` time and are not
-    reflected by reads until then.
-    """
-
-    def __getitem__(self, key: str) -> object | list[list[object]]:
-        """Read a cell (``"A1"`` → scalar) or a range (``"A1:B2"`` → 2D list).
-
-        Raises ``ValueError`` when ``key`` is not a valid A1 cell or range
-        (malformed syntax, zero, or out of the 1..1_048_576 row / A..XFD
-        column grid).
-        """
-    def __setitem__(self, key: str, value: object) -> None:
-        """Set a cell (``"A1"``) or a rectangular range (``"A1:B2"``).
-
-        Range values must be 2D lists/tuples of the exact range dimensions;
-        otherwise ``TypeError``. Invalid ``key`` raises ``ValueError``. All
-        values are validated and converted before any edit is recorded, so a
-        bad element never leaves a partial write.
-        """
-    def set_cell(self, row: int, col: int, value: object) -> None:
-        """Set the value of cell ``(row, col)`` (1-based).
-
-        Raises ``ValueError`` when ``row``/``col`` is zero or out of the
-        1..1_048_576 row / 1..16_384 column grid.
-        """
+    @property
+    def title(self) -> str: ...
+    @title.setter
+    def title(self, val: str) -> None: ...
+    @property
+    def min_row(self) -> int: ...
+    @property
+    def max_row(self) -> int: ...
+    @property
+    def min_column(self) -> int: ...
+    @property
+    def max_column(self) -> int: ...
+    @property
+    def dimensions(self) -> str: ...
+    @property
+    def values(self) -> typing.Iterator[tuple[object, ...]]: ...
+    def append(self, iterable: typing.Iterable[object]) -> None: ...
+    def cell(self, row: int, column: int, value: object | None = None) -> Cell: ...
+    def iter_rows(
+        self,
+        min_row: int | None = None,
+        max_row: int | None = None,
+        min_col: int | None = None,
+        max_col: int | None = None,
+        values_only: bool = False,
+    ) -> typing.Iterator[tuple[object, ...]]: ...
+    def iter_cols(
+        self,
+        min_row: int | None = None,
+        max_row: int | None = None,
+        min_col: int | None = None,
+        max_col: int | None = None,
+        values_only: bool = False,
+    ) -> typing.Iterator[tuple[object, ...]]: ...
+    def __getitem__(self, key: str) -> object | list[list[object]]: ...
+    def __setitem__(self, key: str, value: object) -> None: ...
+    def set_cell(self, row: int, col: int, value: object) -> None: ...
     def set_cell_style(
         self,
         row: int,
@@ -611,94 +632,51 @@ class EditableSheet:
         fill: dict | None = None,
         border: dict | None = None,
         num_fmt: str | None = None,
-    ) -> None:
-        """Set a style on cell ``(row, col)`` (1-based).
-
-        Raises ``ValueError`` when ``row``/``col`` is zero or out of grid.
-        """
-    def insert_rows(self, idx: int, amount: int = 1) -> None:
-        """Insert ``amount`` blank rows at 1-based ``idx``.
-
-        Rows at or below ``idx`` shift down. Raises ``InvalidParametersError``
-        when ``idx < 1``, and at ``save()`` time when the operation would
-        corrupt the sheet (an implicit-numbered row/cell at or below the shift
-        point, a grid limit of 1,048,576 rows would be exceeded, or a
-        shared-formula master would be orphaned).
-        """
-    def delete_rows(self, idx: int, amount: int = 1) -> None:
-        """Delete ``amount`` rows starting at 1-based ``idx``.
-
-        Rows below shift up. Raises ``InvalidParametersError`` when ``idx < 1``,
-        and at ``save()`` time when the operation would corrupt the sheet (an
-        implicit-numbered row/cell at or below the shift point, or a shared
-        formula's master would be removed while a dependent survives).
-        """
-    def insert_cols(self, idx: int, amount: int = 1) -> None:
-        """Insert ``amount`` blank columns at 1-based ``idx``.
-
-        Columns at or right of ``idx`` shift right. Raises ``InvalidParametersError``
-        when ``idx < 1``, and at ``save()`` time when the operation would corrupt
-        the sheet (an implicit-numbered cell at or right of the shift point, or
-        the 16,384-column grid limit would be exceeded).
-        """
-    def delete_cols(self, idx: int, amount: int = 1) -> None:
-        """Delete ``amount`` columns starting at 1-based ``idx``.
-
-        Columns to the right shift left. Raises ``InvalidParametersError`` when
-        ``idx < 1``, and at ``save()`` time when the operation would corrupt the
-        sheet (an implicit-numbered cell at or right of the shift point).
-        """
+    ) -> None: ...
+    def insert_rows(self, idx: int, amount: int = 1) -> None: ...
+    def delete_rows(self, idx: int, amount: int = 1) -> None: ...
+    def insert_cols(self, idx: int, amount: int = 1) -> None: ...
+    def delete_cols(self, idx: int, amount: int = 1) -> None: ...
     def move_range(
         self,
         range_string: str,
         rows: int = 0,
         cols: int = 0,
         translate: bool = False,
-    ) -> None:
-        """Move a range of cells by ``rows`` and ``cols`` (positive is
-        down/right, negative is up/left).
-
-        Every cell in the range is relocated; the vacated source cells become
-        empty and destination cells are overwritten. Nothing else on the sheet
-        shifts. With ``translate=True`` the formulas *inside* the moved range
-        have their references translated by the same offset (openpyxl
-        ``move_range`` semantics; default ``False`` leaves them alone).
-
-        Merged ranges, hyperlinks, data validations and conditional formatting
-        anchors fully contained in the moved range follow it; anchors that
-        straddle the boundary stay put. Formulas *outside* the range that point
-        into it are **not** rewritten.
-
-        Raises ``ValueError`` immediately when ``range_string`` is malformed or
-        out of the 1..1_048_576 row / A..XFD column grid, and
-        ``InvalidParametersError`` at ``save()`` time when the move would push
-        any cell off the grid (1,048,576 rows / 16,384 columns), an
-        implicit-numbered row/cell lies inside the moved region, or a
-        shared-formula ``ref=`` would leave the grid — nothing is written.
-        """
+    ) -> None: ...
 
 class EditableWorkbook:
-    """A byte-preserving edit handle over an existing XLSX (from ``edit_excel``).
+    """A byte-preserving edit handle over an existing XLSX (from ``edit_excel``)."""
 
-    Cell edits, styles, and row/column insert-delete operations are recorded
-    against a sparse overlay and applied together at ``save()``. Row/column
-    shifts are applied BEFORE cell edits, so an edit coordinate is final while
-    a shift moves the grid under it.
-    """
+    def __init__(self) -> None: ...
+    @property
+    def sheetnames(self) -> list[str]: ...
+    @property
+    def worksheets(self) -> list[EditableSheet]: ...
+    @property
+    def active(self) -> EditableSheet: ...
+    @active.setter
+    def active(self, sheet: EditableSheet | str | int) -> None: ...
+    def create_sheet(self, title: str | None = None, index: int | None = None) -> EditableSheet: ...
+    def remove(self, worksheet: EditableSheet | str) -> None: ...
+    def copy_worksheet(self, from_worksheet: EditableSheet | str) -> EditableSheet: ...
+    def move_sheet(self, sheet: EditableSheet | str, offset: int = 0) -> None: ...
+    def __getitem__(self, sheet_name: str) -> EditableSheet: ...
+    def __delitem__(self, sheet_name: str) -> None: ...
+    def save(self, path_or_fileobj: str | object) -> None: ...
 
-    def __getitem__(self, sheet_name: str) -> EditableSheet:
-        """Return a live handle to the named sheet."""
-    def save(self, path: str) -> None:
-        """Write the edited workbook to ``path``.
+class SheetStream:
+    """A memory-bounded streaming iterator yielding PyArrow record batches."""
+    def __iter__(self) -> SheetStream: ...
+    def __next__(self) -> pa.RecordBatch: ...
 
-        ALL-OR-NOTHING: if any recorded operation is refused (a table header
-        row would be deleted, a shared-formula master orphaned, an
-        implicit-numbered row/cell hit, or a grid limit exceeded), an
-        ``InvalidParametersError`` is raised and NOTHING is written — the
-        destination file is left untouched.
-        """
-
-def edit_excel(path: str) -> EditableWorkbook:
+def read_excel_turbo_iter(path: str, sheet_idx: int = 0, chunk_size: int = 10000) -> SheetStream: ...
+def get_column_letter(col: int) -> str: ...
+def column_index_from_string(s: str) -> int: ...
+def coordinate_to_tuple(coord: str) -> tuple[int, int]: ...
+def range_boundaries(range_str: str) -> tuple[int, int, int, int]: ...
+def quote_sheetname(name: str) -> str: ...
+def edit_excel(path: str) -> EditableWorkbook: ...
     """Open an existing XLSX for byte-preserving edits.
 
     Prefer the friendlier :func:`load_workbook` (``edit_mode=True``) wrapper.

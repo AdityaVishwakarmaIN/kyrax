@@ -124,6 +124,10 @@ fn opt_i32(d: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<i32>> {
     d.get_item(key)?.map(|v| v.extract::<i32>()).transpose()
 }
 
+fn opt_u32(d: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<u32>> {
+    d.get_item(key)?.map(|v| v.extract::<u32>()).transpose()
+}
+
 fn parse_color(obj: &Bound<'_, PyAny>) -> PyResult<ColorSpec> {
     if let Ok(s) = obj.extract::<String>() {
         if let Some(rest) = s.strip_prefix("theme:") {
@@ -586,6 +590,8 @@ fn parse_cf_rule(obj: &Bound<'_, PyAny>, priority: u32) -> PyResult<CfRule> {
                 cfvos,
                 color,
                 show_value: opt_bool(d, "showValue")?.or(opt_bool(d, "show_value")?),
+                min_length: opt_u32(d, "minLength")?.or(opt_u32(d, "min_length")?),
+                max_length: opt_u32(d, "maxLength")?.or(opt_u32(d, "max_length")?),
             }
         }
         "iconSet" | "icon_set" => {
@@ -602,6 +608,8 @@ fn parse_cf_rule(obj: &Bound<'_, PyAny>, priority: u32) -> PyResult<CfRule> {
                 cfvos,
                 show_value: opt_bool(d, "showValue")?.or(opt_bool(d, "show_value")?),
                 reverse: opt_bool(d, "reverse")?,
+                custom: opt_bool(d, "custom")?,
+                percent: opt_bool(d, "percent")?,
             }
         }
         "cellIs" | "cell_is" => {
@@ -645,6 +653,262 @@ fn parse_cf_rule(obj: &Bound<'_, PyAny>, priority: u32) -> PyResult<CfRule> {
                 stop_if_true: opt_bool(d, "stopIfTrue")?.or(opt_bool(d, "stop_if_true")?),
             }
         }
+        "top10" | "top_10" => {
+            let rank = opt_u32(d, "rank")?.unwrap_or(10);
+            let percent = opt_bool(d, "percent")?;
+            let bottom = opt_bool(d, "bottom")?;
+            let dxf = if let Some(dx) = d.get_item("dxf")? {
+                parse_dxf(&dx)?
+            } else {
+                DxfDesc::default()
+            };
+            CfRuleKind::Top10 {
+                rank,
+                percent,
+                bottom,
+                dxf,
+                stop_if_true: opt_bool(d, "stopIfTrue")?.or(opt_bool(d, "stop_if_true")?),
+            }
+        }
+        "aboveAverage" | "above_average" => {
+            let above_average = opt_bool(d, "aboveAverage")?.or(opt_bool(d, "above_average")?);
+            let equal_average = opt_bool(d, "equalAverage")?.or(opt_bool(d, "equal_average")?);
+            let std_dev = opt_i32(d, "stdDev")?.or(opt_i32(d, "std_dev")?);
+            let dxf = if let Some(dx) = d.get_item("dxf")? {
+                parse_dxf(&dx)?
+            } else {
+                DxfDesc::default()
+            };
+            CfRuleKind::AboveAverage {
+                above_average,
+                equal_average,
+                std_dev,
+                dxf,
+                stop_if_true: opt_bool(d, "stopIfTrue")?.or(opt_bool(d, "stop_if_true")?),
+            }
+        }
+        "uniqueValues" | "unique_values" => {
+            let dxf = if let Some(dx) = d.get_item("dxf")? {
+                parse_dxf(&dx)?
+            } else {
+                DxfDesc::default()
+            };
+            CfRuleKind::UniqueValues {
+                dxf,
+                stop_if_true: opt_bool(d, "stopIfTrue")?.or(opt_bool(d, "stop_if_true")?),
+            }
+        }
+        "duplicateValues" | "duplicate_values" => {
+            let dxf = if let Some(dx) = d.get_item("dxf")? {
+                parse_dxf(&dx)?
+            } else {
+                DxfDesc::default()
+            };
+            CfRuleKind::DuplicateValues {
+                dxf,
+                stop_if_true: opt_bool(d, "stopIfTrue")?.or(opt_bool(d, "stop_if_true")?),
+            }
+        }
+        "containsText" | "contains_text" => {
+            let text = opt_str(d, "text")?.unwrap_or_default();
+            let operator = opt_str(d, "operator")?;
+            let mut formulas = Vec::new();
+            if let Some(fs) = d.get_item("formulas")? {
+                for f in fs.cast::<PyList>()?.iter() {
+                    formulas.push(f.extract::<String>()?);
+                }
+            } else if let Some(f) = d.get_item("formula")? {
+                formulas.push(f.extract()?);
+            }
+            let dxf = if let Some(dx) = d.get_item("dxf")? {
+                parse_dxf(&dx)?
+            } else {
+                DxfDesc::default()
+            };
+            CfRuleKind::ContainsText {
+                text,
+                operator,
+                formulas,
+                dxf,
+                stop_if_true: opt_bool(d, "stopIfTrue")?.or(opt_bool(d, "stop_if_true")?),
+            }
+        }
+        "notContainsText" | "not_contains_text" => {
+            let text = opt_str(d, "text")?.unwrap_or_default();
+            let operator = opt_str(d, "operator")?;
+            let mut formulas = Vec::new();
+            if let Some(fs) = d.get_item("formulas")? {
+                for f in fs.cast::<PyList>()?.iter() {
+                    formulas.push(f.extract::<String>()?);
+                }
+            } else if let Some(f) = d.get_item("formula")? {
+                formulas.push(f.extract()?);
+            }
+            let dxf = if let Some(dx) = d.get_item("dxf")? {
+                parse_dxf(&dx)?
+            } else {
+                DxfDesc::default()
+            };
+            CfRuleKind::NotContainsText {
+                text,
+                operator,
+                formulas,
+                dxf,
+                stop_if_true: opt_bool(d, "stopIfTrue")?.or(opt_bool(d, "stop_if_true")?),
+            }
+        }
+        "beginsWith" | "begins_with" => {
+            let text = opt_str(d, "text")?.unwrap_or_default();
+            let operator = opt_str(d, "operator")?;
+            let mut formulas = Vec::new();
+            if let Some(fs) = d.get_item("formulas")? {
+                for f in fs.cast::<PyList>()?.iter() {
+                    formulas.push(f.extract::<String>()?);
+                }
+            } else if let Some(f) = d.get_item("formula")? {
+                formulas.push(f.extract()?);
+            }
+            let dxf = if let Some(dx) = d.get_item("dxf")? {
+                parse_dxf(&dx)?
+            } else {
+                DxfDesc::default()
+            };
+            CfRuleKind::BeginsWith {
+                text,
+                operator,
+                formulas,
+                dxf,
+                stop_if_true: opt_bool(d, "stopIfTrue")?.or(opt_bool(d, "stop_if_true")?),
+            }
+        }
+        "endsWith" | "ends_with" => {
+            let text = opt_str(d, "text")?.unwrap_or_default();
+            let operator = opt_str(d, "operator")?;
+            let mut formulas = Vec::new();
+            if let Some(fs) = d.get_item("formulas")? {
+                for f in fs.cast::<PyList>()?.iter() {
+                    formulas.push(f.extract::<String>()?);
+                }
+            } else if let Some(f) = d.get_item("formula")? {
+                formulas.push(f.extract()?);
+            }
+            let dxf = if let Some(dx) = d.get_item("dxf")? {
+                parse_dxf(&dx)?
+            } else {
+                DxfDesc::default()
+            };
+            CfRuleKind::EndsWith {
+                text,
+                operator,
+                formulas,
+                dxf,
+                stop_if_true: opt_bool(d, "stopIfTrue")?.or(opt_bool(d, "stop_if_true")?),
+            }
+        }
+        "containsBlanks" | "contains_blanks" => {
+            let mut formulas = Vec::new();
+            if let Some(fs) = d.get_item("formulas")? {
+                for f in fs.cast::<PyList>()?.iter() {
+                    formulas.push(f.extract::<String>()?);
+                }
+            } else if let Some(f) = d.get_item("formula")? {
+                formulas.push(f.extract()?);
+            }
+            let dxf = if let Some(dx) = d.get_item("dxf")? {
+                parse_dxf(&dx)?
+            } else {
+                DxfDesc::default()
+            };
+            CfRuleKind::ContainsBlanks {
+                formulas,
+                dxf,
+                stop_if_true: opt_bool(d, "stopIfTrue")?.or(opt_bool(d, "stop_if_true")?),
+            }
+        }
+        "notContainsBlanks" | "not_contains_blanks" => {
+            let mut formulas = Vec::new();
+            if let Some(fs) = d.get_item("formulas")? {
+                for f in fs.cast::<PyList>()?.iter() {
+                    formulas.push(f.extract::<String>()?);
+                }
+            } else if let Some(f) = d.get_item("formula")? {
+                formulas.push(f.extract()?);
+            }
+            let dxf = if let Some(dx) = d.get_item("dxf")? {
+                parse_dxf(&dx)?
+            } else {
+                DxfDesc::default()
+            };
+            CfRuleKind::NotContainsBlanks {
+                formulas,
+                dxf,
+                stop_if_true: opt_bool(d, "stopIfTrue")?.or(opt_bool(d, "stop_if_true")?),
+            }
+        }
+        "containsErrors" | "contains_errors" => {
+            let mut formulas = Vec::new();
+            if let Some(fs) = d.get_item("formulas")? {
+                for f in fs.cast::<PyList>()?.iter() {
+                    formulas.push(f.extract::<String>()?);
+                }
+            } else if let Some(f) = d.get_item("formula")? {
+                formulas.push(f.extract()?);
+            }
+            let dxf = if let Some(dx) = d.get_item("dxf")? {
+                parse_dxf(&dx)?
+            } else {
+                DxfDesc::default()
+            };
+            CfRuleKind::ContainsErrors {
+                formulas,
+                dxf,
+                stop_if_true: opt_bool(d, "stopIfTrue")?.or(opt_bool(d, "stop_if_true")?),
+            }
+        }
+        "notContainsErrors" | "not_contains_errors" => {
+            let mut formulas = Vec::new();
+            if let Some(fs) = d.get_item("formulas")? {
+                for f in fs.cast::<PyList>()?.iter() {
+                    formulas.push(f.extract::<String>()?);
+                }
+            } else if let Some(f) = d.get_item("formula")? {
+                formulas.push(f.extract()?);
+            }
+            let dxf = if let Some(dx) = d.get_item("dxf")? {
+                parse_dxf(&dx)?
+            } else {
+                DxfDesc::default()
+            };
+            CfRuleKind::NotContainsErrors {
+                formulas,
+                dxf,
+                stop_if_true: opt_bool(d, "stopIfTrue")?.or(opt_bool(d, "stop_if_true")?),
+            }
+        }
+        "timePeriod" | "time_period" => {
+            let time_period = opt_str(d, "timePeriod")?
+                .or(opt_str(d, "time_period")?)
+                .unwrap_or_else(|| "today".into());
+            let mut formulas = Vec::new();
+            if let Some(fs) = d.get_item("formulas")? {
+                for f in fs.cast::<PyList>()?.iter() {
+                    formulas.push(f.extract::<String>()?);
+                }
+            } else if let Some(f) = d.get_item("formula")? {
+                formulas.push(f.extract()?);
+            }
+            let dxf = if let Some(dx) = d.get_item("dxf")? {
+                parse_dxf(&dx)?
+            } else {
+                DxfDesc::default()
+            };
+            CfRuleKind::TimePeriod {
+                time_period,
+                formulas,
+                dxf,
+                stop_if_true: opt_bool(d, "stopIfTrue")?.or(opt_bool(d, "stop_if_true")?),
+            }
+        }
         other => {
             return Err(PyValueError::new_err(format!(
                 "unknown CF rule type {other:?}"
@@ -656,6 +920,85 @@ fn parse_cf_rule(obj: &Bound<'_, PyAny>, priority: u32) -> PyResult<CfRule> {
         priority: prio,
         dxf_id: None,
     })
+}
+
+fn fill_implied_formulas(sqref: &str, rules: &mut [CfRule]) -> PyResult<()> {
+    let anchor = sqref.split_whitespace().next().unwrap_or("A1");
+    let top_left = anchor.split(':').next().unwrap_or("A1");
+    let cell_ref = top_left.split('!').last().unwrap_or("A1");
+
+    for rule in rules.iter_mut() {
+        match &mut rule.kind {
+            CfRuleKind::ContainsText { text, formulas, .. } => {
+                if formulas.is_empty() {
+                    let escaped = text.replace('"', "\"\"");
+                    formulas.push(format!("NOT(ISERROR(SEARCH(\"{escaped}\",{cell_ref})))"));
+                }
+            }
+            CfRuleKind::NotContainsText { text, formulas, .. } => {
+                if formulas.is_empty() {
+                    let escaped = text.replace('"', "\"\"");
+                    formulas.push(format!("ISERROR(SEARCH(\"{escaped}\",{cell_ref}))"));
+                }
+            }
+            CfRuleKind::BeginsWith { text, formulas, .. } => {
+                if formulas.is_empty() {
+                    let escaped = text.replace('"', "\"\"");
+                    let len = text.chars().count();
+                    formulas.push(format!("LEFT({cell_ref},{len})=\"{escaped}\""));
+                }
+            }
+            CfRuleKind::EndsWith { text, formulas, .. } => {
+                if formulas.is_empty() {
+                    let escaped = text.replace('"', "\"\"");
+                    let len = text.chars().count();
+                    formulas.push(format!("RIGHT({cell_ref},{len})=\"{escaped}\""));
+                }
+            }
+            CfRuleKind::ContainsBlanks { formulas, .. } => {
+                if formulas.is_empty() {
+                    formulas.push(format!("ISBLANK({cell_ref})"));
+                }
+            }
+            CfRuleKind::NotContainsBlanks { formulas, .. } => {
+                if formulas.is_empty() {
+                    formulas.push(format!("NOT(ISBLANK({cell_ref}))"));
+                }
+            }
+            CfRuleKind::ContainsErrors { formulas, .. } => {
+                if formulas.is_empty() {
+                    formulas.push(format!("ISERROR({cell_ref})"));
+                }
+            }
+            CfRuleKind::NotContainsErrors { formulas, .. } => {
+                if formulas.is_empty() {
+                    formulas.push(format!("NOT(ISERROR({cell_ref}))"));
+                }
+            }
+            CfRuleKind::TimePeriod { time_period, formulas, .. } => {
+                if formulas.is_empty() {
+                    let f = match time_period.to_ascii_lowercase().as_str() {
+                        "yesterday" => format!("FLOOR({cell_ref},1)=TODAY()-1"),
+                        "today" => format!("FLOOR({cell_ref},1)=TODAY()"),
+                        "tomorrow" => format!("FLOOR({cell_ref},1)=TODAY()+1"),
+                        "last7days" => format!("AND(TODAY()-FLOOR({cell_ref},1)<=6,FLOOR({cell_ref},1)<=TODAY())"),
+                        "lastweek" => format!("AND(TODAY()-ROUNDDOWN({cell_ref},0)>=WEEKDAY(TODAY()),TODAY()-ROUNDDOWN({cell_ref},0)<WEEKDAY(TODAY())+7)"),
+                        "thisweek" => format!("AND(TODAY()-ROUNDDOWN({cell_ref},0)<=WEEKDAY(TODAY())-1,TODAY()-ROUNDDOWN({cell_ref},0)>=1-WEEKDAY(TODAY()))"),
+                        "nextweek" => format!("AND(TODAY()-ROUNDDOWN({cell_ref},0)<=9-WEEKDAY(TODAY()),TODAY()-ROUNDDOWN({cell_ref},0)>=2-WEEKDAY(TODAY()))"),
+                        "lastmonth" => format!("AND(MONTH(ROUNDDOWN({cell_ref},0))=MONTH(EDATE(TODAY(),-1)),YEAR(ROUNDDOWN({cell_ref},0))=YEAR(EDATE(TODAY(),-1)))"),
+                        "thismonth" => format!("AND(MONTH(ROUNDDOWN({cell_ref},0))=MONTH(TODAY()),YEAR(ROUNDDOWN({cell_ref},0))=YEAR(TODAY()))"),
+                        "nextmonth" => format!("AND(MONTH(ROUNDDOWN({cell_ref},0))=MONTH(EDATE(TODAY(),1)),YEAR(ROUNDDOWN({cell_ref},0))=YEAR(EDATE(TODAY(),1)))"),
+                        unknown => {
+                            return Err(PyValueError::new_err(format!("unknown time_period: {unknown}")));
+                        }
+                    };
+                    formulas.push(f);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn parse_conditional_formatting(obj: &Bound<'_, PyAny>) -> PyResult<Vec<ConditionalFormatting>> {
@@ -679,6 +1022,7 @@ fn parse_conditional_formatting(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Conditio
             // single rule fields on the CF dict itself
             rules.push(parse_cf_rule(&item, 1)?);
         }
+        fill_implied_formulas(&sqref, &mut rules)?;
         out.push(ConditionalFormatting { sqref, rules });
     }
     Ok(out)
@@ -941,11 +1285,46 @@ fn py_to_cell_value_flagged(
             return Ok(CellValue::DateSerial(date_to_serial(y, m, d)));
         }
     }
-    // fallback str
-    if let Ok(s) = obj.str().map(|s| s.to_string()) {
-        return Ok(CellValue::Str(s));
+    // datetime.time via attributes hour, minute, second (without year)
+    if obj.getattr("year").is_err() {
+        if let (Ok(hour), Ok(minute), Ok(second)) = (
+            obj.getattr("hour").and_then(|x| x.extract::<u32>()),
+            obj.getattr("minute").and_then(|x| x.extract::<u32>()),
+            obj.getattr("second").and_then(|x| x.extract::<u32>()),
+        ) {
+            let micros = obj
+                .getattr("microsecond")
+                .and_then(|x| x.extract::<u32>())
+                .unwrap_or(0);
+            if let Some(f) = style_flag.as_deref_mut() {
+                *f = true;
+            }
+            let serial = (hour as f64 * 3600.0
+                + minute as f64 * 60.0
+                + second as f64
+                + micros as f64 / 1_000_000.0)
+                / 86400.0;
+            return Ok(CellValue::Time(serial));
+        }
     }
-    Err(PyValueError::new_err(format!(
+    // datetime.timedelta via days, seconds (without year)
+    if obj.getattr("year").is_err() {
+        if let (Ok(days), Ok(seconds)) = (
+            obj.getattr("days").and_then(|x| x.extract::<i64>()),
+            obj.getattr("seconds").and_then(|x| x.extract::<i64>()),
+        ) {
+            let micros = obj
+                .getattr("microseconds")
+                .and_then(|x| x.extract::<i64>())
+                .unwrap_or(0);
+            if let Some(f) = style_flag.as_deref_mut() {
+                *f = true;
+            }
+            let serial = days as f64 + (seconds as f64 + micros as f64 / 1_000_000.0) / 86400.0;
+            return Ok(CellValue::Duration(serial));
+        }
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
         "unsupported cell value type: {}",
         obj.get_type().name()?
     )))
@@ -1542,47 +1921,47 @@ fn parse_sheet_dict(sheet_obj: &Bound<'_, PyAny>, opts: &WriteOptions) -> PyResu
         }
     }
 
-    // rows as list of lists (row-major alternative)
-    if let Some(rows) = d.get_item("rows")? {
+    // rows as list or iterator of row sequences (including rows_iter)
+    if let Some(rows) = d.get_item("rows")?.or(d.get_item("rows_iter")?) {
         if !rows.is_none() {
-            let row_list = rows
-                .cast::<PyList>()
-                .map_err(|_| PyValueError::new_err("rows must be a list of row sequences"))?;
-            let nrows = row_list.len();
-            if nrows > 1048576 {
-                return Err(PyValueError::new_err(format!(
-                    "row count {nrows} exceeds Excel limit of 1048576"
-                )));
-            }
-            for (ri, row_obj) in row_list.iter().enumerate() {
-                let cells = row_obj
-                    .cast::<PyList>()
-                    .map_err(|_| PyValueError::new_err("each row must be a list of cell values"))?;
-                // Width check is fused into the main pass; a separate pre-pass would
-                // walk every row twice on the hottest write path.
-                if cells.len() > 16384 {
-                    return Err(PyValueError::new_err(format!(
-                        "rows[{ri}] has {} cells, exceeding Excel's column limit of 16384",
-                        cells.len()
-                    )));
+            let mut ri: u32 = 1;
+            let iter = rows.try_iter().map_err(|_| {
+                PyValueError::new_err("rows / rows_iter must be an iterable of row sequences")
+            })?;
+            for row_obj in iter {
+                let row_item = row_obj?;
+                if ri > 1048576 {
+                    return Err(PyValueError::new_err(
+                        "row count exceeds Excel limit of 1048576",
+                    ));
                 }
-                let mut row = Row::new((ri as u32) + 1);
-                for (ci, cell) in cells.iter().enumerate() {
+                let mut row = Row::new(ri);
+                let cell_iter = row_item.try_iter().map_err(|_| {
+                    PyValueError::new_err("each row must be an iterable of cell values")
+                })?;
+                for (ci, cell_res) in cell_iter.enumerate() {
+                    let cell = cell_res?;
+                    if ci >= 16384 {
+                        return Err(PyValueError::new_err(format!(
+                            "row {ri} exceeds Excel's column limit of 16384"
+                        )));
+                    }
                     let val =
                         py_to_cell_value_flagged(&cell, opts.date1904, Some(&mut style_work))?;
                     let wrap_style = extract_wrapper_style(&cell)?;
                     if !matches!(val, CellValue::Empty) || wrap_style.is_some() {
-                        let mut cell = Cell::new((ci as u32) + 1, val);
+                        let mut cell_rec = Cell::new((ci as u32) + 1, val);
                         if wrap_style.is_some() {
                             style_work = true;
-                            cell.style_desc = wrap_style;
+                            cell_rec.style_desc = wrap_style;
                         }
-                        row.cells.push(cell);
+                        row.cells.push(cell_rec);
                     }
                 }
                 if !row.cells.is_empty() {
                     sheet.rows.push(row);
                 }
+                ri += 1;
             }
         }
     }
@@ -2746,6 +3125,7 @@ fn build_workbook_from_py(
     string_mode: &str,
     emit_cached_values: bool,
     date1904: bool,
+    date_iso: bool,
     features: Option<&Bound<'_, PyAny>>,
     active_tab: u32,
     named_styles: Option<&Bound<'_, PyAny>>,
@@ -2762,6 +3142,7 @@ fn build_workbook_from_py(
         string_mode: parse_string_mode(string_mode)?,
         emit_cached_values,
         date1904,
+        date_iso,
         features: parse_write_features(features)?,
         auto_sst_threshold: AUTO_SST_THRESHOLD,
     };
@@ -2947,6 +3328,8 @@ fn build_workbook_from_py(
 ///     Emit formula cached ``<v>`` when supplied (default True).
 /// date1904 : bool
 ///     Workbook 1904 date system flag (default False).
+/// date_iso : bool
+///     Write date/datetime values as ISO 8601 strings with type "d" (default False).
 /// features : str | list[str] | None
 ///     Write feature flags; ``"core"`` | ``"all"`` | ``"styles"`` or list.
 /// active_tab : int
@@ -2961,6 +3344,7 @@ fn build_workbook_from_py(
     string_mode = "inline",
     emit_cached_values = true,
     date1904 = false,
+    date_iso = false,
     features = None,
     active_tab = 0,
     named_styles = None,
@@ -2981,6 +3365,7 @@ pub fn py_write_excel_turbo(
     string_mode: &str,
     emit_cached_values: bool,
     date1904: bool,
+    date_iso: bool,
     features: Option<&Bound<'_, PyAny>>,
     active_tab: u32,
     named_styles: Option<&Bound<'_, PyAny>>,
@@ -2998,6 +3383,7 @@ pub fn py_write_excel_turbo(
         string_mode,
         emit_cached_values,
         date1904,
+        date_iso,
         features,
         active_tab,
         named_styles,
@@ -3023,6 +3409,7 @@ pub fn py_write_excel_turbo(
     string_mode = "inline",
     emit_cached_values = true,
     date1904 = false,
+    date_iso = false,
     features = None,
     active_tab = 0,
     named_styles = None,
@@ -3043,6 +3430,7 @@ pub fn py_write_excel_turbo_stream(
     string_mode: &str,
     emit_cached_values: bool,
     date1904: bool,
+    date_iso: bool,
     features: Option<&Bound<'_, PyAny>>,
     active_tab: u32,
     named_styles: Option<&Bound<'_, PyAny>>,
@@ -3060,6 +3448,7 @@ pub fn py_write_excel_turbo_stream(
         string_mode,
         emit_cached_values,
         date1904,
+        date_iso,
         features,
         active_tab,
         named_styles,
@@ -3088,6 +3477,7 @@ pub fn py_write_excel_turbo_stream(
     string_mode = "inline",
     emit_cached_values = true,
     date1904 = false,
+    date_iso = false,
     features = None,
     active_tab = 0,
     named_styles = None,
@@ -3107,6 +3497,7 @@ pub fn py_write_excel_turbo_bytes<'py>(
     string_mode: &str,
     emit_cached_values: bool,
     date1904: bool,
+    date_iso: bool,
     features: Option<&Bound<'_, PyAny>>,
     active_tab: u32,
     named_styles: Option<&Bound<'_, PyAny>>,
@@ -3124,6 +3515,7 @@ pub fn py_write_excel_turbo_bytes<'py>(
         string_mode,
         emit_cached_values,
         date1904,
+        date_iso,
         features,
         active_tab,
         named_styles,
@@ -3148,19 +3540,536 @@ fn _use_turbo_err(e: TurboError) -> PyErr {
     turbo_err_to_py(e)
 }
 
+#[pyfunction(name = "get_column_letter")]
+pub fn py_get_column_letter(col: u32) -> PyResult<String> {
+    if col == 0 || col > MAX_GRID_COLS {
+        return Err(PyValueError::new_err(format!(
+            "column index {col} is out of bounds (must be 1..={MAX_GRID_COLS})"
+        )));
+    }
+    let mut num = col;
+    let mut s = Vec::new();
+    while num > 0 {
+        let rem = (num - 1) % 26;
+        s.push((b'A' + rem as u8) as char);
+        num = (num - 1) / 26;
+    }
+    s.reverse();
+    Ok(s.into_iter().collect())
+}
+
+#[pyfunction(name = "column_index_from_string")]
+pub fn py_column_index_from_string(s: &str) -> PyResult<u32> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() || trimmed.len() > 3 || !trimmed.chars().all(|c| c.is_ascii_alphabetic()) {
+        return Err(PyValueError::new_err(format!(
+            "invalid column coordinate string: '{s}'"
+        )));
+    }
+    let mut col: u32 = 0;
+    for b in trimmed.bytes() {
+        let v = (b.to_ascii_uppercase() - b'A' + 1) as u32;
+        col = col * 26 + v;
+    }
+    if col == 0 || col > MAX_GRID_COLS {
+        return Err(PyValueError::new_err(format!(
+            "column coordinate '{s}' resolves to index {col} out of bounds (1..={MAX_GRID_COLS})"
+        )));
+    }
+    Ok(col)
+}
+
+#[pyfunction(name = "coordinate_to_tuple")]
+pub fn py_coordinate_to_tuple(coord: &str) -> PyResult<(u32, u32)> {
+    let Some((r1, c1, _r2, _c2)) = parse_ref_range_strict(coord.as_bytes()) else {
+        return Err(PyValueError::new_err(format!(
+            "invalid cell coordinate: '{coord}'"
+        )));
+    };
+    Ok((r1, c1))
+}
+
+#[pyfunction(name = "range_boundaries")]
+pub fn py_range_boundaries(range_str: &str) -> PyResult<(u32, u32, u32, u32)> {
+    let Some((r1, c1, r2, c2)) = parse_ref_range_strict(range_str.as_bytes()) else {
+        return Err(PyValueError::new_err(format!(
+            "invalid range coordinate: '{range_str}'"
+        )));
+    };
+    Ok((c1, r1, c2, r2))
+}
+
+#[pyfunction(name = "quote_sheetname")]
+pub fn py_quote_sheetname(name: &str) -> String {
+    let needs_quote = name.contains(' ')
+        || name.contains('\'')
+        || name.contains('!')
+        || name.contains('-')
+        || name.contains('+')
+        || (!name.is_empty() && name.chars().all(|c| c.is_ascii_digit()));
+    if needs_quote {
+        let escaped = name.replace('\'', "''");
+        format!("'{escaped}'")
+    } else {
+        name.to_string()
+    }
+}
+
+fn original_sheet_locked_for_overlay(ov: &WorkbookOverlay, sheet_name: &str) -> TurboResult<Option<Sheet>> {
+    let Some(target) = ov.archive_map.sheet_name_map.get(sheet_name) else {
+        return Ok(None);
+    };
+    let Some(xml) = read_entry(&ov.archive_map.source_bytes, target)? else {
+        return Ok(None);
+    };
+    let sheet = hydrate_sheet_from_xml(&xml, &ov.archive_map.shared_strings)?;
+    Ok(Some(sheet))
+}
+
+fn cell_value_locked_for_overlay(
+    ov: &WorkbookOverlay,
+    original: Option<&Sheet>,
+    sheet_name: &str,
+    row: u32,
+    col: u32,
+) -> TurboResult<CellValue> {
+    if let Some(so) = ov.sheet_overlays.get(sheet_name) {
+        if let Some(v) = so.modified_cells.get(&(row, col)) {
+            return Ok(v.clone());
+        }
+    }
+    if let Some(sheet) = original {
+        for r in &sheet.rows {
+            if r.row != row {
+                continue;
+            }
+            for c in &r.cells {
+                if c.col == col {
+                    return Ok(c.value.clone());
+                }
+            }
+        }
+    }
+    Ok(CellValue::Empty)
+}
+
+#[pyclass(name = "Cell")]
+pub struct PyCell {
+    sheet_name: String,
+    overlay: Arc<std::sync::Mutex<WorkbookOverlay>>,
+    row: u32,
+    col: u32,
+}
+
+#[pymethods]
+impl PyCell {
+    #[getter]
+    fn row(&self) -> u32 {
+        self.row
+    }
+
+    #[getter]
+    fn column(&self) -> u32 {
+        self.col
+    }
+
+    #[getter]
+    fn coordinate(&self) -> String {
+        let col_letter = py_get_column_letter(self.col).unwrap_or_else(|_| "A".into());
+        format!("{}{}", col_letter, self.row)
+    }
+
+    #[getter]
+    fn value<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
+            if let Some(v) = so.modified_cells.get(&(self.row, self.col)) {
+                return cell_value_to_py(py, v);
+            }
+        }
+        let hydrated = ov
+            .hydrated_sheet(&self.sheet_name)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        drop(ov);
+
+        if let Some(sheet) = hydrated {
+            if let Ok(idx) = sheet.rows.binary_search_by(|r| r.row.cmp(&self.row)) {
+                let r = &sheet.rows[idx];
+                if let Ok(cidx) = r.cells.binary_search_by(|c| c.col.cmp(&self.col)) {
+                    return cell_value_to_py(py, &r.cells[cidx].value);
+                }
+            }
+        }
+        cell_value_to_py(py, &CellValue::Empty)
+    }
+
+    #[setter]
+    fn set_value(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let cell_val = py_to_cell_value_flagged(value, false, None)?;
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        ov.set_cell(&self.sheet_name, self.row, self.col, cell_val);
+        Ok(())
+    }
+
+    #[pyo3(signature = (row = 0, column = 0))]
+    fn offset(&self, row: i64, column: i64) -> PyResult<PyCell> {
+        let new_row = self.row as i64 + row;
+        let new_col = self.col as i64 + column;
+        if new_row < 1 || new_row > MAX_GRID_ROWS as i64 || new_col < 1 || new_col > MAX_GRID_COLS as i64 {
+            return Err(PyValueError::new_err(format!(
+                "offset result ({new_row}, {new_col}) is out of grid (rows 1..={MAX_GRID_ROWS}, cols 1..={MAX_GRID_COLS})"
+            )));
+        }
+        Ok(PyCell {
+            sheet_name: self.sheet_name.clone(),
+            overlay: Arc::clone(&self.overlay),
+            row: new_row as u32,
+            col: new_col as u32,
+        })
+    }
+
+    #[getter]
+    fn number_format(&self) -> Option<String> {
+        let ov = self.overlay.lock().ok()?;
+        if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
+            if let Some(desc) = so.modified_styles.get(&(self.row, self.col)) {
+                return desc.num_fmt.clone();
+            }
+        }
+        None
+    }
+
+    #[setter]
+    fn set_number_format(&self, fmt: Option<&str>) -> PyResult<()> {
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let desc = so.modified_styles.entry((self.row, self.col)).or_default();
+        desc.num_fmt = fmt.map(|s| s.to_string());
+        so.is_dirty = true;
+        Ok(())
+    }
+
+    #[getter]
+    fn hyperlink(&self) -> Option<String> {
+        None
+    }
+
+    #[setter]
+    fn set_hyperlink(&self, _link: Option<&str>) -> PyResult<()> {
+        Err(pyo3::exceptions::PyNotImplementedError::new_err(
+            "hyperlink editing is not supported yet",
+        ))
+    }
+
+    #[getter]
+    fn comment(&self) -> Option<String> {
+        None
+    }
+
+    #[setter]
+    fn set_comment(&self, _comment: Option<&str>) -> PyResult<()> {
+        Err(pyo3::exceptions::PyNotImplementedError::new_err(
+            "comment editing is not supported yet",
+        ))
+    }
+}
+
+#[pyclass(name = "SheetRowIter")]
+pub struct PySheetRowIter {
+    sheet_name: String,
+    overlay: Arc<std::sync::Mutex<WorkbookOverlay>>,
+    r1: u32,
+    r2: u32,
+    c1: u32,
+    c2: u32,
+    cursor: u32,
+    values_only: bool,
+    col_major: bool,
+}
+
+#[pymethods]
+impl PySheetRowIter {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__<'py>(&mut self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        let max_idx = if self.col_major { self.c2 } else { self.r2 };
+        if self.cursor > max_idx {
+            return Ok(None);
+        }
+        let current = self.cursor;
+        self.cursor += 1;
+
+        let mut ov = self.overlay.lock().map_err(|e| {
+            PyValueError::new_err(format!("lock error: {e}"))
+        })?;
+        let hydrated = ov.hydrated_sheet(&self.sheet_name).map_err(|e| {
+            PyValueError::new_err(format!("hydration error: {e}"))
+        })?;
+
+        if !self.col_major {
+            let row = current;
+            let mut items = Vec::with_capacity((self.c2.saturating_sub(self.c1) + 1) as usize);
+            for col in self.c1..=self.c2 {
+                if self.values_only {
+                    let mut val = CellValue::Empty;
+                    if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
+                        if let Some(v) = so.modified_cells.get(&(row, col)) {
+                            val = v.clone();
+                        }
+                    }
+                    if matches!(val, CellValue::Empty) {
+                        if let Some(sheet) = &hydrated {
+                            if let Ok(idx) = sheet.rows.binary_search_by(|r| r.row.cmp(&row)) {
+                                let r = &sheet.rows[idx];
+                                if let Ok(cidx) = r.cells.binary_search_by(|c| c.col.cmp(&col)) {
+                                    val = r.cells[cidx].value.clone();
+                                }
+                            }
+                        }
+                    }
+                    items.push(cell_value_to_py(py, &val)?);
+                } else {
+                    let cell = PyCell {
+                        sheet_name: self.sheet_name.clone(),
+                        overlay: Arc::clone(&self.overlay),
+                        row,
+                        col,
+                    };
+                    use pyo3::IntoPyObjectExt;
+                    items.push(cell.into_bound_py_any(py)?);
+                }
+            }
+            let tuple = PyTuple::new(py, items)?;
+            Ok(Some(tuple.into_any()))
+        } else {
+            let col = current;
+            let mut items = Vec::with_capacity((self.r2.saturating_sub(self.r1) + 1) as usize);
+            for row in self.r1..=self.r2 {
+                if self.values_only {
+                    let mut val = CellValue::Empty;
+                    if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
+                        if let Some(v) = so.modified_cells.get(&(row, col)) {
+                            val = v.clone();
+                        }
+                    }
+                    if matches!(val, CellValue::Empty) {
+                        if let Some(sheet) = &hydrated {
+                            if let Ok(idx) = sheet.rows.binary_search_by(|r| r.row.cmp(&row)) {
+                                let r = &sheet.rows[idx];
+                                if let Ok(cidx) = r.cells.binary_search_by(|c| c.col.cmp(&col)) {
+                                    val = r.cells[cidx].value.clone();
+                                }
+                            }
+                        }
+                    }
+                    items.push(cell_value_to_py(py, &val)?);
+                } else {
+                    let cell = PyCell {
+                        sheet_name: self.sheet_name.clone(),
+                        overlay: Arc::clone(&self.overlay),
+                        row,
+                        col,
+                    };
+                    use pyo3::IntoPyObjectExt;
+                    items.push(cell.into_bound_py_any(py)?);
+                }
+            }
+            let tuple = PyTuple::new(py, items)?;
+            Ok(Some(tuple.into_any()))
+        }
+    }
+}
+
 #[pyclass(name = "EditableSheet")]
 pub struct PyEditableSheet {
     sheet_name: String,
     overlay: Arc<std::sync::Mutex<WorkbookOverlay>>,
-    /// Hydrated original worksheet XML, computed at most ONCE per handle.
-    /// The archive source is immutable (edits only touch the overlay), so a
-    /// cached original stays valid for the handle's lifetime; pending
-    /// `modified_cells` shadow it at read time.
     original: OnceLock<Option<Sheet>>,
 }
 
 #[pymethods]
 impl PyEditableSheet {
+    #[getter]
+    fn title(&self) -> String {
+        self.sheet_name.clone()
+    }
+
+    #[setter]
+    fn set_title(&mut self, new_title: &str) -> PyResult<()> {
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let existing = ov.sheet_names();
+        let other_names: Vec<String> = existing.into_iter().filter(|n| n != &self.sheet_name).collect();
+        validate_sheet_name(new_title, &other_names).map_err(turbo_err_to_py)?;
+        ov.rename_sheet(&self.sheet_name, new_title).map_err(turbo_err_to_py)?;
+        self.sheet_name = new_title.to_string();
+        Ok(())
+    }
+
+    #[getter]
+    fn min_row(&self) -> PyResult<u32> {
+        let (min_r, _, _, _) = self.compute_bounds()?;
+        Ok(min_r)
+    }
+
+    #[getter]
+    fn max_row(&self) -> PyResult<u32> {
+        let (_, max_r, _, _) = self.compute_bounds()?;
+        Ok(max_r)
+    }
+
+    #[getter]
+    fn min_column(&self) -> PyResult<u32> {
+        let (_, _, min_c, _) = self.compute_bounds()?;
+        Ok(min_c)
+    }
+
+    #[getter]
+    fn max_column(&self) -> PyResult<u32> {
+        let (_, _, _, max_c) = self.compute_bounds()?;
+        Ok(max_c)
+    }
+
+    #[getter]
+    fn dimensions(&self) -> PyResult<String> {
+        let (min_r, max_r, min_c, max_c) = self.compute_bounds()?;
+        if max_r == 0 || max_c == 0 {
+            return Ok("A1:A1".into());
+        }
+        let c1 = py_get_column_letter(min_c)?;
+        let c2 = py_get_column_letter(max_c)?;
+        Ok(format!("{c1}{min_r}:{c2}{max_r}"))
+    }
+
+    fn append(&self, iterable: &Bound<'_, PyAny>) -> PyResult<()> {
+        let (_, max_r, _, _) = self.compute_bounds()?;
+        let append_row = if max_r == 0 { 1 } else { max_r + 1 };
+        let items: Vec<Bound<'_, PyAny>> = if let Ok(it) = iterable.try_iter() {
+            let mut list = Vec::new();
+            for elem in it {
+                list.push(elem?);
+            }
+            list
+        } else {
+            return Err(PyTypeError::new_err("append argument must be iterable"));
+        };
+        let mut style_work = false;
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        for (i, item) in items.iter().enumerate() {
+            let col = (i + 1) as u32;
+            let val = py_to_cell_value_flagged(item, false, Some(&mut style_work))?;
+            let wrap_style = extract_wrapper_style(item)?;
+            ov.set_cell(&self.sheet_name, append_row, col, val);
+            if let Some(desc) = wrap_style {
+                ov.set_cell_style(&self.sheet_name, append_row, col, *desc);
+            }
+        }
+        Ok(())
+    }
+
+    #[pyo3(signature = (row, column, value = None))]
+    fn cell(&self, row: u32, column: u32, value: Option<&Bound<'_, PyAny>>) -> PyResult<PyCell> {
+        if row == 0 || column == 0 || row > MAX_GRID_ROWS || column > MAX_GRID_COLS {
+            return Err(PyValueError::new_err(format!(
+                "cell: ({row}, {column}) is out of grid (rows 1..={MAX_GRID_ROWS}, columns 1..={MAX_GRID_COLS})"
+            )));
+        }
+        if let Some(v) = value {
+            let mut style_work = false;
+            let cell_val = py_to_cell_value_flagged(v, false, Some(&mut style_work))?;
+            let wrap_style = extract_wrapper_style(v)?;
+            let mut ov = self
+                .overlay
+                .lock()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            ov.set_cell(&self.sheet_name, row, column, cell_val);
+            if let Some(desc) = wrap_style {
+                ov.set_cell_style(&self.sheet_name, row, column, *desc);
+            }
+        }
+        Ok(PyCell {
+            sheet_name: self.sheet_name.clone(),
+            overlay: Arc::clone(&self.overlay),
+            row,
+            col: column,
+        })
+    }
+
+    #[pyo3(signature = (min_row = None, max_row = None, min_col = None, max_col = None, values_only = false))]
+    fn iter_rows(
+        &self,
+        min_row: Option<u32>,
+        max_row: Option<u32>,
+        min_col: Option<u32>,
+        max_col: Option<u32>,
+        values_only: bool,
+    ) -> PyResult<PySheetRowIter> {
+        let (b_min_r, b_max_r, b_min_c, b_max_c) = self.compute_bounds()?;
+        let r1 = min_row.unwrap_or(b_min_r.max(1));
+        let r2 = max_row.unwrap_or(b_max_r.max(r1));
+        let c1 = min_col.unwrap_or(b_min_c.max(1));
+        let c2 = max_col.unwrap_or(b_max_c.max(c1));
+        Ok(PySheetRowIter {
+            sheet_name: self.sheet_name.clone(),
+            overlay: Arc::clone(&self.overlay),
+            r1,
+            r2,
+            c1,
+            c2,
+            cursor: r1,
+            values_only,
+            col_major: false,
+        })
+    }
+
+    #[pyo3(signature = (min_row = None, max_row = None, min_col = None, max_col = None, values_only = false))]
+    fn iter_cols(
+        &self,
+        min_row: Option<u32>,
+        max_row: Option<u32>,
+        min_col: Option<u32>,
+        max_col: Option<u32>,
+        values_only: bool,
+    ) -> PyResult<PySheetRowIter> {
+        let (b_min_r, b_max_r, b_min_c, b_max_c) = self.compute_bounds()?;
+        let r1 = min_row.unwrap_or(b_min_r.max(1));
+        let r2 = max_row.unwrap_or(b_max_r.max(r1));
+        let c1 = min_col.unwrap_or(b_min_c.max(1));
+        let c2 = max_col.unwrap_or(b_max_c.max(c1));
+        Ok(PySheetRowIter {
+            sheet_name: self.sheet_name.clone(),
+            overlay: Arc::clone(&self.overlay),
+            r1,
+            r2,
+            c1,
+            c2,
+            cursor: c1,
+            values_only,
+            col_major: true,
+        })
+    }
+
+    #[getter]
+    fn values(&self) -> PyResult<PySheetRowIter> {
+        self.iter_rows(None, None, None, None, true)
+    }
+
     #[pyo3(name = "set_cell")]
     fn py_set_cell(&self, row: u32, col: u32, value: &Bound<'_, PyAny>) -> PyResult<()> {
         if row == 0 || col == 0 || row > MAX_GRID_ROWS || col > MAX_GRID_COLS {
@@ -3225,9 +4134,6 @@ impl PyEditableSheet {
         cols: i64,
         translate: bool,
     ) -> PyResult<()> {
-        // Parse "B2:D4" (or "B2") into 1-based inclusive corners. `$` markers
-        // are tolerated in valid positions and reversed corners are normalized;
-        // a malformed or out-of-grid range fails immediately with a ValueError.
         let Some((r1, c1, r2, c2)) = parse_ref_range_strict(range_string.as_bytes()) else {
             return Err(PyValueError::new_err(format!(
                 "move_range: '{range_string}' is not a valid A1 range"
@@ -3273,10 +4179,6 @@ impl PyEditableSheet {
         Ok(())
     }
 
-    /// `ws["A1"]` → the scalar at that cell; `ws["A1:B2"]` → row-major
-    /// `list[list[scalar]]`. Direct edits (set_cell / range set) shadow the
-    /// original XML immediately; queued insert/delete/move operations
-    /// materialize at `save()` and are not reflected here.
     fn __getitem__<'py>(&self, py: Python<'py>, key: &str) -> PyResult<Bound<'py, PyAny>> {
         let Some((r1, c1, r2, c2)) = parse_ref_range_strict(key.as_bytes()) else {
             return Err(PyValueError::new_err(format!(
@@ -3287,9 +4189,6 @@ impl PyEditableSheet {
             .overlay
             .lock()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        // Hydrate the original worksheet XML at most ONCE per handle (cached
-        // in `self.original`); pending direct edits in `modified_cells` shadow
-        // the hydrated original per cell.
         let original = self
             .original_sheet_locked(&ov)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -3313,9 +4212,6 @@ impl PyEditableSheet {
         Ok(PyList::new(py, rows)?.into_any())
     }
 
-    /// `ws["A1"] = v` sets a single cell; `ws["A1:B2"] = [[…],[…]]` sets a
-    /// rectangular range (exact dimensions, validated and converted before any
-    /// edit is recorded so a bad value leaves no partial writes).
     fn __setitem__(&self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let Some((r1, c1, r2, c2)) = parse_ref_range_strict(key.as_bytes()) else {
             return Err(PyValueError::new_err(format!(
@@ -3348,7 +4244,51 @@ impl PyEditableSheet {
 }
 
 impl PyEditableSheet {
-    /// Lock the shared overlay and record a mutation (all-or-nothing at save).
+    fn compute_bounds(&self) -> PyResult<(u32, u32, u32, u32)> {
+        let ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let orig = self
+            .original_sheet_locked(&ov)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        let mut min_r = u32::MAX;
+        let mut max_r = 0u32;
+        let mut min_c = u32::MAX;
+        let mut max_c = 0u32;
+
+        if let Some(sheet) = orig {
+            for row in &sheet.rows {
+                for cell in &row.cells {
+                    if !matches!(cell.value, CellValue::Empty) {
+                        min_r = min_r.min(row.row);
+                        max_r = max_r.max(row.row);
+                        min_c = min_c.min(cell.col);
+                        max_c = max_c.max(cell.col);
+                    }
+                }
+            }
+        }
+
+        if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
+            for (&(r, c), val) in &so.modified_cells {
+                if !matches!(val, CellValue::Empty) {
+                    min_r = min_r.min(r);
+                    max_r = max_r.max(r);
+                    min_c = min_c.min(c);
+                    max_c = max_c.max(c);
+                }
+            }
+        }
+
+        if min_r == u32::MAX {
+            Ok((1, 0, 1, 0))
+        } else {
+            Ok((min_r, max_r, min_c, max_c))
+        }
+    }
+
     fn record(&self, f: impl FnOnce(&mut WorkbookOverlay)) -> PyResult<()> {
         let mut ov = self
             .overlay
@@ -3358,11 +4298,6 @@ impl PyEditableSheet {
         Ok(())
     }
 
-    /// Hydrate the original worksheet XML into a `Sheet` at most ONCE per
-    /// handle, so repeated get/range calls do not re-read, inflate, or re-
-    /// hydrate the part. `None` when the sheet is absent from the archive
-    /// (every cell then resolves to `Empty`). The returned reference is tied
-    /// to `self` (the cache); the caller holds the overlay mutex.
     fn original_sheet_locked(&self, ov: &WorkbookOverlay) -> TurboResult<Option<&Sheet>> {
         if let Some(cached) = self.original.get() {
             return Ok(cached.as_ref());
@@ -3376,18 +4311,10 @@ impl PyEditableSheet {
             return Ok(None);
         };
         let sheet = hydrate_sheet_from_xml(&xml, &ov.archive_map.shared_strings)?;
-        // Only populate the cache on success; a read/hydration error leaves
-        // the cache empty so a later call may retry.
         let _ = self.original.set(Some(sheet));
         Ok(self.original.get().and_then(Option::as_ref))
     }
 
-    /// Resolve the effective value at 1-based `(row, col)`: a pending direct
-    /// edit shadows the hydrated original immediately; otherwise the original
-    /// cell value is read from the pre-hydrated `original` sheet (may be
-    /// `None`, meaning the archive sheet is absent). Queued insert/delete/move
-    /// ops materialize at save and are not reflected here (documented in the
-    /// stub).
     fn cell_value_locked(
         &self,
         ov: &WorkbookOverlay,
@@ -3422,6 +4349,22 @@ fn cell_value_to_py<'py>(py: Python<'py>, v: &CellValue) -> PyResult<Bound<'py, 
     Ok(match v {
         CellValue::Empty => py.None().into_bound(py),
         CellValue::Number(n) | CellValue::DateSerial(n) => n.into_bound_py_any(py)?,
+        CellValue::Time(t) => {
+            let total_secs = (t * 86400.0).round() as i64;
+            let hour = ((total_secs / 3600) % 24) as u32;
+            let minute = (((total_secs % 3600) / 60) % 60) as u32;
+            let second = (total_secs % 60) as u32;
+            let dt_mod = py.import("datetime")?;
+            let time_cls = dt_mod.getattr("time")?;
+            time_cls.call1((hour, minute, second))?
+        }
+        CellValue::Duration(d) => {
+            let days = d.floor() as i64;
+            let rem_secs = ((d - days as f64) * 86400.0).round() as i64;
+            let dt_mod = py.import("datetime")?;
+            let timedelta_cls = dt_mod.getattr("timedelta")?;
+            timedelta_cls.call1((days, rem_secs))?
+        }
         CellValue::Bool(b) => b.into_bound_py_any(py)?,
         CellValue::Error(s) | CellValue::Str(s) => s.as_str().into_bound_py_any(py)?,
         CellValue::Rich(rt) => {
@@ -3439,8 +4382,6 @@ fn cell_value_to_py<'py>(py: Python<'py>, v: &CellValue) -> PyResult<Bound<'py, 
             text.into_bound_py_any(py)?
         }
         CellValue::Formula { text, .. } => {
-            // The stored text may already carry a leading '='; the getter must
-            // expose exactly one leading '=' regardless.
             let trimmed = text.strip_prefix('=').unwrap_or(text);
             let mut s = String::with_capacity(trimmed.len() + 1);
             s.push('=');
@@ -3450,9 +4391,6 @@ fn cell_value_to_py<'py>(py: Python<'py>, v: &CellValue) -> PyResult<Bound<'py, 
     })
 }
 
-/// Validate a range-assignment value is an exact `nrows x ncols` 2D list/tuple
-/// and convert every element to `CellValue` BEFORE any edit is recorded, so an
-/// invalid element or shape mismatch leaves the overlay untouched.
 fn extract_2d_values(
     value: &Bound<'_, PyAny>,
     nrows: usize,
@@ -3502,18 +4440,270 @@ fn extract_2d_values(
 #[pyclass(name = "EditableWorkbook")]
 pub struct PyEditableWorkbook {
     overlay: Arc<std::sync::Mutex<WorkbookOverlay>>,
+    active_idx: std::sync::atomic::AtomicUsize,
 }
 
 #[pymethods]
 impl PyEditableWorkbook {
+    #[new]
+    fn new() -> PyResult<Self> {
+        let overlay = WorkbookOverlay::new_blank().map_err(turbo_err_to_py)?;
+        Ok(Self {
+            overlay: Arc::new(std::sync::Mutex::new(overlay)),
+            active_idx: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    #[getter]
+    fn sheetnames(&self) -> PyResult<Vec<String>> {
+        let ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(ov.sheet_names())
+    }
+
+    #[getter]
+    fn worksheets(&self) -> PyResult<Vec<PyEditableSheet>> {
+        let ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let names = ov.sheet_names();
+        let sheets = names
+            .into_iter()
+            .map(|name| PyEditableSheet {
+                sheet_name: name,
+                overlay: Arc::clone(&self.overlay),
+                original: OnceLock::new(),
+            })
+            .collect();
+        Ok(sheets)
+    }
+
+    #[getter]
+    fn active(&self) -> PyResult<PyEditableSheet> {
+        let names = self.sheetnames()?;
+        if names.is_empty() {
+            return Err(PyValueError::new_err("workbook contains no sheets"));
+        }
+        let cur = self.active_idx.load(std::sync::atomic::Ordering::Relaxed);
+        let idx = cur.min(names.len() - 1);
+        Ok(PyEditableSheet {
+            sheet_name: names[idx].clone(),
+            overlay: Arc::clone(&self.overlay),
+            original: OnceLock::new(),
+        })
+    }
+
+    #[setter]
+    fn set_active(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
+        let names = self.sheetnames()?;
+        if let Ok(idx) = target.extract::<usize>() {
+            if idx >= names.len() {
+                return Err(PyValueError::new_err(format!(
+                    "sheet index {idx} out of range (workbook has {} sheets)",
+                    names.len()
+                )));
+            }
+            self.active_idx.store(idx, std::sync::atomic::Ordering::Relaxed);
+            return Ok(());
+        }
+        let target_name = if let Ok(s) = target.extract::<String>() {
+            s
+        } else if let Ok(ws) = target.cast::<PyEditableSheet>() {
+            ws.borrow().sheet_name.clone()
+        } else {
+            return Err(PyTypeError::new_err("active sheet must be integer index, sheet name, or EditableSheet"));
+        };
+        if let Some(pos) = names.iter().position(|n| n == &target_name) {
+            self.active_idx.store(pos, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        } else {
+            Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                "sheet '{target_name}' not found in workbook"
+            )))
+        }
+    }
+
+    #[pyo3(signature = (title = None, index = None))]
+    fn create_sheet(&self, title: Option<&str>, index: Option<usize>) -> PyResult<PyEditableSheet> {
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let existing = ov.sheet_names();
+        let final_title = match title {
+            Some(t) => {
+                validate_sheet_name(t, &existing).map_err(turbo_err_to_py)?;
+                t.to_string()
+            }
+            None => {
+                let mut n = existing.len() + 1;
+                loop {
+                    let candidate = format!("Sheet{n}");
+                    if !existing.iter().any(|s| s.eq_ignore_ascii_case(&candidate)) {
+                        break candidate;
+                    }
+                    n += 1;
+                }
+            }
+        };
+        ov.create_sheet(&final_title, index).map_err(turbo_err_to_py)?;
+        Ok(PyEditableSheet {
+            sheet_name: final_title,
+            overlay: Arc::clone(&self.overlay),
+            original: OnceLock::new(),
+        })
+    }
+
+    fn remove(&self, worksheet_or_name: &Bound<'_, PyAny>) -> PyResult<()> {
+        let name = if let Ok(s) = worksheet_or_name.extract::<String>() {
+            s
+        } else if let Ok(ws) = worksheet_or_name.cast::<PyEditableSheet>() {
+            ws.borrow().sheet_name.clone()
+        } else {
+            return Err(PyTypeError::new_err("remove expects sheet name or EditableSheet"));
+        };
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let names = ov.sheet_names();
+        if !names.contains(&name) {
+            return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                "sheet '{name}' not found in workbook"
+            )));
+        }
+        if names.len() <= 1 {
+            return Err(PyValueError::new_err("cannot remove the only worksheet in workbook"));
+        }
+        ov.delete_sheet(&name).map_err(turbo_err_to_py)?;
+        Ok(())
+    }
+
+    fn __delitem__(&self, sheet_name: &str) -> PyResult<()> {
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let names = ov.sheet_names();
+        if !names.contains(&sheet_name.to_string()) {
+            return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                "sheet '{sheet_name}' not found in workbook"
+            )));
+        }
+        if names.len() <= 1 {
+            return Err(PyValueError::new_err("cannot remove the only worksheet in workbook"));
+        }
+        ov.delete_sheet(sheet_name).map_err(turbo_err_to_py)?;
+        Ok(())
+    }
+
+    fn copy_worksheet(&self, source: &Bound<'_, PyAny>) -> PyResult<PyEditableSheet> {
+        let src_name = if let Ok(s) = source.extract::<String>() {
+            s
+        } else if let Ok(ws) = source.cast::<PyEditableSheet>() {
+            ws.borrow().sheet_name.clone()
+        } else {
+            return Err(PyTypeError::new_err("copy_worksheet expects sheet name or EditableSheet"));
+        };
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let existing = ov.sheet_names();
+        if !existing.contains(&src_name) {
+            return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                "source sheet '{src_name}' not found"
+            )));
+        }
+
+        let mut copy_title = format!("{src_name} Copy");
+        if existing.iter().any(|s| s.eq_ignore_ascii_case(&copy_title)) {
+            let mut n = 1;
+            loop {
+                let cand = format!("{src_name} Copy ({n})");
+                if !existing.iter().any(|s| s.eq_ignore_ascii_case(&cand)) {
+                    copy_title = cand;
+                    break;
+                }
+                n += 1;
+            }
+        }
+
+        let orig = original_sheet_locked_for_overlay(&ov, &src_name)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let src_overlay = ov.sheet_overlays.get(&src_name).cloned();
+
+        ov.create_sheet(&copy_title, None).map_err(turbo_err_to_py)?;
+
+        let dest_overlay = ov.sheet_overlays.entry(copy_title.clone()).or_default();
+        if let Some(sheet) = orig {
+            for row in sheet.rows {
+                for cell in row.cells {
+                    if !matches!(cell.value, CellValue::Empty) {
+                        dest_overlay.modified_cells.insert((row.row, cell.col), cell.value);
+                    }
+                    if let Some(desc) = cell.style_desc {
+                        dest_overlay.modified_styles.insert((row.row, cell.col), *desc);
+                    }
+                }
+            }
+        }
+        if let Some(so) = src_overlay {
+            for (coord, val) in so.modified_cells {
+                dest_overlay.modified_cells.insert(coord, val);
+            }
+            for (coord, st) in so.modified_styles {
+                dest_overlay.modified_styles.insert(coord, st);
+            }
+        }
+        dest_overlay.is_dirty = true;
+
+        Ok(PyEditableSheet {
+            sheet_name: copy_title,
+            overlay: Arc::clone(&self.overlay),
+            original: OnceLock::new(),
+        })
+    }
+
+    #[pyo3(signature = (worksheet_or_name, offset = 0))]
+    fn move_sheet(&self, worksheet_or_name: &Bound<'_, PyAny>, offset: i64) -> PyResult<()> {
+        let name = if let Ok(s) = worksheet_or_name.extract::<String>() {
+            s
+        } else if let Ok(ws) = worksheet_or_name.cast::<PyEditableSheet>() {
+            ws.borrow().sheet_name.clone()
+        } else {
+            return Err(PyTypeError::new_err("move_sheet expects sheet name or EditableSheet"));
+        };
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut names = ov.sheet_names();
+        let Some(pos) = names.iter().position(|n| n == &name) else {
+            return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                "sheet '{name}' not found"
+            )));
+        };
+        let len = names.len() as i64;
+        let new_pos = (pos as i64 + offset).clamp(0, len - 1) as usize;
+        if new_pos != pos {
+            let item = names.remove(pos);
+            names.insert(new_pos, item);
+            ov.archive_map.sheet_names = names;
+        }
+        Ok(())
+    }
+
     fn __getitem__(&self, sheet_name: &str) -> PyResult<PyEditableSheet> {
         let ov = self
             .overlay
             .lock()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        if !ov.archive_map.sheet_name_map.contains_key(sheet_name)
-            && !ov.sheet_overlays.contains_key(sheet_name)
-        {
+        let names = ov.sheet_names();
+        if !names.contains(&sheet_name.to_string()) {
             return Err(pyo3::exceptions::PyKeyError::new_err(format!(
                 "Sheet '{sheet_name}' not found in workbook"
             )));
@@ -3525,14 +4715,44 @@ impl PyEditableWorkbook {
         })
     }
 
-    fn save(&self, path: &str) -> PyResult<()> {
-        let ov = self
-            .overlay
-            .lock()
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let bytes = ov.save().map_err(turbo_err_to_py)?;
-        std::fs::write(path, bytes).map_err(write_err_to_py)?;
-        Ok(())
+    fn save(&self, py: Python<'_>, target: &Bound<'_, PyAny>) -> PyResult<()> {
+        let is_path = if let Ok(path) = target.extract::<String>() {
+            Some(path)
+        } else if let Ok(path) = target.call_method0("__fspath__").and_then(|f| f.extract::<String>()) {
+            Some(path)
+        } else {
+            None
+        };
+
+        if let Some(path) = is_path {
+            let mut ov = self
+                .overlay
+                .lock()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let bytes = ov.save().map_err(turbo_err_to_py)?;
+            std::fs::write(&path, &bytes).map_err(write_err_to_py)?;
+            return Ok(());
+        }
+
+        if target.hasattr("write")? {
+            if !target.hasattr("seek")? {
+                return Err(PyValueError::new_err(
+                    "save(): target stream must be seekable for zip central directory",
+                ));
+            }
+            let mut ov = self
+                .overlay
+                .lock()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let bytes = ov.save().map_err(turbo_err_to_py)?;
+            let py_bytes = pyo3::types::PyBytes::new(py, &bytes);
+            target.call_method1("write", (py_bytes,))?;
+            return Ok(());
+        }
+
+        Err(PyTypeError::new_err(
+            "save() target must be a path string, PathLike, or seekable file-like object",
+        ))
     }
 }
 
@@ -3543,5 +4763,6 @@ pub fn py_edit_excel(py: Python<'_>, path: &str) -> PyResult<PyEditableWorkbook>
     let overlay = WorkbookOverlay::new(archive_map);
     Ok(PyEditableWorkbook {
         overlay: Arc::new(std::sync::Mutex::new(overlay)),
+        active_idx: std::sync::atomic::AtomicUsize::new(0),
     })
 }

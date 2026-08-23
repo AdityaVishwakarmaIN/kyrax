@@ -450,6 +450,7 @@ pub struct ArchiveMap {
     pub entries: AHashMap<String, ZipEntryMeta>,
     pub entry_order: Vec<String>,
     pub sheet_name_map: AHashMap<String, String>,
+    pub sheet_names: Vec<String>,
     pub shared_strings: Arc<crate::turbo::scan::StringArena>,
 }
 
@@ -543,7 +544,7 @@ impl ArchiveMap {
             };
         }
 
-        let sheet_name_map = parse_workbook_sheet_map(&entries, zip);
+        let (sheet_name_map, sheet_names) = parse_workbook_sheet_map(&entries, zip);
         let shared_strings = if let Some(sst_entry) = entries.get("xl/sharedStrings.xml") {
             let start = sst_entry.data_offset as usize;
             let end = start + sst_entry.compressed_size as usize;
@@ -569,6 +570,7 @@ impl ArchiveMap {
             entries,
             entry_order,
             sheet_name_map,
+            sheet_names,
             shared_strings,
         })
     }
@@ -577,10 +579,11 @@ impl ArchiveMap {
 fn parse_workbook_sheet_map(
     entries: &AHashMap<String, ZipEntryMeta>,
     zip: &[u8],
-) -> AHashMap<String, String> {
-    let mut name_to_rid = AHashMap::default();
+) -> (AHashMap<String, String>, Vec<String>) {
+    let mut sheet_items = Vec::new();
     let mut rid_to_target = AHashMap::default();
     let mut map = AHashMap::default();
+    let mut ordered_names = Vec::new();
 
     if let Some(wb_entry) = entries.get("xl/workbook.xml") {
         let start = wb_entry.data_offset as usize;
@@ -603,7 +606,7 @@ fn parse_workbook_sheet_map(
                     let name = extract_xml_attr(tag, b"name");
                     let rid = extract_xml_attr(tag, b"r:id");
                     if let (Some(n), Some(r)) = (name, rid) {
-                        name_to_rid.insert(r, n);
+                        sheet_items.push((n, r));
                     }
                 }
             }
@@ -645,9 +648,10 @@ fn parse_workbook_sheet_map(
         }
     }
 
-    for (rid, sheet_name) in name_to_rid {
+    for (sheet_name, rid) in sheet_items {
         if let Some(target) = rid_to_target.get(&rid) {
-            map.insert(sheet_name, target.clone());
+            map.insert(sheet_name.clone(), target.clone());
+            ordered_names.push(sheet_name);
         }
     }
 
@@ -658,12 +662,13 @@ fn parse_workbook_sheet_map(
                     .trim_start_matches("xl/worksheets/")
                     .trim_end_matches(".xml");
                 let display_name = format!("Sheet{}", stem.trim_start_matches("sheet"));
-                map.insert(display_name, name.clone());
+                map.insert(display_name.clone(), name.clone());
+                ordered_names.push(display_name);
             }
         }
     }
 
-    map
+    (map, ordered_names)
 }
 
 fn extract_xml_attr(tag: &[u8], attr: &[u8]) -> Option<String> {
