@@ -17,22 +17,24 @@ class CellError:
     """Represents an error encountered while parsing a single cell value."""
     @property
     def position(self) -> tuple[int, int]:
-        """(row, col) coordinates in the raw sheet grid (including header rows)."""
+        """(row, col) coordinates in the raw sheet grid (0-based, including header rows)."""
     @property
     def offset_position(self) -> tuple[int, int]:
-        """(row, col) coordinates in the exported RecordBatch (header stripped)."""
+        """(row, col) coordinates in the exported RecordBatch (0-based, header stripped)."""
     @property
     def row_offset(self) -> int:
         """Row offset subtracted from raw row to get RecordBatch row."""
     @property
     def detail(self) -> str:
         """Error message or Excel error code."""
+    def __repr__(self) -> str: ...
 
 class CellErrors:
     """Collection of cell parsing errors."""
     @property
     def errors(self) -> list[CellError]:
         """List of all cell errors."""
+    def __repr__(self) -> str: ...
 
 class ColumnInfoNoDtype:
     def __init__(
@@ -87,22 +89,6 @@ class DefinedName:
     def name(self) -> str: ...
     @property
     def formula(self) -> str: ...
-
-class CellError:
-    @property
-    def position(self) -> tuple[int, int]: ...
-    @property
-    def row_offset(self) -> int: ...
-    @property
-    def offset_position(self) -> tuple[int, int]: ...
-    @property
-    def detail(self) -> str: ...
-    def __repr__(self) -> str: ...
-
-class CellErrors:
-    @property
-    def errors(self) -> list[CellError]: ...
-    def __repr__(self) -> str: ...
 
 class _ExcelSheet:
     @property
@@ -422,12 +408,21 @@ class _TurboReader:
     @property
     def sheet_names(self) -> list[str]: ...
     def load_sheet(
-        self, idx_or_name: int | str, *, features: list[str] | str | None = None
-    ) -> _TurboSheet: ...
+        self,
+        idx_or_name: int | str,
+        *,
+        features: list[str] | str | None = None,
+        header_row: int | None = 0,
+    ) -> _TurboSheet:
+        """Open one sheet for turbo reading; `header_row=0` (default) treats
+        spreadsheet row 1 as the header, `None` treats row 1 as data."""
     def defined_names(self) -> list[dict] | None: ...
     def tables(self) -> list[dict] | None: ...
     @property
     def date1904(self) -> bool: ...
+    @property
+    def active_tab(self) -> int:
+        """0-based index of the workbook's active tab (`<workbookView @activeTab>`); 0 when absent."""
     def workbook_props(self) -> dict | None: ...
     def persons(self) -> list[dict] | None: ...
     @property

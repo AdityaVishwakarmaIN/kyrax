@@ -11,25 +11,60 @@ on:
       - '.github/workflows/wheel_probe.yml'
 
 jobs:
-  probe-manylinux2014-x86_64:
-    name: Probe manylinux2014 x86_64
+  probe-manylinux2014:
+    name: Probe manylinux2014 (${{ matrix.architecture }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [x86-64, aarch64]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.architecture == 'aarch64' && 'aarch64-unknown-linux-gnu' || '' }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - name: Build wheel on manylinux2014
-        uses: PyO3/maturin-action@v1
-        with:
-          manylinux: "2014"
-          command: build
-          args: "--release -o dist -i python3.10"
+      - name: Install maturin
+        run: pip install maturin
+      - name: Install ziglang
+        run: pip install ziglang
+      - name: Build wheel on manylinux2014 (capture log)
+        run: |
+          set -euo pipefail
+          TARGET_ARG=""
+          if [[ "${{ matrix.architecture }}" == "aarch64" ]]; then
+            rustup target add aarch64-unknown-linux-gnu
+            TARGET_ARG="--target aarch64-unknown-linux-gnu"
+          fi
+          maturin build --release -o dist -i python3.10 --manylinux 2014 --zig $TARGET_ARG 2>&1 | tee build.log
+      - name: Print exact failing cc/rustc line
+        if: failure()
+        run: |
+          echo "::group::Tail of build.log"
+          tail -n 80 build.log || true
+          echo "::endgroup::"
+          echo "::group::Exact failing cc/rustc line"
+          grep -nE '(error:|error\[|fatal error|cc:|rustc|cannot find|collect2: error|undefined reference|ld: )' build.log | tail -n 8 || true
+          echo "::endgroup::"
       - name: Verify wheel audit
         run: |
           pip install auditwheel
           auditwheel show dist/*.whl
+      - uses: docker/setup-qemu-action@v3
+        if: matrix.architecture == 'aarch64'
+      - name: Install & import kyrax in amazonlinux:2
+        run: |
+          set -euo pipefail
+          PLATFORM_FLAG=""
+          if [[ "${{ matrix.architecture }}" == "aarch64" ]]; then
+            PLATFORM_FLAG="--platform linux/arm64"
+          fi
+          docker run --rm $PLATFORM_FLAG \
+            -v "$PWD/dist:/wheels:ro" \
+            amazonlinux:2 \
+            bash -lc 'yum install -y curl >/dev/null 2>&1 && curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$PATH" && uv python install 3.10 >/dev/null && uv venv --python 3.10 /opt/venv >/dev/null && uv pip install --python /opt/venv/bin/python /wheels/*.whl && /opt/venv/bin/python -c "import kyrax; print(kyrax.__version__)"'
 
   probe-manylinux_2_28-matrix:
     name: Standard manylinux_2_28 Matrix

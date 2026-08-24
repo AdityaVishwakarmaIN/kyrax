@@ -297,6 +297,8 @@ pub struct WorkbookProps {
     pub code_name: Option<String>,
     pub full_calc_on_load: Option<bool>,
     pub calc_id: Option<u32>,
+    /// 0-based sheet index of the active tab (`<workbookView @activeTab>`); 0 when absent.
+    pub active_tab: u32,
     pub core: CoreProps,
     pub app: AppProps,
 }
@@ -1272,11 +1274,12 @@ pub fn parse_app_props(xml: &[u8]) -> AppProps {
 }
 
 /// Parse date1904 + optional full workbook props from workbook.xml.
-pub fn parse_workbook_pr(xml: &[u8]) -> (bool, Option<String>, Option<bool>, Option<u32>) {
+pub fn parse_workbook_pr(xml: &[u8]) -> (bool, Option<String>, Option<bool>, Option<u32>, u32) {
     let mut date1904 = false;
     let mut code_name = None;
     let mut full_calc = None;
     let mut calc_id = None;
+    let mut active_tab = 0;
     let mut scratch = Vec::new();
     if let Some(o) = memchr::memmem::find(xml, b"<workbookPr") {
         let te = o + memchr::memchr(b'>', &xml[o..]).unwrap_or(0);
@@ -1284,11 +1287,57 @@ pub fn parse_workbook_pr(xml: &[u8]) -> (bool, Option<String>, Option<bool>, Opt
         date1904 = attr_bool_default(tag, b"date1904", false);
         code_name = attr_owned(tag, b"codeName", &mut scratch);
     }
+    if let Some(o) = memchr::memmem::find(xml, b"<workbookView") {
+        let te = o + memchr::memchr(b'>', &xml[o..]).unwrap_or(0);
+        let tag = &xml[o..te];
+        active_tab = attr_u32(tag, b"activeTab").unwrap_or(0);
+    }
     if let Some(o) = memchr::memmem::find(xml, b"<calcPr") {
         let te = o + memchr::memchr(b'>', &xml[o..]).unwrap_or(0);
         let tag = &xml[o..te];
         full_calc = attr_bool(tag, b"fullCalcOnLoad");
         calc_id = attr_u32(tag, b"calcId");
     }
-    (date1904, code_name, full_calc, calc_id)
+    (date1904, code_name, full_calc, calc_id, active_tab)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_workbook_pr;
+
+    #[test]
+    fn parse_workbook_pr_active_tab_present() {
+        let xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <bookViews>
+    <workbookView xWindow="0" yWindow="0" activeTab="2" firstSheet="1"/>
+  </bookViews>
+  <workbookPr date1904="1" codeName="ThisWorkbook"/>
+</workbook>"#;
+        let (date1904, code_name, _, _, active_tab) = parse_workbook_pr(xml);
+        assert_eq!(active_tab, 2);
+        assert!(date1904);
+        assert_eq!(code_name.as_deref(), Some("ThisWorkbook"));
+    }
+
+    #[test]
+    fn parse_workbook_pr_active_tab_default_zero() {
+        let xml = br#"<workbook>
+  <bookViews>
+    <workbookView xWindow="0" yWindow="0"/>
+  </bookViews>
+  <workbookPr/>
+</workbook>"#;
+        let (date1904, _, _, _, active_tab) = parse_workbook_pr(xml);
+        assert_eq!(active_tab, 0);
+        assert!(!date1904);
+    }
+
+    #[test]
+    fn parse_workbook_pr_active_tab_absent() {
+        let xml = br#"<workbook><workbookPr/></workbook>"#;
+        let (date1904, _, _, _, active_tab) = parse_workbook_pr(xml);
+        assert_eq!(active_tab, 0);
+        assert!(!date1904);
+    }
 }

@@ -21,11 +21,12 @@ use super::{
     PageMarginsMeta, PageSetupMeta, Pane, PaneState, Person, PivotTableMeta, PrintOptionsMeta,
     Protection, ReadImageAnchor, ReadImageMarker, RowDim, Scope, SheetComments, SheetFormat,
     SheetKind, SheetProtectionMeta, SheetState, SheetViewMeta, Side, StyleTable, Table,
-    ThreadedComment, TurboError, VbaProject, WorkbookProps, a1, list_sheet_names_with_password,
-    range_a1, read_workbook_turbo_sheet_with_options,
+    ThreadedComment, TurboError, VbaProject, WorkbookProps, a1,
+    list_sheet_names_and_active_tab_with_password, range_a1,
+    read_workbook_turbo_sheet_with_options,
 };
-use crate::turbo::error::TurboResult;
 use crate::error::{KyraxError, KyraxErrorKind, py_errors::IntoPyResult};
+use crate::turbo::error::TurboResult;
 
 // ---------------------------------------------------------------------------
 // Feature flag parsing
@@ -435,6 +436,10 @@ pub struct PyTurboSheet {
     /// Cached Arrow export of formulas (materialize once per sheet load).
     formulas_batch: OnceLock<RecordBatch>,
     cell_errors: Vec<CellError>,
+    /// Number of rows above the data region (1 when a header row is present,
+    /// else 0). Re-bases turbo's 0-based data indices to raw-grid positions
+    /// for `CellError.position` / `row_offset`.
+    header_offset: usize,
     merges: Option<Vec<CellRange>>,
     tables: Option<Vec<Table>>,
     hyperlinks: Option<Vec<Hyperlink>>,
@@ -464,7 +469,11 @@ pub struct PyTurboSheet {
 }
 
 impl PyTurboSheet {
-    fn from_parts(sheet: super::TurboSheet, style_table: Option<StyleTable>) -> Self {
+    fn from_parts(
+        sheet: super::TurboSheet,
+        style_table: Option<StyleTable>,
+        header_offset: usize,
+    ) -> Self {
         Self {
             name: sheet.name,
             column_names: sheet.column_names,
@@ -476,6 +485,7 @@ impl PyTurboSheet {
             formulas: sheet.formulas,
             formulas_batch: OnceLock::new(),
             cell_errors: sheet.cell_errors,
+            header_offset,
             merges: sheet.merges,
             tables: sheet.tables,
             hyperlinks: sheet.hyperlinks,
@@ -524,6 +534,7 @@ impl Clone for PyTurboSheet {
                 None => OnceLock::new(),
             },
             cell_errors: self.cell_errors.clone(),
+            header_offset: self.header_offset,
             merges: self.merges.clone(),
             tables: self.tables.clone(),
             hyperlinks: self.hyperlinks.clone(),
@@ -626,8 +637,8 @@ impl PyTurboSheet {
                 .cell_errors
                 .iter()
                 .map(|e| crate::types::excelsheet::CellError {
-                    position: (e.row as usize + 1, e.col as usize),
-                    row_offset: 1,
+                    position: (e.row as usize + self.header_offset, e.col as usize),
+                    row_offset: self.header_offset,
                     detail: e.code.clone(),
                 })
                 .collect(),
@@ -1353,6 +1364,7 @@ pub struct PyTurboReader {
     tables: Option<Vec<Table>>,
     workbook_props: Option<WorkbookProps>,
     date1904: bool,
+    active_tab: u32,
     persons: Option<Vec<Person>>,
     vba: Option<VbaProject>,
     cached_sheets: std::sync::Mutex<TurboReaderCache>,
@@ -1380,7 +1392,9 @@ impl PyTurboReader {
     ) -> PyResult<PyTurboSheet> {
         if let Some(hr) = header_row {
             if hr != 0 {
-                return Err(PyValueError::new_err("only header_row=0 or None is supported"));
+                return Err(PyValueError::new_err(
+                    "only header_row=0 or None is supported",
+                ));
             }
         }
         let feat = parse_features(features)?;
@@ -1452,7 +1466,8 @@ impl PyTurboReader {
             None
         };
 
-        let result = PyTurboSheet::from_parts(sheet, style_table);
+        let result =
+            PyTurboSheet::from_parts(sheet, style_table, usize::from(header_row.is_some()));
         let cell_count = result.nrows * result.ncols;
         if let Ok(mut guard) = self.cached_sheets.lock() {
             guard.insert(cache_key, result.clone(), cell_count);
@@ -1494,6 +1509,12 @@ impl PyTurboReader {
     #[getter]
     fn date1904(&self) -> bool {
         self.date1904
+    }
+
+    /// 0-based index of the active tab; 0 when absent.
+    #[getter]
+    fn active_tab(&self) -> u32 {
+        self.active_tab
     }
 
     /// Workbook-level properties from the last load that requested `workbook_meta` / `"all"`.
@@ -1695,6 +1716,7 @@ fn workbook_props_to_dict<'py>(
     d.set_item("code_name", wp.code_name.as_deref())?;
     d.set_item("full_calc_on_load", wp.full_calc_on_load)?;
     d.set_item("calc_id", wp.calc_id)?;
+    d.set_item("active_tab", wp.active_tab)?;
     let core = PyDict::new(py);
     core.set_item("title", wp.core.title.as_deref())?;
     core.set_item("creator", wp.core.creator.as_deref())?;
@@ -1824,7 +1846,9 @@ impl PySheetStream {
             None => return Ok(None),
         };
         let opts = self.opts.clone();
-        let maybe_batch = py.detach(|| stream.next_batch(&opts)).map_err(turbo_err_to_py)?;
+        let maybe_batch = py
+            .detach(|| stream.next_batch(&opts))
+            .map_err(turbo_err_to_py)?;
         match maybe_batch {
             Some(batch) => {
                 let num_rows = batch.num_rows();
@@ -1920,8 +1944,9 @@ pub fn py_read_excel_turbo_iter(
 #[pyo3(signature = (path, password = None))]
 pub fn py_read_excel_turbo(path: &str, password: Option<String>) -> PyResult<PyTurboReader> {
     sniff_magic_bytes(path).map_err(turbo_err_to_py)?;
-    let sheet_names =
-        list_sheet_names_with_password(path, password.as_deref()).map_err(turbo_err_to_py)?;
+    let (sheet_names, active_tab) =
+        list_sheet_names_and_active_tab_with_password(path, password.as_deref())
+            .map_err(turbo_err_to_py)?;
     Ok(PyTurboReader {
         path: path.to_owned(),
         password,
@@ -1930,6 +1955,7 @@ pub fn py_read_excel_turbo(path: &str, password: Option<String>) -> PyResult<PyT
         tables: None,
         workbook_props: None,
         date1904: false,
+        active_tab,
         persons: None,
         vba: None,
         cached_sheets: std::sync::Mutex::new(TurboReaderCache::default()),

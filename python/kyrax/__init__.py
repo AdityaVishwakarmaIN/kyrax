@@ -1090,6 +1090,11 @@ class TurboReader:
     def sheet_names(self) -> list[str]:
         return self._reader.sheet_names
 
+    @property
+    def active_tab(self) -> int:
+        """0-based index of the workbook's active tab."""
+        return self._reader.active_tab
+
     def load_sheet(
         self,
         idx_or_name: int | str,
@@ -1180,29 +1185,39 @@ class ReadOnlyWorksheet:
         self._sheet_idx = sheet_idx
         self._sheet = sheet
         self._active_stream: typing.Any | None = None
+        self._closed = False
+
+    def _ensure_open(self) -> None:
+        if self._closed or self._wb._closed:
+            raise ValueError("workbook is closed")
 
     @property
     def title(self) -> str:
+        self._ensure_open()
         return self._title
 
     @property
-    def max_row(self) -> int:
+    def max_row(self) -> int | None:
+        self._ensure_open()
         if self._sheet is not None:
             return self._sheet.nrows
-        return 0
+        return None
 
     @property
-    def max_column(self) -> int:
+    def max_column(self) -> int | None:
+        self._ensure_open()
         if self._sheet is not None:
             return self._sheet.ncols
-        return 0
+        return None
 
     @property
     def min_row(self) -> int:
+        self._ensure_open()
         return 1
 
     @property
     def min_column(self) -> int:
+        self._ensure_open()
         return 1
 
     def iter_rows(
@@ -1213,6 +1228,7 @@ class ReadOnlyWorksheet:
         max_col: int | None = None,
         values_only: bool = False,
     ) -> typing.Iterator[tuple[typing.Any, ...]]:
+        self._ensure_open()
         if not values_only:
             raise NotImplementedError(
                 "cell proxies are only supported in edit_mode "
@@ -1300,9 +1316,11 @@ class ReadOnlyWorksheet:
 
     @property
     def values(self) -> typing.Iterator[tuple[typing.Any, ...]]:
+        self._ensure_open()
         return self.iter_rows(values_only=True)
 
     def cell(self, row: int, column: int) -> _ReadOnlyCellProxy:
+        self._ensure_open()
         for r_idx, r_tuple in enumerate(
             self.iter_rows(
                 min_row=row,
@@ -1318,6 +1336,7 @@ class ReadOnlyWorksheet:
         return _ReadOnlyCellProxy(None, row, column)
 
     def close(self) -> None:
+        self._closed = True
         if self._active_stream is not None:
             self._active_stream.close()
             self._active_stream = None
@@ -1330,9 +1349,15 @@ class ReadOnlyWorkbook:
         self._reader = reader
         self._path = path
         self._cached_sheets: dict[str, ReadOnlyWorksheet] = {}
+        self._closed = False
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise ValueError("workbook is closed")
 
     @property
     def sheetnames(self) -> list[str]:
+        self._ensure_open()
         return self._reader.sheet_names
 
     @property
@@ -1341,19 +1366,20 @@ class ReadOnlyWorkbook:
 
     @property
     def active(self) -> ReadOnlyWorksheet:
+        self._ensure_open()
         names = self.sheetnames
         if not names:
             raise ValueError("workbook contains no sheets")
-        active_idx = 0
         try:
-            active_idx = getattr(self._reader, "active_tab", 0)
+            active_idx = self._reader.active_tab
         except Exception:
             active_idx = 0
-        if active_idx < 0 or active_idx >= len(names):
+        if not isinstance(active_idx, int) or active_idx < 0 or active_idx >= len(names):
             active_idx = 0
         return self[names[active_idx]]
 
     def __getitem__(self, key: str | int) -> ReadOnlyWorksheet:
+        self._ensure_open()
         names = self.sheetnames
         if isinstance(key, int):
             if key < 0 or key >= len(names):
@@ -1374,9 +1400,13 @@ class ReadOnlyWorkbook:
 
     def load_sheet(self, idx_or_name: str | int, **kwargs):
         """Passthrough to the underlying :class:`TurboReader.load_sheet`."""
+        self._ensure_open()
         return self._reader.load_sheet(idx_or_name, **kwargs)
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         for ws in self._cached_sheets.values():
             ws.close()
         self._cached_sheets.clear()

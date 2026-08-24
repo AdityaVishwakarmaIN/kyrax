@@ -152,9 +152,15 @@ def test_item_7_read_only_streaming():
     ws1 = wb["Sheet1"]
     assert isinstance(ws1, ReadOnlyWorksheet)
     assert ws1.title == "Sheet1"
+    assert ws1.min_row == 1
+    assert ws1.min_column == 1
+    assert ws1.max_row is None
+    assert ws1.max_column is None
 
     # Forward row iteration — grid semantics: row 1 is the header, like openpyxl
     rows = list(ws1.iter_rows(values_only=True))
+    edit_wb = load_workbook(f_path)
+    assert rows == list(edit_wb["Sheet1"].iter_rows(values_only=True))
     assert len(rows) == 6
     assert rows[0] == ("hdr",)
     assert rows[1] == (1,)
@@ -181,6 +187,64 @@ def test_item_7_read_only_streaming():
         list(ws1.iter_rows(values_only=False))
 
     wb.close()
+
+
+def test_item_7_read_only_close_blocks_every_sheet_doorway():
+    xlsx_bytes = write_excel_turbo_bytes(
+        [{"name": "Sheet1", "rows": [["header"], [1]]}]
+    )
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        f.write(xlsx_bytes)
+        f_path = f.name
+
+    wb = load_workbook(f_path, read_only=True)
+    ws = wb["Sheet1"]
+    wb.close()
+
+    with pytest.raises(ValueError, match="^workbook is closed$"):
+        wb["Sheet1"]
+    with pytest.raises(ValueError, match="^workbook is closed$"):
+        wb.active
+    with pytest.raises(ValueError, match="^workbook is closed$"):
+        wb.worksheets
+    with pytest.raises(ValueError, match="^workbook is closed$"):
+        wb.load_sheet("Sheet1")
+    with pytest.raises(ValueError, match="^workbook is closed$"):
+        list(ws.iter_rows(values_only=True))
+    with pytest.raises(ValueError, match="^workbook is closed$"):
+        ws.values
+    with pytest.raises(ValueError, match="^workbook is closed$"):
+        ws.cell(row=1, column=1)
+    with pytest.raises(ValueError, match="^workbook is closed$"):
+        ws.max_row
+
+    wb.close()
+
+
+def test_item_7_editable_written_read_only_parity(tmp_path: Path):
+    """Item 7: rows from load_workbook(read_only=True) must equal rows from
+    default edit_mode for a workbook written via EditableWorkbook
+    (grid semantics incl header row 1)."""
+    if not PYARROW_AVAILABLE:
+        pytest.skip("pyarrow not available")
+
+    path = tmp_path / "editable_parity.xlsx"
+    wb = kyrax.EditableWorkbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws.append(["Name", "Score"])
+    ws.append(["Alice", 1])
+    ws.append(["Bob", 2])
+    ws.append(["Carol", 3])
+    wb.save(str(path))
+
+    expected = [("Name", "Score"), ("Alice", 1), ("Bob", 2), ("Carol", 3)]
+
+    edit_ws = load_workbook(str(path))["Sheet1"]
+    assert list(edit_ws.iter_rows(values_only=True)) == expected
+
+    ro_ws = load_workbook(str(path), read_only=True)["Sheet1"]
+    assert list(ro_ws.iter_rows(values_only=True)) == expected
 
 
 def test_item_54_probe_workflow_exists():

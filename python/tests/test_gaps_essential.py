@@ -443,6 +443,40 @@ def test_pycell_mutations_and_save_validation(tmp_path: Path):
         wb.save(12345)
 
 
+def test_page_setup_dv_roundtrip_via_sheet_meta_oracle(tmp_path: Path):
+    out_file = str(tmp_path / "page_dv_roundtrip.xlsx")
+    wb = Workbook()
+    ws = wb.active
+    ws.page_setup = {"orientation": "landscape", "paper_size": 9, "scale": 85}
+    ws.data_validations = [
+        {
+            "type": "list",
+            "formula1": '"Option1,Option2"',
+            "sqref": "A1:A10",
+            "allow_blank": True,
+        }
+    ]
+    wb.save(out_file)
+
+    reader = kyrax.read_excel_turbo(out_file)
+    ts = reader.load_sheet(0, features=["page_setup", "validations"])
+
+    ps = ts.page_setup()
+    assert ps is not None
+    assert ps.get("orientation") == "landscape"
+    assert ps.get("paper_size") == 9
+    assert ps.get("scale") == 85
+
+    dvs = ts.data_validations()
+    assert dvs is not None
+    assert len(dvs) == 1
+    dv = dvs[0]
+    assert dv.get("type") == "list"
+    assert dv.get("formula1") == '"Option1,Option2"'
+    assert dv.get("sqref") == "A1:A10"
+    assert dv.get("allow_blank") is True
+
+
 def test_load_workbook_backward_compatibility(tmp_path: Path):
     out_file = str(tmp_path / "compat_test.xlsx")
     wb = Workbook()

@@ -19,7 +19,7 @@ use crate::turbo::structural::{
     RelKind, parse_rels, parse_workbook_pivot_caches, resolve_zip_path,
 };
 use crate::turbo::write::model::{
-    CachedValue, Cell, CellValue, FormulaKind, Row, Sheet, SstBuilder,
+    CachedValue, Cell, CellValue, FormulaKind, PageMargins, PrintOptions, Row, Sheet, SstBuilder,
 };
 use crate::turbo::write::style_engine::{StyleDesc, StyleEngine};
 use crate::turbo::write::writer::write_worksheet;
@@ -48,6 +48,8 @@ pub struct SheetOverlay {
     pub auto_filter: Option<String>,
     pub protection: Option<crate::turbo::write::model::SheetProtection>,
     pub page_setup: Option<crate::turbo::write::model::PageSetup>,
+    pub page_margins: Option<PageMargins>,
+    pub print_options: Option<PrintOptions>,
     pub data_validations: Vec<crate::turbo::write::DataValidation>,
     pub is_dirty: bool,
 }
@@ -278,7 +280,8 @@ fn esc_attr(s: &str) -> String {
     out
 }
 
-fn extract_xml_attr_str(tag: &str, attr_name: &str) -> Option<String> {    let needle = format!("{attr_name}=\"");
+fn extract_xml_attr_str(tag: &str, attr_name: &str) -> Option<String> {
+    let needle = format!("{attr_name}=\"");
     if let Some(pos) = tag.find(&needle) {
         let val_start = pos + needle.len();
         if let Some(end_quote) = tag[val_start..].find('"') {
@@ -391,11 +394,13 @@ impl WorkbookOverlay {
             return Ok(());
         }
         let Some(target) = self.archive_map.sheet_name_map.get(sheet_name) else {
-            self.data_validations_cache.insert(sheet_name.to_string(), Vec::new());
+            self.data_validations_cache
+                .insert(sheet_name.to_string(), Vec::new());
             return Ok(());
         };
         let Some(xml) = inflate_entry(&self.archive_map, target)? else {
-            self.data_validations_cache.insert(sheet_name.to_string(), Vec::new());
+            self.data_validations_cache
+                .insert(sheet_name.to_string(), Vec::new());
             return Ok(());
         };
         let recs = crate::turbo::meta::scan_data_validations(&xml);
@@ -417,7 +422,8 @@ impl WorkbookOverlay {
                 formula2: r.formula2,
             })
             .collect();
-        self.data_validations_cache.insert(sheet_name.to_string(), dvs);
+        self.data_validations_cache
+            .insert(sheet_name.to_string(), dvs);
         Ok(())
     }
 
@@ -436,7 +442,9 @@ impl WorkbookOverlay {
         let prot = if let Some(p_start) = find_element(&xml, b"sheetProtection", 0) {
             let gt = p_start + memchr::memchr(b'>', &xml[p_start..]).unwrap_or(0);
             let tag = &xml[p_start..=gt];
-            let sheet = extract_xml_attr(tag, b"sheet").map(|v| v == "1" || v == "true").unwrap_or(true);
+            let sheet = extract_xml_attr(tag, b"sheet")
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(true);
             let password = extract_xml_attr(tag, b"password");
             Some(crate::turbo::write::model::SheetProtection {
                 sheet,
@@ -462,7 +470,9 @@ impl WorkbookOverlay {
             return Ok(());
         };
         let styles_xml = inflate_entry(&self.archive_map, "xl/styles.xml")?;
-        let style_table = styles_xml.as_deref().map(crate::turbo::styles::parse_style_table);
+        let style_table = styles_xml
+            .as_deref()
+            .map(crate::turbo::styles::parse_style_table);
         let Some(st) = style_table else {
             return Ok(());
         };
@@ -472,11 +482,13 @@ impl WorkbookOverlay {
             let s = pos + c_pos;
             let gt = s + memchr::memchr(b'>', &xml[s..]).unwrap_or(0);
             let tag = &xml[s..=gt];
-            if let (Some(r_attr), Some(s_attr)) = (extract_xml_attr(tag, b"r"), extract_xml_attr(tag, b"s")) {
+            if let (Some(r_attr), Some(s_attr)) =
+                (extract_xml_attr(tag, b"r"), extract_xml_attr(tag, b"s"))
+            {
                 if let (Some((row, col)), Ok(xf_idx)) = (
-                parse_ref_range_strict(r_attr.as_bytes()).map(|(r, c, _, _)| (r, c)),
-                s_attr.parse::<usize>(),
-            ) {
+                    parse_ref_range_strict(r_attr.as_bytes()).map(|(r, c, _, _)| (r, c)),
+                    s_attr.parse::<usize>(),
+                ) {
                     if xf_idx < st.xfs.len() {
                         let res = st.resolve(xf_idx as u32);
                         let mut desc = StyleDesc::default();
@@ -488,9 +500,22 @@ impl WorkbookOverlay {
                             underline: res.font.underline.clone(),
                             strike: Some(res.font.strike),
                             color: Some(match res.font.color.kind {
-                                crate::turbo::styles::CKind::Rgb => crate::turbo::write::style_engine::ColorSpec::Rgb(res.font.color.val),
-                                crate::turbo::styles::CKind::Theme => crate::turbo::write::style_engine::ColorSpec::Theme(res.font.color.val, (res.font.color.tint as f64).to_bits()),
-                                crate::turbo::styles::CKind::Indexed => crate::turbo::write::style_engine::ColorSpec::Indexed(res.font.color.val),
+                                crate::turbo::styles::CKind::Rgb => {
+                                    crate::turbo::write::style_engine::ColorSpec::Rgb(
+                                        res.font.color.val,
+                                    )
+                                }
+                                crate::turbo::styles::CKind::Theme => {
+                                    crate::turbo::write::style_engine::ColorSpec::Theme(
+                                        res.font.color.val,
+                                        (res.font.color.tint as f64).to_bits(),
+                                    )
+                                }
+                                crate::turbo::styles::CKind::Indexed => {
+                                    crate::turbo::write::style_engine::ColorSpec::Indexed(
+                                        res.font.color.val,
+                                    )
+                                }
                                 _ => crate::turbo::write::style_engine::ColorSpec::Auto,
                             }),
                             ..Default::default()
@@ -499,22 +524,49 @@ impl WorkbookOverlay {
 
                         if res.fill.pattern != "none" {
                             let fg = match res.fill.fg.kind {
-                                crate::turbo::styles::CKind::Rgb => Some(crate::turbo::write::style_engine::ColorSpec::Rgb(res.fill.fg.val)),
-                                crate::turbo::styles::CKind::Theme => Some(crate::turbo::write::style_engine::ColorSpec::Theme(res.fill.fg.val, (res.fill.fg.tint as f64).to_bits())),
-                                crate::turbo::styles::CKind::Indexed => Some(crate::turbo::write::style_engine::ColorSpec::Indexed(res.fill.fg.val)),
+                                crate::turbo::styles::CKind::Rgb => {
+                                    Some(crate::turbo::write::style_engine::ColorSpec::Rgb(
+                                        res.fill.fg.val,
+                                    ))
+                                }
+                                crate::turbo::styles::CKind::Theme => {
+                                    Some(crate::turbo::write::style_engine::ColorSpec::Theme(
+                                        res.fill.fg.val,
+                                        (res.fill.fg.tint as f64).to_bits(),
+                                    ))
+                                }
+                                crate::turbo::styles::CKind::Indexed => {
+                                    Some(crate::turbo::write::style_engine::ColorSpec::Indexed(
+                                        res.fill.fg.val,
+                                    ))
+                                }
                                 _ => None,
                             };
                             let bg = match res.fill.bg.kind {
-                                crate::turbo::styles::CKind::Rgb => Some(crate::turbo::write::style_engine::ColorSpec::Rgb(res.fill.bg.val)),
-                                crate::turbo::styles::CKind::Theme => Some(crate::turbo::write::style_engine::ColorSpec::Theme(res.fill.bg.val, (res.fill.bg.tint as f64).to_bits())),
-                                crate::turbo::styles::CKind::Indexed => Some(crate::turbo::write::style_engine::ColorSpec::Indexed(res.fill.bg.val)),
+                                crate::turbo::styles::CKind::Rgb => {
+                                    Some(crate::turbo::write::style_engine::ColorSpec::Rgb(
+                                        res.fill.bg.val,
+                                    ))
+                                }
+                                crate::turbo::styles::CKind::Theme => {
+                                    Some(crate::turbo::write::style_engine::ColorSpec::Theme(
+                                        res.fill.bg.val,
+                                        (res.fill.bg.tint as f64).to_bits(),
+                                    ))
+                                }
+                                crate::turbo::styles::CKind::Indexed => {
+                                    Some(crate::turbo::write::style_engine::ColorSpec::Indexed(
+                                        res.fill.bg.val,
+                                    ))
+                                }
                                 _ => None,
                             };
-                            desc.fill = Some(crate::turbo::write::style_engine::FillDesc::Pattern {
-                                pattern_type: Some(res.fill.pattern.clone()),
-                                fg,
-                                bg,
-                            });
+                            desc.fill =
+                                Some(crate::turbo::write::style_engine::FillDesc::Pattern {
+                                    pattern_type: Some(res.fill.pattern.clone()),
+                                    fg,
+                                    bg,
+                                });
                         }
 
                         let conv_side = |s: &crate::turbo::styles::Side| -> Option<crate::turbo::write::style_engine::SideDesc> {
@@ -560,7 +612,11 @@ impl WorkbookOverlay {
                             hidden: res.protection.hidden,
                         });
 
-                        desc.num_fmt = if res.number_format.is_empty() { None } else { Some(res.number_format.clone()) };
+                        desc.num_fmt = if res.number_format.is_empty() {
+                            None
+                        } else {
+                            Some(res.number_format.clone())
+                        };
                         desc.named_style = res.style_name.clone();
 
                         map.insert((row, col), desc);
@@ -574,7 +630,10 @@ impl WorkbookOverlay {
     }
 
     pub fn ensure_merged_cache(&mut self, sheet_name: &str) -> TurboResult<()> {
-        let so = self.sheet_overlays.entry(sheet_name.to_string()).or_default();
+        let so = self
+            .sheet_overlays
+            .entry(sheet_name.to_string())
+            .or_default();
         if so.merged_lookup.is_some() {
             return Ok(());
         }
@@ -582,7 +641,9 @@ impl WorkbookOverlay {
         if let Some(target) = self.archive_map.sheet_name_map.get(sheet_name) {
             if let Some(xml) = inflate_entry(&self.archive_map, target)? {
                 if let Some(m_start) = find_element(&xml, b"mergeCells", 0) {
-                    let m_end = if let Some(close_pos) = memchr::memmem::find(&xml[m_start..], b"</mergeCells>") {
+                    let m_end = if let Some(close_pos) =
+                        memchr::memmem::find(&xml[m_start..], b"</mergeCells>")
+                    {
                         m_start + close_pos + b"</mergeCells>".len()
                     } else if let Some(gt_pos) = memchr::memchr(b'>', &xml[m_start..]) {
                         m_start + gt_pos + 1
@@ -632,9 +693,19 @@ impl WorkbookOverlay {
         Ok(())
     }
 
-    pub fn merge_cells(&mut self, sheet_name: &str, r1: u32, c1: u32, r2: u32, c2: u32) -> TurboResult<()> {
+    pub fn merge_cells(
+        &mut self,
+        sheet_name: &str,
+        r1: u32,
+        c1: u32,
+        r2: u32,
+        c2: u32,
+    ) -> TurboResult<()> {
         self.ensure_merged_cache(sheet_name)?;
-        let so = self.sheet_overlays.entry(sheet_name.to_string()).or_default();
+        let so = self
+            .sheet_overlays
+            .entry(sheet_name.to_string())
+            .or_default();
         for &(a1, b1, a2, b2) in &so.merged_bounds {
             if r1 <= a2 && r2 >= a1 && c1 <= b2 && c2 >= b1 {
                 let range_str = format!("{}:{}:{}:{}", r1, c1, r2, c2);
@@ -661,10 +732,22 @@ impl WorkbookOverlay {
         Ok(())
     }
 
-    pub fn unmerge_cells(&mut self, sheet_name: &str, r1: u32, c1: u32, r2: u32, c2: u32) -> TurboResult<()> {
+    pub fn unmerge_cells(
+        &mut self,
+        sheet_name: &str,
+        r1: u32,
+        c1: u32,
+        r2: u32,
+        c2: u32,
+    ) -> TurboResult<()> {
         self.ensure_merged_cache(sheet_name)?;
-        let so = self.sheet_overlays.entry(sheet_name.to_string()).or_default();
-        let to_remove: Vec<(u32, u32, u32, u32)> = so.merged_bounds.iter()
+        let so = self
+            .sheet_overlays
+            .entry(sheet_name.to_string())
+            .or_default();
+        let to_remove: Vec<(u32, u32, u32, u32)> = so
+            .merged_bounds
+            .iter()
             .copied()
             .filter(|&(a1, b1, a2, b2)| r1 <= a2 && r2 >= a1 && c1 <= b2 && c2 >= b1)
             .collect();
@@ -711,9 +794,12 @@ impl WorkbookOverlay {
             return Ok(());
         }
         self.structure_dirty = true;
-        self.renamed_sheets.push((old_name.to_string(), new_name.to_string()));
+        self.renamed_sheets
+            .push((old_name.to_string(), new_name.to_string()));
         if let Some(target) = self.archive_map.sheet_name_map.remove(old_name) {
-            self.archive_map.sheet_name_map.insert(new_name.to_string(), target);
+            self.archive_map
+                .sheet_name_map
+                .insert(new_name.to_string(), target);
         }
         for n in &mut self.archive_map.sheet_names {
             if n == old_name {
@@ -766,13 +852,17 @@ impl WorkbookOverlay {
         self.create_sheet(target_title, None)?;
 
         if let Some(src_ov) = self.sheet_overlays.get(src_name).cloned() {
-            let target_ov = self.sheet_overlays.entry(target_title.to_string()).or_default();
+            let target_ov = self
+                .sheet_overlays
+                .entry(target_title.to_string())
+                .or_default();
             target_ov.modified_cells = src_ov.modified_cells;
             target_ov.modified_styles = src_ov.modified_styles;
             target_ov.ops = src_ov.ops;
             target_ov.is_dirty = true;
         }
-        self.hydrated.insert(target_title.to_string(), Arc::new(new_sheet));
+        self.hydrated
+            .insert(target_title.to_string(), Arc::new(new_sheet));
         Ok(())
     }
 
@@ -782,7 +872,8 @@ impl WorkbookOverlay {
         }
         if let Some(s) = self.new_sheets.iter().find(|s| s.name == sheet_name) {
             let arc = Arc::new(s.clone());
-            self.hydrated.insert(sheet_name.to_string(), Arc::clone(&arc));
+            self.hydrated
+                .insert(sheet_name.to_string(), Arc::clone(&arc));
             return Ok(Some(arc));
         }
         let Some(target) = self.archive_map.sheet_name_map.get(sheet_name) else {
@@ -793,7 +884,8 @@ impl WorkbookOverlay {
         };
         let sheet = hydrate_sheet_from_xml(&xml, &self.archive_map.shared_strings)?;
         let arc = Arc::new(sheet);
-        self.hydrated.insert(sheet_name.to_string(), Arc::clone(&arc));
+        self.hydrated
+            .insert(sheet_name.to_string(), Arc::clone(&arc));
         Ok(Some(arc))
     }
 
@@ -835,7 +927,8 @@ impl WorkbookOverlay {
                         };
                         let name = extract_xml_attr_str(tag, "name");
                         let sheet_id_str = extract_xml_attr_str(tag, "sheetId");
-                        let rid = extract_xml_attr_str(tag, "r:id").or_else(|| extract_xml_attr_str(tag, "id"));
+                        let rid = extract_xml_attr_str(tag, "r:id")
+                            .or_else(|| extract_xml_attr_str(tag, "id"));
                         if let (Some(n), Some(s_id), Some(r)) = (name, sheet_id_str, rid) {
                             let sid: u32 = s_id.parse().unwrap_or(1);
                             if sid > max_sheet_id {
@@ -881,7 +974,11 @@ impl WorkbookOverlay {
 
         for name in &final_names {
             let existing = existing_sheets.iter().find(|(n, _, _)| {
-                n == name || self.renamed_sheets.iter().any(|(old, new)| old == n && new == name)
+                n == name
+                    || self
+                        .renamed_sheets
+                        .iter()
+                        .any(|(old, new)| old == n && new == name)
             });
 
             if let Some((_, sid, rid)) = existing {
@@ -894,12 +991,16 @@ impl WorkbookOverlay {
                 let part_path = loop {
                     let path = format!("xl/worksheets/sheet{assigned_parts_count}.xml");
                     assigned_parts_count += 1;
-                    if !self.archive_map.entries.contains_key(&path) && !new_parts.values().any(|p| p == &path) {
+                    if !self.archive_map.entries.contains_key(&path)
+                        && !new_parts.values().any(|p| p == &path)
+                    {
                         break path;
                     }
                 };
                 new_parts.insert(name.clone(), part_path.clone());
-                self.archive_map.sheet_name_map.insert(name.clone(), part_path);
+                self.archive_map
+                    .sheet_name_map
+                    .insert(name.clone(), part_path);
                 final_sheet_entries.push((name.clone(), sid, rid));
             }
         }
@@ -924,7 +1025,9 @@ impl WorkbookOverlay {
             }
         }
 
-        let wb_rels_xml = if let Some(rels_raw) = inflate_entry(&self.archive_map, "xl/_rels/workbook.xml.rels")? {
+        let wb_rels_xml = if let Some(rels_raw) =
+            inflate_entry(&self.archive_map, "xl/_rels/workbook.xml.rels")?
+        {
             let rels_str = String::from_utf8_lossy(&rels_raw);
             let deleted_rids: Vec<String> = existing_sheets
                 .iter()
@@ -975,7 +1078,9 @@ impl WorkbookOverlay {
             None
         };
 
-        let content_types_xml = if let Some(ct_raw) = inflate_entry(&self.archive_map, "[Content_Types].xml")? {
+        let content_types_xml = if let Some(ct_raw) =
+            inflate_entry(&self.archive_map, "[Content_Types].xml")?
+        {
             let ct_str = String::from_utf8_lossy(&ct_raw);
             let mut additions = String::new();
             for part_path in new_parts.values() {
@@ -1118,9 +1223,10 @@ impl WorkbookOverlay {
                 } else if sheet_name.starts_with("xl/") {
                     modified_entry_paths.insert(sheet_name.clone());
                 } else {
-                    let p = assigned_new_parts.get(sheet_name).cloned().unwrap_or_else(|| {
-                        format!("xl/worksheets/{sheet_name}.xml")
-                    });
+                    let p = assigned_new_parts
+                        .get(sheet_name)
+                        .cloned()
+                        .unwrap_or_else(|| format!("xl/worksheets/{sheet_name}.xml"));
                     modified_entry_paths.insert(p);
                 }
             }
@@ -1154,7 +1260,8 @@ impl WorkbookOverlay {
             .any(|o| o.is_dirty && (!o.modified_cells.is_empty() || !o.ops.is_empty()));
 
         // Deterministic (G3): process dirty sheets in sorted name order.
-        let mut dirty_names: Vec<&String> = self.sheet_overlays
+        let mut dirty_names: Vec<&String> = self
+            .sheet_overlays
             .iter()
             .filter(|(_, o)| o.is_dirty)
             .map(|(k, _)| k)
@@ -1172,9 +1279,10 @@ impl WorkbookOverlay {
                     if sheet_name.starts_with("xl/") {
                         sheet_name.clone()
                     } else {
-                        assigned_new_parts.get(sheet_name).cloned().unwrap_or_else(|| {
-                            format!("xl/worksheets/{sheet_name}.xml")
-                        })
+                        assigned_new_parts
+                            .get(sheet_name)
+                            .cloned()
+                            .unwrap_or_else(|| format!("xl/worksheets/{sheet_name}.xml"))
                     }
                 }
             };
@@ -1339,9 +1447,10 @@ impl WorkbookOverlay {
         }
 
         for new_sheet in &self.new_sheets {
-            let part_path = assigned_new_parts.get(&new_sheet.name).cloned().unwrap_or_else(|| {
-                format!("xl/worksheets/{}.xml", new_sheet.name)
-            });
+            let part_path = assigned_new_parts
+                .get(&new_sheet.name)
+                .cloned()
+                .unwrap_or_else(|| format!("xl/worksheets/{}.xml", new_sheet.name));
             if !rendered.contains_key(&part_path) {
                 let mut sst = SstBuilder::new();
                 let xml = write_worksheet(new_sheet, false, false, &mut sst);
@@ -1387,10 +1496,15 @@ impl WorkbookOverlay {
         overlay_names.sort();
         for sheet_name in overlay_names {
             let overlay = &self.sheet_overlays[sheet_name];
-            let entry_name = self.archive_map.sheet_name_map.get(sheet_name)
+            let entry_name = self
+                .archive_map
+                .sheet_name_map
+                .get(sheet_name)
                 .cloned()
                 .unwrap_or_else(|| format!("xl/worksheets/{sheet_name}.xml"));
-            let stem = entry_name.strip_prefix("xl/worksheets/").unwrap_or("sheet1.xml");
+            let stem = entry_name
+                .strip_prefix("xl/worksheets/")
+                .unwrap_or("sheet1.xml");
             let rels_path = format!("xl/worksheets/_rels/{stem}.rels");
 
             if !overlay.hyperlinks.is_empty() {
@@ -1443,10 +1557,32 @@ impl WorkbookOverlay {
                             r1: r - 1,
                             c1: c - 1,
                         });
-                        hl_tags.push_str(&format!("<hyperlink ref=\"{ref_str}\" r:id=\"rId{link_id}\"/>"));
+                        hl_tags.push_str(&format!(
+                            "<hyperlink ref=\"{ref_str}\" r:id=\"rId{link_id}\"/>"
+                        ));
                     }
                     hl_tags.push_str("</hyperlinks>");
-                    splice_element(sheet_xml, b"hyperlinks", Some(hl_tags.as_bytes()), &[b"</mergeCells>", b"</sheetData>"]);
+                    splice_tail_control(
+                        sheet_xml,
+                        b"hyperlinks",
+                        hl_tags.as_bytes(),
+                        &[
+                            b"dataValidations",
+                            b"conditionalFormatting",
+                            b"phoneticPr",
+                            b"mergeCells",
+                            b"customSheetViews",
+                            b"dataConsolidate",
+                            b"sortState",
+                            b"autoFilter",
+                            b"scenarios",
+                            b"protectedRanges",
+                            b"sheetProtection",
+                            b"sheetCalcPr",
+                            b"sheetData",
+                        ],
+                        b"</sheetData>",
+                    );
                 }
             }
         }
@@ -1454,7 +1590,10 @@ impl WorkbookOverlay {
         let mut comment_counter = 0u32;
         for entry in self.archive_map.entry_order.iter() {
             if entry.starts_with("xl/comments/comment") && entry.ends_with(".xml") {
-                if let Some(num_str) = entry.strip_prefix("xl/comments/comment").and_then(|s| s.strip_suffix(".xml")) {
+                if let Some(num_str) = entry
+                    .strip_prefix("xl/comments/comment")
+                    .and_then(|s| s.strip_suffix(".xml"))
+                {
                     if let Ok(num) = num_str.parse::<u32>() {
                         comment_counter = comment_counter.max(num);
                     }
@@ -1470,7 +1609,8 @@ impl WorkbookOverlay {
                 comment_counter += 1;
                 let cid = comment_counter;
                 let mut comments_vec: Vec<crate::turbo::write::model::Comment> = Vec::new();
-                let mut comm_items: Vec<(&(u32, u32), &(String, String))> = overlay.comments.iter().collect();
+                let mut comm_items: Vec<(&(u32, u32), &(String, String))> =
+                    overlay.comments.iter().collect();
                 comm_items.sort_by_key(|item| *item.0);
                 for (&(r, c), (text, author)) in comm_items {
                     let ref_str = crate::turbo::range_a1(&crate::turbo::CellRange {
@@ -1481,7 +1621,11 @@ impl WorkbookOverlay {
                     });
                     comments_vec.push(crate::turbo::write::model::Comment {
                         ref_: ref_str,
-                        author: if author.is_empty() { "Author".into() } else { author.clone() },
+                        author: if author.is_empty() {
+                            "Author".into()
+                        } else {
+                            author.clone()
+                        },
                         text: text.clone(),
                         height: 79,
                         width: 144,
@@ -1495,10 +1639,15 @@ impl WorkbookOverlay {
                 ct_overrides_to_add.push(comments_path);
                 ct_needs_vml = true;
 
-                let entry_name = self.archive_map.sheet_name_map.get(sheet_name)
+                let entry_name = self
+                    .archive_map
+                    .sheet_name_map
+                    .get(sheet_name)
                     .cloned()
                     .unwrap_or_else(|| format!("xl/worksheets/{sheet_name}.xml"));
-                let stem = entry_name.strip_prefix("xl/worksheets/").unwrap_or("sheet1.xml");
+                let stem = entry_name
+                    .strip_prefix("xl/worksheets/")
+                    .unwrap_or("sheet1.xml");
                 let rels_path = format!("xl/worksheets/_rels/{stem}.rels");
                 let mut rels_xml = match rendered.get(&rels_path) {
                     Some(rx) => String::from_utf8_lossy(rx).to_string(),
@@ -1532,9 +1681,17 @@ impl WorkbookOverlay {
                 }
 
                 if let Some(sheet_xml) = rendered.get_mut(&entry_name) {
-                    if !sheet_xml.windows(b"<legacyDrawing".len()).any(|w| w == b"<legacyDrawing") {
+                    if !sheet_xml
+                        .windows(b"<legacyDrawing".len())
+                        .any(|w| w == b"<legacyDrawing")
+                    {
                         let leg = format!("<legacyDrawing r:id=\"{v_rid}\"/>");
-                        splice_element(sheet_xml, b"legacyDrawing", Some(leg.as_bytes()), &[b"</sheetData>", b"</worksheet>"]);
+                        splice_element(
+                            sheet_xml,
+                            b"legacyDrawing",
+                            Some(leg.as_bytes()),
+                            &[b"</sheetData>", b"</worksheet>"],
+                        );
                     }
                 }
             }
@@ -2463,7 +2620,10 @@ fn emit_cell(out: &mut Vec<u8>, row: u32, col: u32, val: &CellValue, s_attr: Opt
         CellValue::Empty => {
             push(out, b"/>");
         }
-        CellValue::Number(n) | CellValue::DateSerial(n) | CellValue::Time(n) | CellValue::Duration(n) => {
+        CellValue::Number(n)
+        | CellValue::DateSerial(n)
+        | CellValue::Time(n)
+        | CellValue::Duration(n) => {
             push(out, b"><v>");
             write_f64(out, *n);
             push(out, b"</v></c>");
@@ -2591,13 +2751,14 @@ pub(crate) fn splice_element(
 ) {
     if let Some(s_pos) = find_element(xml, tag, 0) {
         let tag_close = format!("</{}>", std::str::from_utf8(tag).unwrap_or(""));
-        let e_pos = if let Some(close_pos) = memchr::memmem::find(&xml[s_pos..], tag_close.as_bytes()) {
-            s_pos + close_pos + tag_close.len()
-        } else if let Some(gt_pos) = memchr::memchr(b'>', &xml[s_pos..]) {
-            s_pos + gt_pos + 1
-        } else {
-            s_pos
-        };
+        let e_pos =
+            if let Some(close_pos) = memchr::memmem::find(&xml[s_pos..], tag_close.as_bytes()) {
+                s_pos + close_pos + tag_close.len()
+            } else if let Some(gt_pos) = memchr::memchr(b'>', &xml[s_pos..]) {
+                s_pos + gt_pos + 1
+            } else {
+                s_pos
+            };
         let mut new_xml = Vec::with_capacity(xml.len() + replacement.map_or(0, |r| r.len()));
         new_xml.extend_from_slice(&xml[..s_pos]);
         if let Some(rep) = replacement {
@@ -2613,9 +2774,7 @@ pub(crate) fn splice_element(
                 break;
             }
         }
-        let pos = ins_pos.unwrap_or_else(|| {
-            memchr::memchr(b'>', xml).map(|p| p + 1).unwrap_or(0)
-        });
+        let pos = ins_pos.unwrap_or_else(|| memchr::memchr(b'>', xml).map(|p| p + 1).unwrap_or(0));
         let mut new_xml = Vec::with_capacity(xml.len() + rep.len());
         new_xml.extend_from_slice(&xml[..pos]);
         new_xml.extend_from_slice(rep);
@@ -2624,10 +2783,75 @@ pub(crate) fn splice_element(
     }
 }
 
-pub(crate) fn splice_sheet_controls(
-    mut xml: Vec<u8>,
-    overlay: &SheetOverlay,
-) -> Vec<u8> {
+/// Replace a worksheet tail element, or insert it after the last predecessor.
+/// Opening tags are matched at element boundaries and their complete element
+/// spans are used, so both paired and self-closing predecessors are supported.
+/// If no predecessor exists, insertion is immediately before `fallback_anchor`.
+pub(crate) fn splice_tail_control(
+    xml: &mut Vec<u8>,
+    tag: &[u8],
+    replacement: &[u8],
+    predecessors: &[&[u8]],
+    fallback_anchor: &[u8],
+) {
+    fn element_end(xml: &[u8], start: usize, tag: &[u8]) -> Option<usize> {
+        let gt = start + memchr::memchr(b'>', &xml[start..])?;
+        let mut before_gt = gt;
+        while before_gt > start && xml[before_gt - 1].is_ascii_whitespace() {
+            before_gt -= 1;
+        }
+        if before_gt > start && xml[before_gt - 1] == b'/' {
+            return Some(gt + 1);
+        }
+
+        let mut close = Vec::with_capacity(tag.len() + 3);
+        close.extend_from_slice(b"</");
+        close.extend_from_slice(tag);
+        close.push(b'>');
+        memchr::memmem::find(&xml[gt + 1..], &close).map(|pos| gt + 1 + pos + close.len())
+    }
+
+    if let Some(start) = find_element(xml, tag, 0) {
+        let Some(end) = element_end(xml, start, tag) else {
+            return;
+        };
+        let mut new_xml = Vec::with_capacity(xml.len() - (end - start) + replacement.len());
+        new_xml.extend_from_slice(&xml[..start]);
+        new_xml.extend_from_slice(replacement);
+        new_xml.extend_from_slice(&xml[end..]);
+        *xml = new_xml;
+        return;
+    }
+
+    if replacement.is_empty() {
+        return;
+    }
+
+    let mut insert_at = None;
+    for &predecessor in predecessors {
+        let mut from = 0usize;
+        while let Some(start) = find_element(xml, predecessor, from) {
+            let Some(end) = element_end(xml, start, predecessor) else {
+                break;
+            };
+            insert_at = Some(insert_at.map_or(end, |current: usize| current.max(end)));
+            from = end;
+        }
+    }
+
+    let insert_at = insert_at.or_else(|| memchr::memmem::find(xml, fallback_anchor));
+    let Some(insert_at) = insert_at else {
+        return;
+    };
+
+    let mut new_xml = Vec::with_capacity(xml.len() + replacement.len());
+    new_xml.extend_from_slice(&xml[..insert_at]);
+    new_xml.extend_from_slice(replacement);
+    new_xml.extend_from_slice(&xml[insert_at..]);
+    *xml = new_xml;
+}
+
+pub(crate) fn splice_sheet_controls(mut xml: Vec<u8>, overlay: &SheetOverlay) -> Vec<u8> {
     // 1. Tab Color in <sheetPr>
     if let Some(ref tc) = overlay.tab_color {
         let tc_clean = tc.trim_start_matches('#');
@@ -2660,7 +2884,12 @@ pub(crate) fn splice_sheet_controls(
             }
         } else {
             let sheet_pr = format!("<sheetPr>{}</sheetPr>", tab_color_tag);
-            splice_element(&mut xml, b"sheetPr", Some(sheet_pr.as_bytes()), &[b"<worksheet>"]);
+            splice_element(
+                &mut xml,
+                b"sheetPr",
+                Some(sheet_pr.as_bytes()),
+                &[b"<worksheet>"],
+            );
         }
     }
 
@@ -2669,18 +2898,40 @@ pub(crate) fn splice_sheet_controls(
         if let Some((r, c, _, _)) = crate::turbo::scan::parse_ref_range_strict(fp.as_bytes()) {
             let (pane_xml, sel_xml) = if c > 1 && r > 1 {
                 (
-                    format!(r#"<pane xSplit="{}" ySplit="{}" topLeftCell="{}" activePane="bottomRight" state="frozen"/>"#, c - 1, r - 1, fp),
-                    format!(r#"<selection pane="bottomRight" activeCell="{}" sqref="{}"/>"#, fp, fp),
+                    format!(
+                        r#"<pane xSplit="{}" ySplit="{}" topLeftCell="{}" activePane="bottomRight" state="frozen"/>"#,
+                        c - 1,
+                        r - 1,
+                        fp
+                    ),
+                    format!(
+                        r#"<selection pane="bottomRight" activeCell="{}" sqref="{}"/>"#,
+                        fp, fp
+                    ),
                 )
             } else if c == 1 && r > 1 {
                 (
-                    format!(r#"<pane ySplit="{}" topLeftCell="{}" activePane="bottomLeft" state="frozen"/>"#, r - 1, fp),
-                    format!(r#"<selection pane="bottomLeft" activeCell="{}" sqref="{}"/>"#, fp, fp),
+                    format!(
+                        r#"<pane ySplit="{}" topLeftCell="{}" activePane="bottomLeft" state="frozen"/>"#,
+                        r - 1,
+                        fp
+                    ),
+                    format!(
+                        r#"<selection pane="bottomLeft" activeCell="{}" sqref="{}"/>"#,
+                        fp, fp
+                    ),
                 )
             } else if c > 1 && r == 1 {
                 (
-                    format!(r#"<pane xSplit="{}" topLeftCell="{}" activePane="topRight" state="frozen"/>"#, c - 1, fp),
-                    format!(r#"<selection pane="topRight" activeCell="{}" sqref="{}"/>"#, fp, fp),
+                    format!(
+                        r#"<pane xSplit="{}" topLeftCell="{}" activePane="topRight" state="frozen"/>"#,
+                        c - 1,
+                        fp
+                    ),
+                    format!(
+                        r#"<selection pane="topRight" activeCell="{}" sqref="{}"/>"#,
+                        fp, fp
+                    ),
                 )
             } else {
                 (String::new(), String::new())
@@ -2690,18 +2941,27 @@ pub(crate) fn splice_sheet_controls(
                     if let Some(view_start) = find_element(&xml[sv_start..], b"sheetView", 0) {
                         let vs = sv_start + view_start;
                         let view_gt = vs + memchr::memchr(b'>', &xml[vs..]).unwrap_or(0);
-                        let view_end = if let Some(c_pos) = memchr::memmem::find(&xml[vs..], b"</sheetView>") {
+                        let view_end = if let Some(c_pos) =
+                            memchr::memmem::find(&xml[vs..], b"</sheetView>")
+                        {
                             vs + c_pos + b"</sheetView>".len()
                         } else {
                             view_gt + 1
                         };
                         let view_open = &xml[vs..=view_gt];
-                        let view_inner = &xml[view_gt + 1..view_end.saturating_sub(b"</sheetView>".len())];
+                        let view_inner =
+                            &xml[view_gt + 1..view_end.saturating_sub(b"</sheetView>".len())];
                         let mut cleaned_inner = view_inner.to_vec();
                         splice_element(&mut cleaned_inner, b"pane", None, &[]);
                         splice_element(&mut cleaned_inner, b"selection", None, &[]);
 
-                        let mut new_view = Vec::with_capacity(view_open.len() + pane_xml.len() + sel_xml.len() + cleaned_inner.len() + 16);
+                        let mut new_view = Vec::with_capacity(
+                            view_open.len()
+                                + pane_xml.len()
+                                + sel_xml.len()
+                                + cleaned_inner.len()
+                                + 16,
+                        );
                         if view_open.ends_with(b"/>") {
                             new_view.extend_from_slice(&view_open[..view_open.len() - 2]);
                             new_view.extend_from_slice(b">");
@@ -2719,12 +2979,26 @@ pub(crate) fn splice_sheet_controls(
                         new_xml.extend_from_slice(&xml[view_end..]);
                         xml = new_xml;
                     } else {
-                        let full_view = format!(r#"<sheetViews><sheetView workbookViewId="0">{pane_xml}{sel_xml}</sheetView></sheetViews>"#);
-                        splice_element(&mut xml, b"sheetViews", Some(full_view.as_bytes()), &[b"</sheetPr>", b"</dimension>", b"<worksheet>"]);
+                        let full_view = format!(
+                            r#"<sheetViews><sheetView workbookViewId="0">{pane_xml}{sel_xml}</sheetView></sheetViews>"#
+                        );
+                        splice_element(
+                            &mut xml,
+                            b"sheetViews",
+                            Some(full_view.as_bytes()),
+                            &[b"</sheetPr>", b"</dimension>", b"<worksheet>"],
+                        );
                     }
                 } else {
-                    let full_view = format!(r#"<sheetViews><sheetView workbookViewId="0">{pane_xml}{sel_xml}</sheetView></sheetViews>"#);
-                    splice_element(&mut xml, b"sheetViews", Some(full_view.as_bytes()), &[b"</sheetPr>", b"</dimension>", b"<worksheet>"]);
+                    let full_view = format!(
+                        r#"<sheetViews><sheetView workbookViewId="0">{pane_xml}{sel_xml}</sheetView></sheetViews>"#
+                    );
+                    splice_element(
+                        &mut xml,
+                        b"sheetViews",
+                        Some(full_view.as_bytes()),
+                        &[b"</sheetPr>", b"</dimension>", b"<worksheet>"],
+                    );
                 }
             }
         }
@@ -2735,27 +3009,46 @@ pub(crate) fn splice_sheet_controls(
         let mut prot_buf = Vec::new();
         crate::turbo::write::emit_sheet_protection(&mut prot_buf, prot);
         if !prot_buf.is_empty() {
-            splice_element(&mut xml, b"sheetProtection", Some(&prot_buf), &[b"</sheetData>"]);
+            splice_tail_control(
+                &mut xml,
+                b"sheetProtection",
+                &prot_buf,
+                &[b"sheetCalcPr", b"sheetData"],
+                b"</sheetData>",
+            );
         }
     }
 
     // 4. AutoFilter (ECMA: after sheetProtection, before mergeCells)
     if let Some(ref af_range) = overlay.auto_filter {
         let af_tag = format!("<autoFilter ref=\"{}\"/>", af_range);
-        splice_element(&mut xml, b"autoFilter", Some(af_tag.as_bytes()), &[b"</sheetProtection>", b"</sheetData>"]);
+        splice_tail_control(
+            &mut xml,
+            b"autoFilter",
+            af_tag.as_bytes(),
+            &[
+                b"scenarios",
+                b"protectedRanges",
+                b"sheetProtection",
+                b"sheetCalcPr",
+                b"sheetData",
+            ],
+            b"</sheetData>",
+        );
     }
 
     // 5. Merges (ECMA: after autoFilter, before conditionalFormatting / dataValidations)
     if !overlay.merges.is_empty() || !overlay.deleted_merges.is_empty() {
         let mut final_merges: Vec<String> = Vec::new();
         if let Some(m_start) = find_element(&xml, b"mergeCells", 0) {
-            let m_end = if let Some(close_pos) = memchr::memmem::find(&xml[m_start..], b"</mergeCells>") {
-                m_start + close_pos + b"</mergeCells>".len()
-            } else if let Some(gt_pos) = memchr::memchr(b'>', &xml[m_start..]) {
-                m_start + gt_pos + 1
-            } else {
-                m_start
-            };
+            let m_end =
+                if let Some(close_pos) = memchr::memmem::find(&xml[m_start..], b"</mergeCells>") {
+                    m_start + close_pos + b"</mergeCells>".len()
+                } else if let Some(gt_pos) = memchr::memchr(b'>', &xml[m_start..]) {
+                    m_start + gt_pos + 1
+                } else {
+                    m_start
+                };
             let m_region = &xml[m_start..m_end];
             let mut pos = 0usize;
             while let Some(cell_pos) = find_element(&m_region[pos..], b"mergeCell", 0) {
@@ -2769,7 +3062,7 @@ pub(crate) fn splice_sheet_controls(
                 }
                 pos = gt + 1;
             }
-            splice_element(&mut xml, b"mergeCells", None, &[]);
+            splice_tail_control(&mut xml, b"mergeCells", b"", &[], b"</sheetData>");
         }
         for m in &overlay.merges {
             if !overlay.deleted_merges.contains(m) && !final_merges.contains(m) {
@@ -2779,7 +3072,23 @@ pub(crate) fn splice_sheet_controls(
         if !final_merges.is_empty() {
             let mut merge_block = Vec::with_capacity(final_merges.len() * 40 + 32);
             crate::turbo::write::emit_merges(&mut merge_block, &final_merges);
-            splice_element(&mut xml, b"mergeCells", Some(&merge_block), &[b"</autoFilter>", b"</sheetProtection>", b"</sheetData>"]);
+            splice_tail_control(
+                &mut xml,
+                b"mergeCells",
+                &merge_block,
+                &[
+                    b"customSheetViews",
+                    b"dataConsolidate",
+                    b"sortState",
+                    b"autoFilter",
+                    b"scenarios",
+                    b"protectedRanges",
+                    b"sheetProtection",
+                    b"sheetCalcPr",
+                    b"sheetData",
+                ],
+                b"</sheetData>",
+            );
         }
     }
 
@@ -2792,16 +3101,117 @@ pub(crate) fn splice_sheet_controls(
         let mut dv_buf = Vec::new();
         crate::turbo::write::emit_data_validations(&overlay.data_validations, &mut dv_buf);
         if !dv_buf.is_empty() {
-            splice_element(&mut xml, b"dataValidations", Some(&dv_buf), &[b"</conditionalFormatting>", b"</mergeCells>", b"</autoFilter>", b"</sheetProtection>", b"</sheetData>"]);
+            splice_tail_control(
+                &mut xml,
+                b"dataValidations",
+                &dv_buf,
+                &[
+                    b"conditionalFormatting",
+                    b"phoneticPr",
+                    b"mergeCells",
+                    b"customSheetViews",
+                    b"dataConsolidate",
+                    b"sortState",
+                    b"autoFilter",
+                    b"scenarios",
+                    b"protectedRanges",
+                    b"sheetProtection",
+                    b"sheetCalcPr",
+                    b"sheetData",
+                ],
+                b"</sheetData>",
+            );
         }
     }
 
-    // 7. Page Setup (ECMA: after hyperlinks/pageMargins)
+    // 7. Print Options (ECMA: after hyperlinks, before pageMargins)
+    if let Some(ref po) = overlay.print_options {
+        let mut po_buf = Vec::new();
+        crate::turbo::write::emit_print_options(&mut po_buf, po);
+        if !po_buf.is_empty() {
+            splice_tail_control(
+                &mut xml,
+                b"printOptions",
+                &po_buf,
+                &[
+                    b"hyperlinks",
+                    b"dataValidations",
+                    b"conditionalFormatting",
+                    b"phoneticPr",
+                    b"mergeCells",
+                    b"customSheetViews",
+                    b"dataConsolidate",
+                    b"sortState",
+                    b"autoFilter",
+                    b"scenarios",
+                    b"protectedRanges",
+                    b"sheetProtection",
+                    b"sheetCalcPr",
+                    b"sheetData",
+                ],
+                b"</sheetData>",
+            );
+        }
+    }
+
+    // 8. Page Margins (ECMA: after printOptions, before pageSetup)
+    if let Some(ref pm) = overlay.page_margins {
+        let mut pm_buf = Vec::new();
+        crate::turbo::write::emit_page_margins(&mut pm_buf, pm);
+        splice_tail_control(
+            &mut xml,
+            b"pageMargins",
+            &pm_buf,
+            &[
+                b"printOptions",
+                b"hyperlinks",
+                b"dataValidations",
+                b"conditionalFormatting",
+                b"phoneticPr",
+                b"mergeCells",
+                b"customSheetViews",
+                b"dataConsolidate",
+                b"sortState",
+                b"autoFilter",
+                b"scenarios",
+                b"protectedRanges",
+                b"sheetProtection",
+                b"sheetCalcPr",
+                b"sheetData",
+            ],
+            b"</sheetData>",
+        );
+    }
+
+    // 9. Page Setup (ECMA: after pageMargins/hyperlinks)
     if let Some(ref ps) = overlay.page_setup {
         let mut ps_buf = Vec::new();
         crate::turbo::write::emit_page_setup(&mut ps_buf, ps);
         if !ps_buf.is_empty() {
-            splice_element(&mut xml, b"pageSetup", Some(&ps_buf), &[b"</hyperlinks>", b"</dataValidations>", b"</mergeCells>", b"</sheetData>"]);
+            splice_tail_control(
+                &mut xml,
+                b"pageSetup",
+                &ps_buf,
+                &[
+                    b"pageMargins",
+                    b"printOptions",
+                    b"hyperlinks",
+                    b"dataValidations",
+                    b"conditionalFormatting",
+                    b"phoneticPr",
+                    b"mergeCells",
+                    b"customSheetViews",
+                    b"dataConsolidate",
+                    b"sortState",
+                    b"autoFilter",
+                    b"scenarios",
+                    b"protectedRanges",
+                    b"sheetProtection",
+                    b"sheetCalcPr",
+                    b"sheetData",
+                ],
+                b"</sheetData>",
+            );
         }
     }
 
@@ -3799,6 +4209,116 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&out),
             r#"<c r="B1" t="b"><f t="dataTable" ref="B1:B2" dt2D="1" r1="C1" r2="C2" del1="1" ca="1"/><v>1</v></c>"#
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Golden element-order assertion: a maximally-spliced worksheet body must
+    // reproduce the writer's ECMA tail order exactly (writer.rs: mergeCells ->
+    // dataValidations -> hyperlinks -> printOptions -> pageMargins -> pageSetup).
+    // -----------------------------------------------------------------------
+
+    /// Extract the top-level (worksheet-child) element names in document order.
+    fn top_level_element_names(xml: &[u8]) -> String {
+        let ws = find_element(xml, b"worksheet", 0).expect("worksheet root");
+        let gt = ws + memchr::memchr(b'>', &xml[ws..]).expect("worksheet open tag");
+        let mut names: Vec<&str> = Vec::new();
+        let mut depth = 1usize; // just inside <worksheet>
+        let mut pos = gt + 1;
+        while pos < xml.len() {
+            let Some(rel) = memchr::memchr(b'<', &xml[pos..]) else {
+                break;
+            };
+            let s = pos + rel;
+            if xml.get(s + 1) == Some(&b'/') {
+                depth = depth.saturating_sub(1);
+                pos = s + 2;
+                continue;
+            }
+            let name_start = s + 1;
+            let name_end = name_start
+                + xml[name_start..]
+                    .iter()
+                    .take_while(|b| b.is_ascii_alphanumeric() || **b == b'_')
+                    .count();
+            if name_end == name_start {
+                pos = s + 1;
+                continue;
+            }
+            let name = std::str::from_utf8(&xml[name_start..name_end]).unwrap_or("");
+            let e_rel = memchr::memchr(b'>', &xml[s..]).unwrap_or(xml.len() - s);
+            let e = s + e_rel;
+            let self_close = e > s && xml[e - 1] == b'/';
+            if depth == 1 {
+                names.push(name);
+            }
+            if !self_close {
+                depth += 1;
+            }
+            pos = e + 1;
+        }
+        names.join(" ")
+    }
+
+    #[test]
+    fn maximal_splice_preserves_ecma_element_order() {
+        let map = ArchiveMap::parse(Arc::new(source_bytes())).unwrap();
+        let mut ov = WorkbookOverlay::new(map);
+        let so = ov.sheet_overlays.entry("Sheet".to_string()).or_default();
+        so.protection = Some(crate::turbo::write::model::SheetProtection {
+            sheet: true,
+            password: None,
+            already_hashed: true,
+        });
+        so.auto_filter = Some("A1:C3".to_string());
+        so.merges.push("A1:B2".to_string());
+        so.data_validations
+            .push(crate::turbo::write::DataValidation {
+                type_: Some("list".into()),
+                operator: None,
+                formula1: Some("\"Option1,Option2\"".into()),
+                formula2: None,
+                sqref: "A1:A10".into(),
+                allow_blank: true,
+                show_error_message: false,
+                show_input_message: false,
+                show_drop_down: false,
+                error_title: None,
+                error: None,
+                prompt_title: None,
+                prompt: None,
+            });
+        so.hyperlinks.insert((1, 1), "https://example.com".into());
+        so.print_options = Some(PrintOptions {
+            horizontal_centered: true,
+            vertical_centered: true,
+            headings: true,
+            grid_lines: true,
+        });
+        so.page_margins = Some(PageMargins {
+            left: 0.5,
+            right: 0.5,
+            top: 0.75,
+            bottom: 0.75,
+            header: 0.3,
+            footer: 0.3,
+        });
+        so.page_setup = Some(crate::turbo::write::model::PageSetup {
+            orientation: Some("landscape".into()),
+            paper_size: Some(9),
+            scale: Some(85),
+            ..Default::default()
+        });
+        so.is_dirty = true;
+
+        let saved = ov.save().expect("save must succeed");
+        let map = ArchiveMap::parse(Arc::new(saved)).unwrap();
+        let xml = inflate_entry(&map, "xl/worksheets/sheet1.xml")
+            .expect("sheet part")
+            .expect("sheet part must inflate");
+        assert_eq!(
+            top_level_element_names(&xml),
+            "sheetPr dimension sheetViews sheetFormatPr sheetData sheetProtection autoFilter mergeCells dataValidations hyperlinks printOptions pageMargins pageSetup"
         );
     }
 }

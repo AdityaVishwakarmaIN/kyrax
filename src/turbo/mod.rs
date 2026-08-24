@@ -244,6 +244,8 @@ pub struct TurboWorkbook {
     pub workbook_props: Option<WorkbookProps>,
     /// Always parsed from workbookPr (date serial epoch flag; serials not rewritten).
     pub date1904: bool,
+    /// 0-based index of the active tab (`<workbookView @activeTab>`); 0 when absent.
+    pub active_tab: u32,
     /// Persons part (threaded comments authors), gated by [`Features::COMMENTS`].
     pub persons: Option<Vec<Person>>,
     /// VBA project blob, gated by [`Features::VBA`].
@@ -303,11 +305,23 @@ pub fn list_sheet_names_with_password(
     path: &str,
     password: Option<&str>,
 ) -> TurboResult<Vec<String>> {
+    list_sheet_names_and_active_tab_with_password(path, password).map(|(names, _)| names)
+}
+
+/// Read worksheet names and the active-tab index without parsing sheet data.
+pub(crate) fn list_sheet_names_and_active_tab_with_password(
+    path: &str,
+    password: Option<&str>,
+) -> TurboResult<(Vec<String>, u32)> {
     let zip = open_package_bytes(path, password)?;
     let wb_xml = read_entry(&zip, "xl/workbook.xml")?
         .ok_or_else(|| TurboError::MissingPart("xl/workbook.xml".into()))?;
     let (sheet_metas, _) = parse_workbook(&wb_xml);
-    Ok(sheet_metas.into_iter().map(|m| m.name).collect())
+    let (_, _, _, _, active_tab) = meta::parse_workbook_pr(&wb_xml);
+    Ok((
+        sheet_metas.into_iter().map(|m| m.name).collect(),
+        active_tab,
+    ))
 }
 
 /// Read an XLSX workbook with the turbo fast path.
@@ -389,7 +403,7 @@ fn read_workbook_turbo_filtered(
     let wb_xml = read_entry(&zip, "xl/workbook.xml")?
         .ok_or_else(|| TurboError::MissingPart("xl/workbook.xml".into()))?;
     let (mut sheet_metas, defined_names_all) = parse_workbook(&wb_xml);
-    let (date1904, wb_code_name, full_calc, calc_id) = meta::parse_workbook_pr(&wb_xml);
+    let (date1904, wb_code_name, full_calc, calc_id, active_tab) = meta::parse_workbook_pr(&wb_xml);
     let defined_names = if features.contains(Features::DEFINED_NAMES) {
         Some(defined_names_all)
     } else {
@@ -426,6 +440,7 @@ fn read_workbook_turbo_filtered(
             code_name: wb_code_name,
             full_calc_on_load: full_calc,
             calc_id,
+            active_tab,
             core,
             app,
         })
@@ -902,6 +917,7 @@ fn read_workbook_turbo_filtered(
         style_table: style_table_out,
         workbook_props,
         date1904,
+        active_tab,
         persons,
         vba,
     })
