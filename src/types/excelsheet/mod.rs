@@ -506,6 +506,8 @@ pub struct ExcelSheet {
     opts: LoadSheetOrTableOptions,
     selected_columns: Vec<ColumnInfo>,
     available_columns: AvailableColumns,
+    #[cfg(feature = "python")]
+    pub(crate) cached_schema: std::sync::OnceLock<arrow_schema::SchemaRef>,
 }
 
 impl ExcelSheet {
@@ -548,6 +550,8 @@ impl ExcelSheet {
             available_columns: AvailableColumns::Pending,
             // Empty vec as It'll be replaced
             selected_columns: Vec::with_capacity(0),
+            #[cfg(feature = "python")]
+            cached_schema: std::sync::OnceLock::new(),
         };
         sheet.limit = sheet.compute_limit();
 

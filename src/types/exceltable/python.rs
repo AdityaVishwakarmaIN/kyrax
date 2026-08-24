@@ -133,8 +133,17 @@ impl ExcelTable {
     /// [`ArrowSchema`]: arrow_array::ffi::FFI_ArrowSchema
     /// [`PyCapsule`]: pyo3::types::PyCapsule
     pub fn __arrow_c_schema__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
-        let schema = selected_columns_to_schema(&self.selected_columns);
-        Ok(to_schema_pycapsule(py, &schema)?)
+        let schema = if let Some(s) = self.cached_schema.get() {
+            Arc::clone(s)
+        } else {
+            let s = match RecordBatch::try_from(self) {
+                Ok(rb) => rb.schema(),
+                Err(_) => Arc::new(crate::data::selected_columns_to_schema(&self.selected_columns)),
+            };
+            let _ = self.cached_schema.set(Arc::clone(&s));
+            s
+        };
+        Ok(to_schema_pycapsule(py, schema.as_ref())?)
     }
 
     /// Export the schema and data as a pair of [`ArrowSchema`] and [`ArrowArray`] [`PyCapsules`]
@@ -152,6 +161,9 @@ impl ExcelTable {
         requested_schema: Option<Bound<'py, PyCapsule>>,
     ) -> PyResult<Bound<'py, PyTuple>> {
         let record_batch = RecordBatch::try_from(self);
+        if let Ok(ref rb) = record_batch {
+            let _ = self.cached_schema.set(rb.schema());
+        }
 
         // Runs with the GIL held; see the equivalent call in `ExcelSheet::__arrow_c_array__`.
         crate::data::warn_dtype_promotions(py, &format!("table \"{}\"", self.name))?;

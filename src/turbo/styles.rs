@@ -50,6 +50,7 @@ pub struct Font {
     pub sz: f32,
     pub bold: bool,
     pub italic: bool,
+    pub strike: bool,
     pub underline: Option<String>,
     pub color: Color,
     pub family: i32,
@@ -62,6 +63,7 @@ impl Font {
             sz: 11.0,
             bold: false,
             italic: false,
+            strike: false,
             underline: None,
             color: Color::default_rgb(),
             family: 0,
@@ -186,6 +188,7 @@ pub struct DxfFont {
     pub sz: Option<f32>,
     pub bold: Option<bool>,
     pub italic: Option<bool>,
+    pub strike: Option<bool>,
     pub underline: Option<String>,
     pub color: Option<Color>,
 }
@@ -551,6 +554,10 @@ pub fn parse_style_table(xml: &[u8]) -> StyleTable {
                 .first()
                 .map(|v| parse_bool_flag(v.1, "i").unwrap_or(true))
                 .unwrap_or(false);
+            f.strike = each_element(elem, "strike")
+                .first()
+                .map(|v| parse_bool_flag(v.1, "strike").unwrap_or(true))
+                .unwrap_or(false);
             if let Some(v) = each_element(elem, "u").first() {
                 f.underline =
                     Some(attr_str(v.1, "val", &mut scratch).unwrap_or_else(|| "single".into()));
@@ -846,6 +853,7 @@ fn parse_dxf(elem: &[u8], scratch: &mut Vec<u8>) -> Dxf {
             sz: None,
             bold: None,
             italic: None,
+            strike: None,
             underline: None,
             color: None,
         };
@@ -862,6 +870,9 @@ fn parse_dxf(elem: &[u8], scratch: &mut Vec<u8>) -> Dxf {
         }
         if let Some(v) = each_element(fe, "i").first() {
             df.italic = parse_bool_flag(v.1, "i");
+        }
+        if let Some(v) = each_element(fe, "strike").first() {
+            df.strike = parse_bool_flag(v.1, "strike");
         }
         if let Some(v) = each_element(fe, "u").first() {
             df.underline = Some(attr_str(v.1, "val", scratch).unwrap_or_else(|| "single".into()));

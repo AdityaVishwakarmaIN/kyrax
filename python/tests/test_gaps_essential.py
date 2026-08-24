@@ -425,11 +425,11 @@ def test_pycell_mutations_and_save_validation(tmp_path: Path):
     c = ws.cell(row=1, column=1, value="Hello")
     assert c.value == "Hello"
 
-    # Unsupported mutations raise NotImplementedError
-    with pytest.raises(NotImplementedError):
-        c.hyperlink = "https://example.com"
-    with pytest.raises(NotImplementedError):
-        c.comment = "A comment"
+    # Hyperlink + comment are implemented (plan items 33 / R4): set and read back
+    c.hyperlink = "https://example.com"
+    assert c.hyperlink == "https://example.com"
+    c.comment = "A comment"
+    assert c.comment == "A comment"
 
     # Pre-validation on save: non-seekable / invalid target
     class NonSeekableStream:

@@ -128,6 +128,7 @@ fn font_to_dict<'py>(py: Python<'py>, font: &Font) -> PyResult<Bound<'py, PyDict
     d.set_item("size", font.sz as f64)?;
     d.set_item("bold", font.bold)?;
     d.set_item("italic", font.italic)?;
+    d.set_item("strike", font.strike)?;
     d.set_item("underline", font.underline.as_deref().unwrap_or("none"))?;
     d.set_item("color", color_to_dict(py, &font.color)?)?;
     Ok(d)
@@ -613,6 +614,25 @@ impl PyTurboSheet {
             .map_err(|err| arrow_err(err.to_string()))
             .into_pyresult()
             .and_then(|obj| obj.into_bound_py_any(py))
+    }
+
+    /// Values as a pyarrow `RecordBatch` accompanied by `CellErrors` structure.
+    #[cfg(feature = "pyarrow")]
+    fn to_arrow_with_errors<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        use pyo3::IntoPyObjectExt;
+        let rb = self.to_arrow(py)?;
+        let errors = crate::types::excelsheet::CellErrors {
+            errors: self
+                .cell_errors
+                .iter()
+                .map(|e| crate::types::excelsheet::CellError {
+                    position: (e.row as usize, e.col as usize),
+                    row_offset: 0,
+                    detail: e.code.clone(),
+                })
+                .collect(),
+        };
+        (rb, errors).into_bound_py_any(py)
     }
 
     /// Per-column style xf indices, or None if styles not requested.
@@ -1233,6 +1253,7 @@ fn dxf_to_dict<'py>(py: Python<'py>, dxf: &super::Dxf) -> PyResult<Bound<'py, Py
         fd.set_item("sz", f.sz.map(|s| s as f64))?;
         fd.set_item("b", f.bold)?;
         fd.set_item("i", f.italic)?;
+        fd.set_item("strike", f.strike)?;
         fd.set_item("u", f.underline.as_deref())?;
         if let Some(ref c) = f.color {
             fd.set_item("color", color_to_dict(py, c)?)?;

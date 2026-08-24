@@ -122,7 +122,7 @@ impl ColorSpec {
 // Font / Fill / Border / Alignment / Protection
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub struct FontDesc {
     pub name: Option<String>,
     /// Font size stored as IEEE bits for Eq/Hash (openpyxl uses float).

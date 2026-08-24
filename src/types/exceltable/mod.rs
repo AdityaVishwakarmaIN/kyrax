@@ -40,6 +40,8 @@ pub struct ExcelTable {
     total_height: Option<usize>,
     width: Option<usize>,
     limit: usize,
+    #[cfg(feature = "python")]
+    pub(crate) cached_schema: std::sync::OnceLock<arrow_schema::SchemaRef>,
 }
 
 impl ExcelTable {
@@ -151,6 +153,8 @@ impl ExcelTable {
             width: None,
             // Will be replaced
             limit: 0,
+            #[cfg(feature = "python")]
+            cached_schema: std::sync::OnceLock::new(),
         };
         excel_table.limit = excel_table.compute_limit();
 

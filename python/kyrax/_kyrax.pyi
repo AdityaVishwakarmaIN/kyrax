@@ -436,6 +436,11 @@ class _TurboSheet:
         Requires the `pyarrow` extra to be installed.
         """
 
+    def to_arrow_with_errors(self) -> tuple[pa.RecordBatch, pa.RecordBatch]:
+        """Values and errors as a pair of pyarrow `RecordBatch`es: (values, errors).
+        Requires the `pyarrow` extra to be installed.
+        """
+
     def style_indices(self) -> list[list[int]] | None:
         """Per-column uint32 xf indices (length=ncols, each list length=nrows).
 
@@ -557,6 +562,121 @@ class _TurboSheet:
 
     def __repr__(self) -> str: ...
 
+class Font:
+    def __init__(
+        self,
+        name: str | None = None,
+        size: float | None = None,
+        sz: float | None = None,
+        bold: bool | None = None,
+        b: bool | None = None,
+        italic: bool | None = None,
+        i: bool | None = None,
+        strike: bool | None = None,
+        underline: str | None = None,
+        u: str | None = None,
+        color: str | dict | None = None,
+    ) -> None: ...
+    name: str | None
+    size: float | None
+    sz: float | None
+    bold: bool | None
+    b: bool | None
+    italic: bool | None
+    i: bool | None
+    strike: bool | None
+    underline: str | None
+    u: str | None
+    color: str | None
+
+class PatternFill:
+    def __init__(
+        self,
+        fill_type: str | None = None,
+        patternType: str | None = None,
+        start_color: str | dict | None = None,
+        end_color: str | dict | None = None,
+        fgColor: str | dict | None = None,
+        bgColor: str | dict | None = None,
+    ) -> None: ...
+    fill_type: str | None
+    patternType: str | None
+    start_color: str | None
+    end_color: str | None
+    fgColor: str | None
+    bgColor: str | None
+
+class Side:
+    def __init__(
+        self,
+        style: str | None = None,
+        border_style: str | None = None,
+        color: str | dict | None = None,
+    ) -> None: ...
+    style: str | None
+    border_style: str | None
+    color: str | None
+
+class Border:
+    def __init__(
+        self,
+        left: Side | None = None,
+        right: Side | None = None,
+        top: Side | None = None,
+        bottom: Side | None = None,
+        diagonal: Side | None = None,
+        diagonal_up: bool = False,
+        diagonal_down: bool = False,
+        diagonalUp: bool | None = None,
+        diagonalDown: bool | None = None,
+        outline: bool = True,
+    ) -> None: ...
+    left: Side | None
+    right: Side | None
+    top: Side | None
+    bottom: Side | None
+    diagonal: Side | None
+    diagonal_up: bool
+    diagonal_down: bool
+    outline: bool
+
+class Alignment:
+    def __init__(
+        self,
+        horizontal: str | None = None,
+        vertical: str | None = None,
+        text_rotation: int = 0,
+        textRotation: int | None = None,
+        wrap_text: bool | None = None,
+        wrapText: bool | None = None,
+        shrink_to_fit: bool | None = None,
+        shrinkToFit: bool | None = None,
+        indent: int = 0,
+        relative_indent: int = 0,
+        relativeIndent: int | None = None,
+        justify_last_line: bool | None = None,
+        justifyLastLine: bool | None = None,
+        reading_order: int = 0,
+        readingOrder: int | None = None,
+    ) -> None: ...
+    horizontal: str | None
+    vertical: str | None
+    text_rotation: int
+    wrap_text: bool | None
+    shrink_to_fit: bool | None
+    indent: int
+
+class Protection:
+    def __init__(self, locked: bool = True, hidden: bool = False) -> None: ...
+    locked: bool
+    hidden: bool
+
+class Comment:
+    def __init__(self, text: str = "", author: str = "") -> None: ...
+    text: str
+    author: str
+    content: str
+
 class Cell:
     """A lazy proxy cell handle on an :class:`EditableSheet`."""
     @property
@@ -570,6 +690,30 @@ class Cell:
     @value.setter
     def value(self, val: object) -> None: ...
     @property
+    def font(self) -> Font: ...
+    @font.setter
+    def font(self, font: Font | dict) -> None: ...
+    @property
+    def fill(self) -> PatternFill: ...
+    @fill.setter
+    def fill(self, fill: PatternFill | dict) -> None: ...
+    @property
+    def border(self) -> Border: ...
+    @border.setter
+    def border(self, border: Border | dict) -> None: ...
+    @property
+    def alignment(self) -> Alignment: ...
+    @alignment.setter
+    def alignment(self, alignment: Alignment | dict) -> None: ...
+    @property
+    def protection(self) -> Protection: ...
+    @protection.setter
+    def protection(self, protection: Protection | dict) -> None: ...
+    @property
+    def style(self) -> str | None: ...
+    @style.setter
+    def style(self, name: str | None) -> None: ...
+    @property
     def number_format(self) -> str | None: ...
     @number_format.setter
     def number_format(self, fmt: str | None) -> None: ...
@@ -580,7 +724,7 @@ class Cell:
     @property
     def comment(self) -> str | None: ...
     @comment.setter
-    def comment(self, comment: str | None) -> None: ...
+    def comment(self, comment: str | Comment | None) -> None: ...
     def offset(self, row: int = 0, column: int = 0) -> Cell: ...
 
 class EditableSheet:
@@ -601,9 +745,37 @@ class EditableSheet:
     @property
     def dimensions(self) -> str: ...
     @property
+    def freeze_panes(self) -> str | None: ...
+    @freeze_panes.setter
+    def freeze_panes(self, val: str | None) -> None: ...
+    @property
+    def tab_color(self) -> str | None: ...
+    @tab_color.setter
+    def tab_color(self, val: str | None) -> None: ...
+    @property
+    def auto_filter(self) -> str | None: ...
+    @auto_filter.setter
+    def auto_filter(self, val: str | None) -> None: ...
+    @property
     def values(self) -> typing.Iterator[tuple[object, ...]]: ...
     def append(self, iterable: typing.Iterable[object]) -> None: ...
     def cell(self, row: int, column: int, value: object | None = None) -> Cell: ...
+    def merge_cells(
+        self,
+        range_string: str | None = None,
+        start_row: int | None = None,
+        start_column: int | None = None,
+        end_row: int | None = None,
+        end_column: int | None = None,
+    ) -> None: ...
+    def unmerge_cells(
+        self,
+        range_string: str | None = None,
+        start_row: int | None = None,
+        start_column: int | None = None,
+        end_row: int | None = None,
+        end_column: int | None = None,
+    ) -> None: ...
     def iter_rows(
         self,
         min_row: int | None = None,
@@ -620,7 +792,7 @@ class EditableSheet:
         max_col: int | None = None,
         values_only: bool = False,
     ) -> typing.Iterator[tuple[object, ...]]: ...
-    def __getitem__(self, key: str) -> object | list[list[object]]: ...
+    def __getitem__(self, key: str | slice) -> Cell | tuple[tuple[Cell, ...], ...]: ...
     def __setitem__(self, key: str, value: object) -> None: ...
     def set_cell(self, row: int, col: int, value: object) -> None: ...
     def set_cell_style(
@@ -628,9 +800,9 @@ class EditableSheet:
         row: int,
         col: int,
         *,
-        font: dict | None = None,
-        fill: dict | None = None,
-        border: dict | None = None,
+        font: dict | Font | None = None,
+        fill: dict | PatternFill | None = None,
+        border: dict | Border | None = None,
         num_fmt: str | None = None,
     ) -> None: ...
     def insert_rows(self, idx: int, amount: int = 1) -> None: ...
@@ -676,7 +848,7 @@ def column_index_from_string(s: str) -> int: ...
 def coordinate_to_tuple(coord: str) -> tuple[int, int]: ...
 def range_boundaries(range_str: str) -> tuple[int, int, int, int]: ...
 def quote_sheetname(name: str) -> str: ...
-def edit_excel(path: str) -> EditableWorkbook: ...
+def edit_excel(path: str, data_only: bool = False) -> EditableWorkbook: ...
     """Open an existing XLSX for byte-preserving edits.
 
     Prefer the friendlier :func:`load_workbook` (``edit_mode=True``) wrapper.

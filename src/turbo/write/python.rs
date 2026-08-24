@@ -158,7 +158,686 @@ fn parse_color(obj: &Bound<'_, PyAny>) -> PyResult<ColorSpec> {
     ))
 }
 
+// ---------------------------------------------------------------------------
+// Style PyO3 Classes (Font, PatternFill, Side, Border, Alignment, Protection, Comment)
+// ---------------------------------------------------------------------------
+
+#[pyclass(name = "Font")]
+#[derive(Clone, Debug, Default)]
+pub struct PyFont {
+    pub name: Option<String>,
+    pub size: Option<f64>,
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    pub strike: Option<bool>,
+    pub underline: Option<String>,
+    pub color: Option<String>,
+}
+
+#[pymethods]
+impl PyFont {
+    #[new]
+    #[pyo3(signature = (name = None, size = None, sz = None, bold = None, b = None, italic = None, i = None, strike = None, underline = None, u = None, color = None))]
+    fn new(
+        name: Option<String>,
+        size: Option<f64>,
+        sz: Option<f64>,
+        bold: Option<bool>,
+        b: Option<bool>,
+        italic: Option<bool>,
+        i: Option<bool>,
+        strike: Option<bool>,
+        underline: Option<String>,
+        u: Option<String>,
+        color: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let col_str = color.and_then(|c| {
+            if let Ok(s) = c.extract::<String>() {
+                Some(s)
+            } else if let Ok(d) = c.cast::<PyDict>() {
+                d.get_item("rgb").ok().flatten().and_then(|v| v.extract::<String>().ok())
+            } else {
+                None
+            }
+        });
+        Ok(PyFont {
+            name,
+            size: size.or(sz),
+            bold: bold.or(b),
+            italic: italic.or(i),
+            strike,
+            underline: underline.or(u),
+            color: col_str,
+        })
+    }
+
+    #[getter]
+    fn name(&self) -> Option<String> { self.name.clone() }
+    #[setter]
+    fn set_name(&mut self, val: Option<String>) { self.name = val; }
+
+    #[getter]
+    fn size(&self) -> Option<f64> { self.size }
+    #[setter]
+    fn set_size(&mut self, val: Option<f64>) { self.size = val; }
+
+    #[getter]
+    fn sz(&self) -> Option<f64> { self.size }
+    #[setter]
+    fn set_sz(&mut self, val: Option<f64>) { self.size = val; }
+
+    #[getter]
+    fn bold(&self) -> Option<bool> { self.bold }
+    #[setter]
+    fn set_bold(&mut self, val: Option<bool>) { self.bold = val; }
+
+    #[getter]
+    fn b(&self) -> Option<bool> { self.bold }
+    #[setter]
+    fn set_b(&mut self, val: Option<bool>) { self.bold = val; }
+
+    #[getter]
+    fn italic(&self) -> Option<bool> { self.italic }
+    #[setter]
+    fn set_italic(&mut self, val: Option<bool>) { self.italic = val; }
+
+    #[getter]
+    fn i(&self) -> Option<bool> { self.italic }
+    #[setter]
+    fn set_i(&mut self, val: Option<bool>) { self.italic = val; }
+
+    #[getter]
+    fn strike(&self) -> Option<bool> { self.strike }
+    #[setter]
+    fn set_strike(&mut self, val: Option<bool>) { self.strike = val; }
+
+    #[getter]
+    fn underline(&self) -> Option<String> { self.underline.clone() }
+    #[setter]
+    fn set_underline(&mut self, val: Option<String>) { self.underline = val; }
+
+    #[getter]
+    fn u(&self) -> Option<String> { self.underline.clone() }
+    #[setter]
+    fn set_u(&mut self, val: Option<String>) { self.underline = val; }
+
+    #[getter]
+    fn color(&self) -> Option<String> { self.color.clone() }
+    #[setter]
+    fn set_color(&mut self, val: Option<String>) { self.color = val; }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Font(name={:?}, size={:?}, bold={:?}, italic={:?}, strike={:?}, underline={:?}, color={:?})",
+            self.name, self.size, self.bold, self.italic, self.strike, self.underline, self.color
+        )
+    }
+}
+
+impl PyFont {
+    pub fn to_desc(&self) -> FontDesc {
+        let mut desc = FontDesc::default();
+        desc.name = self.name.clone();
+        if let Some(sz) = self.size {
+            desc.set_sz(sz);
+        }
+        desc.bold = self.bold;
+        desc.italic = self.italic;
+        desc.strike = self.strike;
+        desc.underline = self.underline.clone();
+        if let Some(ref c) = self.color {
+            desc.color = Some(ColorSpec::from_rgb_hex(c));
+        }
+        desc
+    }
+    pub fn from_desc(desc: &FontDesc) -> Self {
+        let col_hex = desc.color.as_ref().map(|c| match c {
+            ColorSpec::Rgb(v) => format!("{:08X}", v),
+            ColorSpec::Theme(t, _) => format!("theme:{t}"),
+            ColorSpec::Indexed(i) => format!("indexed:{i}"),
+            ColorSpec::Auto => "auto".to_string(),
+        });
+        PyFont {
+            name: desc.name.clone(),
+            size: desc.sz(),
+            bold: desc.bold,
+            italic: desc.italic,
+            strike: desc.strike,
+            underline: desc.underline.clone(),
+            color: col_hex,
+        }
+    }
+}
+
+#[pyclass(name = "PatternFill")]
+#[derive(Clone, Debug, Default)]
+pub struct PyPatternFill {
+    pub fill_type: Option<String>,
+    pub start_color: Option<String>,
+    pub end_color: Option<String>,
+    pub fg_color: Option<String>,
+    pub bg_color: Option<String>,
+}
+
+#[pymethods]
+impl PyPatternFill {
+    #[new]
+    #[pyo3(signature = (fill_type = None, patternType = None, start_color = None, end_color = None, fgColor = None, bgColor = None))]
+    fn new(
+        fill_type: Option<String>,
+        patternType: Option<String>,
+        start_color: Option<&Bound<'_, PyAny>>,
+        end_color: Option<&Bound<'_, PyAny>>,
+        fgColor: Option<&Bound<'_, PyAny>>,
+        bgColor: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let extract_c = |c: Option<&Bound<'_, PyAny>>| -> Option<String> {
+            let b = c?;
+            if let Ok(s) = b.extract::<String>() {
+                Some(s)
+            } else if let Ok(d) = b.cast::<PyDict>() {
+                d.get_item("rgb").ok().flatten().and_then(|v| v.extract::<String>().ok())
+            } else {
+                None
+            }
+        };
+        let sc = extract_c(start_color).or_else(|| extract_c(fgColor));
+        let ec = extract_c(end_color).or_else(|| extract_c(bgColor));
+        Ok(PyPatternFill {
+            fill_type: fill_type.or(patternType).or(Some("solid".into())),
+            start_color: sc.clone(),
+            end_color: ec.clone(),
+            fg_color: sc,
+            bg_color: ec,
+        })
+    }
+
+    #[getter]
+    fn fill_type(&self) -> Option<String> { self.fill_type.clone() }
+    #[setter]
+    fn set_fill_type(&mut self, val: Option<String>) { self.fill_type = val; }
+
+    #[getter]
+    fn patternType(&self) -> Option<String> { self.fill_type.clone() }
+    #[setter]
+    fn set_patternType(&mut self, val: Option<String>) { self.fill_type = val; }
+
+    #[getter]
+    fn start_color(&self) -> Option<String> { self.start_color.clone() }
+    #[setter]
+    fn set_start_color(&mut self, val: Option<String>) {
+        self.start_color = val.clone();
+        self.fg_color = val;
+    }
+
+    #[getter]
+    fn end_color(&self) -> Option<String> { self.end_color.clone() }
+    #[setter]
+    fn set_end_color(&mut self, val: Option<String>) {
+        self.end_color = val.clone();
+        self.bg_color = val;
+    }
+
+    #[getter]
+    fn fgColor(&self) -> Option<String> { self.fg_color.clone() }
+    #[setter]
+    fn set_fgColor(&mut self, val: Option<String>) {
+        self.fg_color = val.clone();
+        self.start_color = val;
+    }
+
+    #[getter]
+    fn bgColor(&self) -> Option<String> { self.bg_color.clone() }
+    #[setter]
+    fn set_bgColor(&mut self, val: Option<String>) {
+        self.bg_color = val.clone();
+        self.end_color = val;
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PatternFill(fill_type={:?}, start_color={:?}, end_color={:?})",
+            self.fill_type, self.start_color, self.end_color
+        )
+    }
+}
+
+impl PyPatternFill {
+    pub fn to_desc(&self) -> FillDesc {
+        let pat = self.fill_type.clone().unwrap_or_else(|| "solid".into());
+        let fg = self.fg_color.as_deref().or(self.start_color.as_deref());
+        let bg = self.bg_color.as_deref().or(self.end_color.as_deref());
+        FillDesc::Pattern {
+            pattern_type: Some(pat),
+            fg: fg.map(ColorSpec::from_rgb_hex),
+            bg: bg.map(ColorSpec::from_rgb_hex),
+        }
+    }
+    pub fn from_desc(desc: &FillDesc) -> Self {
+        match desc {
+            FillDesc::Pattern { pattern_type, fg, bg } => {
+                let fg_hex = fg.as_ref().map(|c| match c {
+                    ColorSpec::Rgb(v) => format!("{:08X}", v),
+                    ColorSpec::Theme(t, _) => format!("theme:{t}"),
+                    ColorSpec::Indexed(i) => format!("indexed:{i}"),
+                    ColorSpec::Auto => "auto".to_string(),
+                });
+                let bg_hex = bg.as_ref().map(|c| match c {
+                    ColorSpec::Rgb(v) => format!("{:08X}", v),
+                    ColorSpec::Theme(t, _) => format!("theme:{t}"),
+                    ColorSpec::Indexed(i) => format!("indexed:{i}"),
+                    ColorSpec::Auto => "auto".to_string(),
+                });
+                PyPatternFill {
+                    fill_type: pattern_type.clone(),
+                    start_color: fg_hex.clone(),
+                    end_color: bg_hex.clone(),
+                    fg_color: fg_hex,
+                    bg_color: bg_hex,
+                }
+            }
+            FillDesc::Gradient { .. } => PyPatternFill {
+                fill_type: Some("gradient".into()),
+                ..Default::default()
+            },
+        }
+    }
+}
+
+#[pyclass(name = "Side")]
+#[derive(Clone, Debug, Default)]
+pub struct PySide {
+    pub style: Option<String>,
+    pub color: Option<String>,
+}
+
+#[pymethods]
+impl PySide {
+    #[new]
+    #[pyo3(signature = (style = None, border_style = None, color = None))]
+    fn new(
+        style: Option<String>,
+        border_style: Option<String>,
+        color: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let c_str = color.and_then(|c| {
+            if let Ok(s) = c.extract::<String>() {
+                Some(s)
+            } else if let Ok(d) = c.cast::<PyDict>() {
+                d.get_item("rgb").ok().flatten().and_then(|v| v.extract::<String>().ok())
+            } else {
+                None
+            }
+        });
+        Ok(PySide {
+            style: style.or(border_style),
+            color: c_str,
+        })
+    }
+
+    #[getter]
+    fn style(&self) -> Option<String> { self.style.clone() }
+    #[setter]
+    fn set_style(&mut self, val: Option<String>) { self.style = val; }
+
+    #[getter]
+    fn border_style(&self) -> Option<String> { self.style.clone() }
+    #[setter]
+    fn set_border_style(&mut self, val: Option<String>) { self.style = val; }
+
+    #[getter]
+    fn color(&self) -> Option<String> { self.color.clone() }
+    #[setter]
+    fn set_color(&mut self, val: Option<String>) { self.color = val; }
+
+    fn __repr__(&self) -> String {
+        format!("Side(style={:?}, color={:?})", self.style, self.color)
+    }
+}
+
+impl PySide {
+    pub fn to_desc(&self) -> SideDesc {
+        SideDesc {
+            style: self.style.clone(),
+            color: self.color.as_deref().map(ColorSpec::from_rgb_hex),
+        }
+    }
+    pub fn from_desc(desc: &SideDesc) -> Self {
+        let c_hex = desc.color.as_ref().map(|c| match c {
+            ColorSpec::Rgb(v) => format!("{:08X}", v),
+            ColorSpec::Theme(t, _) => format!("theme:{t}"),
+            ColorSpec::Indexed(i) => format!("indexed:{i}"),
+            ColorSpec::Auto => "auto".to_string(),
+        });
+        PySide {
+            style: desc.style.clone(),
+            color: c_hex,
+        }
+    }
+}
+
+#[pyclass(name = "Border")]
+#[derive(Clone, Debug, Default)]
+pub struct PyBorder {
+    pub left: Option<PySide>,
+    pub right: Option<PySide>,
+    pub top: Option<PySide>,
+    pub bottom: Option<PySide>,
+    pub diagonal: Option<PySide>,
+    pub diagonal_up: bool,
+    pub diagonal_down: bool,
+    pub outline: bool,
+}
+
+#[pymethods]
+impl PyBorder {
+    #[new]
+    #[pyo3(signature = (left = None, right = None, top = None, bottom = None, diagonal = None, diagonal_up = false, diagonal_down = false, diagonalUp = None, diagonalDown = None, outline = true))]
+    fn new(
+        left: Option<PySide>,
+        right: Option<PySide>,
+        top: Option<PySide>,
+        bottom: Option<PySide>,
+        diagonal: Option<PySide>,
+        diagonal_up: bool,
+        diagonal_down: bool,
+        diagonalUp: Option<bool>,
+        diagonalDown: Option<bool>,
+        outline: bool,
+    ) -> Self {
+        PyBorder {
+            left,
+            right,
+            top,
+            bottom,
+            diagonal,
+            diagonal_up: diagonalUp.unwrap_or(diagonal_up),
+            diagonal_down: diagonalDown.unwrap_or(diagonal_down),
+            outline,
+        }
+    }
+
+    #[getter]
+    fn left(&self) -> Option<PySide> { self.left.clone() }
+    #[setter]
+    fn set_left(&mut self, val: Option<PySide>) { self.left = val; }
+
+    #[getter]
+    fn right(&self) -> Option<PySide> { self.right.clone() }
+    #[setter]
+    fn set_right(&mut self, val: Option<PySide>) { self.right = val; }
+
+    #[getter]
+    fn top(&self) -> Option<PySide> { self.top.clone() }
+    #[setter]
+    fn set_top(&mut self, val: Option<PySide>) { self.top = val; }
+
+    #[getter]
+    fn bottom(&self) -> Option<PySide> { self.bottom.clone() }
+    #[setter]
+    fn set_bottom(&mut self, val: Option<PySide>) { self.bottom = val; }
+
+    #[getter]
+    fn diagonal(&self) -> Option<PySide> { self.diagonal.clone() }
+    #[setter]
+    fn set_diagonal(&mut self, val: Option<PySide>) { self.diagonal = val; }
+
+    #[getter]
+    fn diagonal_up(&self) -> bool { self.diagonal_up }
+    #[setter]
+    fn set_diagonal_up(&mut self, val: bool) { self.diagonal_up = val; }
+
+    #[getter]
+    fn diagonal_down(&self) -> bool { self.diagonal_down }
+    #[setter]
+    fn set_diagonal_down(&mut self, val: bool) { self.diagonal_down = val; }
+
+    #[getter]
+    fn outline(&self) -> bool { self.outline }
+    #[setter]
+    fn set_outline(&mut self, val: bool) { self.outline = val; }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Border(left={:?}, right={:?}, top={:?}, bottom={:?})",
+            self.left, self.right, self.top, self.bottom
+        )
+    }
+}
+
+impl PyBorder {
+    pub fn to_desc(&self) -> BorderDesc {
+        BorderDesc {
+            left: self.left.as_ref().map(|s| s.to_desc()),
+            right: self.right.as_ref().map(|s| s.to_desc()),
+            top: self.top.as_ref().map(|s| s.to_desc()),
+            bottom: self.bottom.as_ref().map(|s| s.to_desc()),
+            diagonal: self.diagonal.as_ref().map(|s| s.to_desc()),
+            diagonal_up: self.diagonal_up,
+            diagonal_down: self.diagonal_down,
+            outline: self.outline,
+            emit_empty_sides: false,
+        }
+    }
+    pub fn from_desc(desc: &BorderDesc) -> Self {
+        PyBorder {
+            left: desc.left.as_ref().map(PySide::from_desc),
+            right: desc.right.as_ref().map(PySide::from_desc),
+            top: desc.top.as_ref().map(PySide::from_desc),
+            bottom: desc.bottom.as_ref().map(PySide::from_desc),
+            diagonal: desc.diagonal.as_ref().map(PySide::from_desc),
+            diagonal_up: desc.diagonal_up,
+            diagonal_down: desc.diagonal_down,
+            outline: desc.outline,
+        }
+    }
+}
+
+#[pyclass(name = "Alignment")]
+#[derive(Clone, Debug, Default)]
+pub struct PyAlignment {
+    pub horizontal: Option<String>,
+    pub vertical: Option<String>,
+    pub text_rotation: i32,
+    pub wrap_text: Option<bool>,
+    pub shrink_to_fit: Option<bool>,
+    pub indent: i32,
+    pub relative_indent: i32,
+    pub justify_last_line: Option<bool>,
+    pub reading_order: i32,
+}
+
+#[pymethods]
+impl PyAlignment {
+    #[new]
+    #[pyo3(signature = (horizontal = None, vertical = None, text_rotation = 0, textRotation = None, wrap_text = None, wrapText = None, shrink_to_fit = None, shrinkToFit = None, indent = 0, relative_indent = 0, relativeIndent = None, justify_last_line = None, justifyLastLine = None, reading_order = 0, readingOrder = None))]
+    fn new(
+        horizontal: Option<String>,
+        vertical: Option<String>,
+        text_rotation: i32,
+        textRotation: Option<i32>,
+        wrap_text: Option<bool>,
+        wrapText: Option<bool>,
+        shrink_to_fit: Option<bool>,
+        shrinkToFit: Option<bool>,
+        indent: i32,
+        relative_indent: i32,
+        relativeIndent: Option<i32>,
+        justify_last_line: Option<bool>,
+        justifyLastLine: Option<bool>,
+        reading_order: i32,
+        readingOrder: Option<i32>,
+    ) -> Self {
+        PyAlignment {
+            horizontal,
+            vertical,
+            text_rotation: textRotation.unwrap_or(text_rotation),
+            wrap_text: wrapText.or(wrap_text),
+            shrink_to_fit: shrinkToFit.or(shrink_to_fit),
+            indent,
+            relative_indent: relativeIndent.unwrap_or(relative_indent),
+            justify_last_line: justifyLastLine.or(justify_last_line),
+            reading_order: readingOrder.unwrap_or(reading_order),
+        }
+    }
+
+    #[getter]
+    fn horizontal(&self) -> Option<String> { self.horizontal.clone() }
+    #[setter]
+    fn set_horizontal(&mut self, val: Option<String>) { self.horizontal = val; }
+
+    #[getter]
+    fn vertical(&self) -> Option<String> { self.vertical.clone() }
+    #[setter]
+    fn set_vertical(&mut self, val: Option<String>) { self.vertical = val; }
+
+    #[getter]
+    fn text_rotation(&self) -> i32 { self.text_rotation }
+    #[setter]
+    fn set_text_rotation(&mut self, val: i32) { self.text_rotation = val; }
+
+    #[getter]
+    fn wrap_text(&self) -> Option<bool> { self.wrap_text }
+    #[setter]
+    fn set_wrap_text(&mut self, val: Option<bool>) { self.wrap_text = val; }
+
+    #[getter]
+    fn shrink_to_fit(&self) -> Option<bool> { self.shrink_to_fit }
+    #[setter]
+    fn set_shrink_to_fit(&mut self, val: Option<bool>) { self.shrink_to_fit = val; }
+
+    #[getter]
+    fn indent(&self) -> i32 { self.indent }
+    #[setter]
+    fn set_indent(&mut self, val: i32) { self.indent = val; }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Alignment(horizontal={:?}, vertical={:?}, wrap_text={:?})",
+            self.horizontal, self.vertical, self.wrap_text
+        )
+    }
+}
+
+impl PyAlignment {
+    pub fn to_desc(&self) -> AlignDesc {
+        AlignDesc {
+            horizontal: self.horizontal.clone(),
+            vertical: self.vertical.clone(),
+            text_rotation: self.text_rotation,
+            wrap_text: self.wrap_text,
+            shrink_to_fit: self.shrink_to_fit,
+            indent: self.indent,
+            relative_indent: self.relative_indent,
+            justify_last_line: self.justify_last_line,
+            reading_order: self.reading_order,
+        }
+    }
+    pub fn from_desc(desc: &AlignDesc) -> Self {
+        PyAlignment {
+            horizontal: desc.horizontal.clone(),
+            vertical: desc.vertical.clone(),
+            text_rotation: desc.text_rotation,
+            wrap_text: desc.wrap_text,
+            shrink_to_fit: desc.shrink_to_fit,
+            indent: desc.indent,
+            relative_indent: desc.relative_indent,
+            justify_last_line: desc.justify_last_line,
+            reading_order: desc.reading_order,
+        }
+    }
+}
+
+#[pyclass(name = "Protection")]
+#[derive(Clone, Debug)]
+pub struct PyProtection {
+    pub locked: bool,
+    pub hidden: bool,
+}
+
+impl Default for PyProtection {
+    fn default() -> Self {
+        Self { locked: true, hidden: false }
+    }
+}
+
+#[pymethods]
+impl PyProtection {
+    #[new]
+    #[pyo3(signature = (locked = true, hidden = false))]
+    fn new(locked: bool, hidden: bool) -> Self {
+        PyProtection { locked, hidden }
+    }
+
+    #[getter]
+    fn locked(&self) -> bool { self.locked }
+    #[setter]
+    fn set_locked(&mut self, val: bool) { self.locked = val; }
+
+    #[getter]
+    fn hidden(&self) -> bool { self.hidden }
+    #[setter]
+    fn set_hidden(&mut self, val: bool) { self.hidden = val; }
+
+    fn __repr__(&self) -> String {
+        format!("Protection(locked={:?}, hidden={:?})", self.locked, self.hidden)
+    }
+}
+
+impl PyProtection {
+    pub fn to_desc(&self) -> ProtDesc {
+        ProtDesc {
+            locked: self.locked,
+            hidden: self.hidden,
+        }
+    }
+    pub fn from_desc(desc: &ProtDesc) -> Self {
+        PyProtection {
+            locked: desc.locked,
+            hidden: desc.hidden,
+        }
+    }
+}
+
+#[pyclass(name = "Comment")]
+#[derive(Clone, Debug, Default)]
+pub struct PyComment {
+    pub text: String,
+    pub author: String,
+}
+
+#[pymethods]
+impl PyComment {
+    #[new]
+    #[pyo3(signature = (text = "".into(), author = "".into()))]
+    fn new(text: String, author: String) -> Self {
+        PyComment { text, author }
+    }
+
+    #[getter]
+    fn text(&self) -> String { self.text.clone() }
+    #[setter]
+    fn set_text(&mut self, val: String) { self.text = val; }
+
+    #[getter]
+    fn author(&self) -> String { self.author.clone() }
+    #[setter]
+    fn set_author(&mut self, val: String) { self.author = val; }
+
+    #[getter]
+    fn content(&self) -> String { self.text.clone() }
+    #[setter]
+    fn set_content(&mut self, val: String) { self.text = val; }
+
+    fn __repr__(&self) -> String {
+        format!("Comment(text={:?}, author={:?})", self.text, self.author)
+    }
+}
+
 fn parse_font(obj: &Bound<'_, PyAny>) -> PyResult<FontDesc> {
+    if let Ok(pf) = obj.cast::<PyFont>() {
+        return Ok(pf.borrow().to_desc());
+    }
     let d = obj
         .cast::<PyDict>()
         .map_err(|_| PyValueError::new_err("font must be a dict"))?;
@@ -189,6 +868,9 @@ fn parse_font(obj: &Bound<'_, PyAny>) -> PyResult<FontDesc> {
 }
 
 fn parse_fill(obj: &Bound<'_, PyAny>) -> PyResult<FillDesc> {
+    if let Ok(pf) = obj.cast::<PyPatternFill>() {
+        return Ok(pf.borrow().to_desc());
+    }
     let d = obj
         .cast::<PyDict>()
         .map_err(|_| PyValueError::new_err("fill must be a dict"))?;
@@ -315,6 +997,9 @@ fn parse_gradient_stops(d: &Bound<'_, PyDict>) -> PyResult<Vec<GradientStop>> {
 }
 
 fn parse_side(obj: &Bound<'_, PyAny>) -> PyResult<SideDesc> {
+    if let Ok(ps) = obj.cast::<PySide>() {
+        return Ok(ps.borrow().to_desc());
+    }
     if let Ok(s) = obj.extract::<String>() {
         return Ok(SideDesc {
             style: Some(s),
@@ -335,6 +1020,9 @@ fn parse_side(obj: &Bound<'_, PyAny>) -> PyResult<SideDesc> {
 }
 
 fn parse_border(obj: &Bound<'_, PyAny>) -> PyResult<BorderDesc> {
+    if let Ok(pb) = obj.cast::<PyBorder>() {
+        return Ok(pb.borrow().to_desc());
+    }
     let d = obj
         .cast::<PyDict>()
         .map_err(|_| PyValueError::new_err("border must be a dict"))?;
@@ -383,6 +1071,9 @@ fn parse_border(obj: &Bound<'_, PyAny>) -> PyResult<BorderDesc> {
 }
 
 fn parse_align(obj: &Bound<'_, PyAny>) -> PyResult<AlignDesc> {
+    if let Ok(pa) = obj.cast::<PyAlignment>() {
+        return Ok(pa.borrow().to_desc());
+    }
     let d = obj
         .cast::<PyDict>()
         .map_err(|_| PyValueError::new_err("alignment must be a dict"))?;
@@ -406,6 +1097,9 @@ fn parse_align(obj: &Bound<'_, PyAny>) -> PyResult<AlignDesc> {
 }
 
 fn parse_prot(obj: &Bound<'_, PyAny>) -> PyResult<ProtDesc> {
+    if let Ok(pp) = obj.cast::<PyProtection>() {
+        return Ok(pp.borrow().to_desc());
+    }
     let d = obj
         .cast::<PyDict>()
         .map_err(|_| PyValueError::new_err("protection must be a dict"))?;
@@ -3653,12 +4347,21 @@ fn cell_value_locked_for_overlay(
     Ok(CellValue::Empty)
 }
 
+fn is_covered_merged_cell(ov: &mut WorkbookOverlay, sheet_name: &str, row: u32, col: u32) -> bool {
+    let _ = ov.ensure_merged_cache(sheet_name);
+    ov.sheet_overlays
+        .get(sheet_name)
+        .and_then(|so| so.merged_lookup.as_ref())
+        .map(|m| m.contains(&(row, col)))
+        .unwrap_or(false)
+}
+
 #[pyclass(name = "Cell")]
 pub struct PyCell {
-    sheet_name: String,
-    overlay: Arc<std::sync::Mutex<WorkbookOverlay>>,
-    row: u32,
-    col: u32,
+    pub sheet_name: String,
+    pub overlay: Arc<std::sync::Mutex<WorkbookOverlay>>,
+    pub row: u32,
+    pub col: u32,
 }
 
 #[pymethods]
@@ -3685,9 +4388,13 @@ impl PyCell {
             .overlay
             .lock()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if is_covered_merged_cell(&mut ov, &self.sheet_name, self.row, self.col) {
+            return Ok(py.None().into_bound(py));
+        }
+        let data_only = ov.data_only;
         if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
             if let Some(v) = so.modified_cells.get(&(self.row, self.col)) {
-                return cell_value_to_py(py, v);
+                return cell_value_to_py(py, v, data_only);
             }
         }
         let hydrated = ov
@@ -3699,21 +4406,223 @@ impl PyCell {
             if let Ok(idx) = sheet.rows.binary_search_by(|r| r.row.cmp(&self.row)) {
                 let r = &sheet.rows[idx];
                 if let Ok(cidx) = r.cells.binary_search_by(|c| c.col.cmp(&self.col)) {
-                    return cell_value_to_py(py, &r.cells[cidx].value);
+                    return cell_value_to_py(py, &r.cells[cidx].value, data_only);
                 }
             }
         }
-        cell_value_to_py(py, &CellValue::Empty)
+        cell_value_to_py(py, &CellValue::Empty, data_only)
     }
 
     #[setter]
     fn set_value(&self, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        let cell_val = py_to_cell_value_flagged(value, false, None)?;
         let mut ov = self
             .overlay
             .lock()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if is_covered_merged_cell(&mut ov, &self.sheet_name, self.row, self.col) {
+            return Err(pyo3::exceptions::PyAttributeError::new_err(
+                "Cell is merged and read-only",
+            ));
+        }
+        let cell_val = py_to_cell_value_flagged(value, false, None)?;
         ov.set_cell(&self.sheet_name, self.row, self.col, cell_val);
+        Ok(())
+    }
+
+    #[getter]
+    fn font(&self) -> PyFont {
+        let Ok(mut ov) = self.overlay.lock() else { return PyFont::default(); };
+        if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
+            if let Some(desc) = so.modified_styles.get(&(self.row, self.col)) {
+                if let Some(ref f) = desc.font {
+                    return PyFont::from_desc(f);
+                }
+            }
+        }
+        let _ = ov.ensure_base_styles(&self.sheet_name);
+        if let Some(base_map) = ov.base_styles.get(&self.sheet_name) {
+            if let Some(desc) = base_map.get(&(self.row, self.col)) {
+                if let Some(ref f) = desc.font {
+                    return PyFont::from_desc(f);
+                }
+            }
+        }
+        PyFont::default()
+    }
+
+    #[setter]
+    fn set_font(&self, val: &Bound<'_, PyAny>) -> PyResult<()> {
+        let font_desc = parse_font(val)?;
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let desc = so.modified_styles.entry((self.row, self.col)).or_default();
+        desc.font = Some(font_desc);
+        so.is_dirty = true;
+        Ok(())
+    }
+
+    #[getter]
+    fn fill(&self) -> PyPatternFill {
+        let Ok(mut ov) = self.overlay.lock() else { return PyPatternFill::default(); };
+        if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
+            if let Some(desc) = so.modified_styles.get(&(self.row, self.col)) {
+                if let Some(ref f) = desc.fill {
+                    return PyPatternFill::from_desc(f);
+                }
+            }
+        }
+        let _ = ov.ensure_base_styles(&self.sheet_name);
+        if let Some(base_map) = ov.base_styles.get(&self.sheet_name) {
+            if let Some(desc) = base_map.get(&(self.row, self.col)) {
+                if let Some(ref f) = desc.fill {
+                    return PyPatternFill::from_desc(f);
+                }
+            }
+        }
+        PyPatternFill::default()
+    }
+
+    #[setter]
+    fn set_fill(&self, val: &Bound<'_, PyAny>) -> PyResult<()> {
+        let fill_desc = parse_fill(val)?;
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let desc = so.modified_styles.entry((self.row, self.col)).or_default();
+        desc.fill = Some(fill_desc);
+        so.is_dirty = true;
+        Ok(())
+    }
+
+    #[getter]
+    fn border(&self) -> PyBorder {
+        let Ok(mut ov) = self.overlay.lock() else { return PyBorder::default(); };
+        if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
+            if let Some(desc) = so.modified_styles.get(&(self.row, self.col)) {
+                if let Some(ref b) = desc.border {
+                    return PyBorder::from_desc(b);
+                }
+            }
+        }
+        let _ = ov.ensure_base_styles(&self.sheet_name);
+        if let Some(base_map) = ov.base_styles.get(&self.sheet_name) {
+            if let Some(desc) = base_map.get(&(self.row, self.col)) {
+                if let Some(ref b) = desc.border {
+                    return PyBorder::from_desc(b);
+                }
+            }
+        }
+        PyBorder::default()
+    }
+
+    #[setter]
+    fn set_border(&self, val: &Bound<'_, PyAny>) -> PyResult<()> {
+        let border_desc = parse_border(val)?;
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let desc = so.modified_styles.entry((self.row, self.col)).or_default();
+        desc.border = Some(border_desc);
+        so.is_dirty = true;
+        Ok(())
+    }
+
+    #[getter]
+    fn alignment(&self) -> PyAlignment {
+        let Ok(mut ov) = self.overlay.lock() else { return PyAlignment::default(); };
+        if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
+            if let Some(desc) = so.modified_styles.get(&(self.row, self.col)) {
+                if let Some(ref a) = desc.alignment {
+                    return PyAlignment::from_desc(a);
+                }
+            }
+        }
+        let _ = ov.ensure_base_styles(&self.sheet_name);
+        if let Some(base_map) = ov.base_styles.get(&self.sheet_name) {
+            if let Some(desc) = base_map.get(&(self.row, self.col)) {
+                if let Some(ref a) = desc.alignment {
+                    return PyAlignment::from_desc(a);
+                }
+            }
+        }
+        PyAlignment::default()
+    }
+
+    #[setter]
+    fn set_alignment(&self, val: &Bound<'_, PyAny>) -> PyResult<()> {
+        let align_desc = parse_align(val)?;
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let desc = so.modified_styles.entry((self.row, self.col)).or_default();
+        desc.alignment = Some(align_desc);
+        so.is_dirty = true;
+        Ok(())
+    }
+
+    #[getter]
+    fn protection(&self) -> PyProtection {
+        let Ok(mut ov) = self.overlay.lock() else { return PyProtection::default(); };
+        if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
+            if let Some(desc) = so.modified_styles.get(&(self.row, self.col)) {
+                if let Some(ref p) = desc.protection {
+                    return PyProtection::from_desc(p);
+                }
+            }
+        }
+        let _ = ov.ensure_base_styles(&self.sheet_name);
+        if let Some(base_map) = ov.base_styles.get(&self.sheet_name) {
+            if let Some(desc) = base_map.get(&(self.row, self.col)) {
+                if let Some(ref p) = desc.protection {
+                    return PyProtection::from_desc(p);
+                }
+            }
+        }
+        PyProtection::default()
+    }
+
+    #[setter]
+    fn set_protection(&self, val: &Bound<'_, PyAny>) -> PyResult<()> {
+        let prot_desc = parse_prot(val)?;
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let desc = so.modified_styles.entry((self.row, self.col)).or_default();
+        desc.protection = Some(prot_desc);
+        so.is_dirty = true;
+        Ok(())
+    }
+
+    #[getter]
+    fn style(&self) -> Option<String> {
+        let Ok(mut ov) = self.overlay.lock() else { return None; };
+        if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
+            if let Some(desc) = so.modified_styles.get(&(self.row, self.col)) {
+                if let Some(ref ns) = desc.named_style {
+                    return Some(ns.clone());
+                }
+                if let Some(ref nf) = desc.num_fmt {
+                    return Some(nf.clone());
+                }
+            }
+        }
+        let _ = ov.ensure_base_styles(&self.sheet_name);
+        if let Some(base_map) = ov.base_styles.get(&self.sheet_name) {
+            if let Some(desc) = base_map.get(&(self.row, self.col)) {
+                if let Some(ref ns) = desc.named_style {
+                    return Some(ns.clone());
+                }
+                if let Some(ref nf) = desc.num_fmt {
+                    return Some(nf.clone());
+                }
+            }
+        }
+        None
+    }
+
+    #[setter]
+    fn set_style(&self, name: Option<&str>) -> PyResult<()> {
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let desc = so.modified_styles.entry((self.row, self.col)).or_default();
+        desc.named_style = name.map(|s| s.to_string());
+        so.is_dirty = true;
         Ok(())
     }
 
@@ -3736,10 +4645,20 @@ impl PyCell {
 
     #[getter]
     fn number_format(&self) -> Option<String> {
-        let ov = self.overlay.lock().ok()?;
+        let Ok(mut ov) = self.overlay.lock() else { return None; };
         if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
             if let Some(desc) = so.modified_styles.get(&(self.row, self.col)) {
-                return desc.num_fmt.clone();
+                if let Some(ref nf) = desc.num_fmt {
+                    return Some(nf.clone());
+                }
+            }
+        }
+        let _ = ov.ensure_base_styles(&self.sheet_name);
+        if let Some(base_map) = ov.base_styles.get(&self.sheet_name) {
+            if let Some(desc) = base_map.get(&(self.row, self.col)) {
+                if let Some(ref nf) = desc.num_fmt {
+                    return Some(nf.clone());
+                }
             }
         }
         None
@@ -3760,26 +4679,60 @@ impl PyCell {
 
     #[getter]
     fn hyperlink(&self) -> Option<String> {
+        let Ok(ov) = self.overlay.lock() else { return None; };
+        if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
+            if let Some(h) = so.hyperlinks.get(&(self.row, self.col)) {
+                return Some(h.clone());
+            }
+        }
         None
     }
 
     #[setter]
-    fn set_hyperlink(&self, _link: Option<&str>) -> PyResult<()> {
-        Err(pyo3::exceptions::PyNotImplementedError::new_err(
-            "hyperlink editing is not supported yet",
-        ))
+    fn set_hyperlink(&self, link: Option<&str>) -> PyResult<()> {
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        if let Some(l) = link {
+            so.hyperlinks.insert((self.row, self.col), l.to_string());
+        } else {
+            so.hyperlinks.remove(&(self.row, self.col));
+        }
+        so.is_dirty = true;
+        Ok(())
     }
 
     #[getter]
     fn comment(&self) -> Option<String> {
+        let Ok(ov) = self.overlay.lock() else { return None; };
+        if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
+            if let Some((text, _)) = so.comments.get(&(self.row, self.col)) {
+                return Some(text.clone());
+            }
+        }
         None
     }
 
     #[setter]
-    fn set_comment(&self, _comment: Option<&str>) -> PyResult<()> {
-        Err(pyo3::exceptions::PyNotImplementedError::new_err(
-            "comment editing is not supported yet",
-        ))
+    fn set_comment(&self, comment: &Bound<'_, PyAny>) -> PyResult<()> {
+        let (text, author) = if let Ok(s) = comment.extract::<String>() {
+            (s, "".into())
+        } else if let Ok(c) = comment.cast::<PyComment>() {
+            let b = c.borrow();
+            (b.text.clone(), b.author.clone())
+        } else if comment.is_none() {
+            let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+            so.comments.remove(&(self.row, self.col));
+            so.is_dirty = true;
+            return Ok(());
+        } else {
+            return Err(PyTypeError::new_err("comment must be str or Comment"));
+        };
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        so.comments.insert((self.row, self.col), (text, author));
+        so.is_dirty = true;
+        Ok(())
     }
 }
 
@@ -3813,6 +4766,7 @@ impl PySheetRowIter {
         let mut ov = self.overlay.lock().map_err(|e| {
             PyValueError::new_err(format!("lock error: {e}"))
         })?;
+        let data_only = ov.data_only;
         let hydrated = ov.hydrated_sheet(&self.sheet_name).map_err(|e| {
             PyValueError::new_err(format!("hydration error: {e}"))
         })?;
@@ -3838,7 +4792,7 @@ impl PySheetRowIter {
                             }
                         }
                     }
-                    items.push(cell_value_to_py(py, &val)?);
+                    items.push(cell_value_to_py(py, &val, data_only)?);
                 } else {
                     let cell = PyCell {
                         sheet_name: self.sheet_name.clone(),
@@ -3873,7 +4827,7 @@ impl PySheetRowIter {
                             }
                         }
                     }
-                    items.push(cell_value_to_py(py, &val)?);
+                    items.push(cell_value_to_py(py, &val, data_only)?);
                 } else {
                     let cell = PyCell {
                         sheet_name: self.sheet_name.clone(),
@@ -3893,9 +4847,9 @@ impl PySheetRowIter {
 
 #[pyclass(name = "EditableSheet")]
 pub struct PyEditableSheet {
-    sheet_name: String,
-    overlay: Arc<std::sync::Mutex<WorkbookOverlay>>,
-    original: OnceLock<Option<Sheet>>,
+    pub sheet_name: String,
+    pub overlay: Arc<std::sync::Mutex<WorkbookOverlay>>,
+    pub original: OnceLock<Option<Sheet>>,
 }
 
 #[pymethods]
@@ -3946,17 +4900,14 @@ impl PyEditableSheet {
     #[getter]
     fn dimensions(&self) -> PyResult<String> {
         let (min_r, max_r, min_c, max_c) = self.compute_bounds()?;
-        if max_r == 0 || max_c == 0 {
-            return Ok("A1:A1".into());
-        }
         let c1 = py_get_column_letter(min_c)?;
         let c2 = py_get_column_letter(max_c)?;
         Ok(format!("{c1}{min_r}:{c2}{max_r}"))
     }
 
     fn append(&self, iterable: &Bound<'_, PyAny>) -> PyResult<()> {
-        let (_, max_r, _, _) = self.compute_bounds()?;
-        let append_row = if max_r == 0 { 1 } else { max_r + 1 };
+        let (min_r, max_r, _, _) = self.compute_bounds_raw()?;
+        let append_row = if min_r == u32::MAX { 1 } else { max_r + 1 };
         let items: Vec<Bound<'_, PyAny>> = if let Ok(it) = iterable.try_iter() {
             let mut list = Vec::new();
             for elem in it {
@@ -4179,56 +5130,140 @@ impl PyEditableSheet {
         Ok(())
     }
 
-    fn __getitem__<'py>(&self, py: Python<'py>, key: &str) -> PyResult<Bound<'py, PyAny>> {
-        let Some((r1, c1, r2, c2)) = parse_ref_range_strict(key.as_bytes()) else {
-            return Err(PyValueError::new_err(format!(
-                "'{key}' is not a valid A1 cell or range"
-            )));
+    #[pyo3(signature = (range_string = None, start_row = None, start_column = None, end_row = None, end_column = None))]
+    fn merge_cells(
+        &self,
+        range_string: Option<&str>,
+        start_row: Option<u32>,
+        start_column: Option<u32>,
+        end_row: Option<u32>,
+        end_column: Option<u32>,
+    ) -> PyResult<()> {
+        let (r1, c1, r2, c2) = if let Some(s) = range_string {
+            let Some((a, b, c, d)) = parse_ref_range_strict(s.as_bytes()) else {
+                return Err(PyValueError::new_err(format!("invalid merge range string '{s}'")));
+            };
+            (a, b, c, d)
+        } else if let (Some(r1), Some(c1), Some(r2), Some(c2)) = (start_row, start_column, end_row, end_column) {
+            (r1, c1, r2, c2)
+        } else {
+            return Err(PyValueError::new_err("merge_cells requires either range_string or start_row/start_column/end_row/end_column"));
         };
-        let ov = self
-            .overlay
-            .lock()
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let original = self
-            .original_sheet_locked(&ov)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let resolve = |row: u32, col: u32| {
-            self.cell_value_locked(&ov, original, row, col)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        };
-        if r1 == r2 && c1 == c2 {
-            let v = resolve(r1, c1)?;
-            return cell_value_to_py(py, &v);
-        }
-        let mut rows: Vec<Bound<'_, PyAny>> = Vec::with_capacity((r2 - r1 + 1) as usize);
-        for r in r1..=r2 {
-            let mut row_items: Vec<Bound<'_, PyAny>> = Vec::with_capacity((c2 - c1 + 1) as usize);
-            for c in c1..=c2 {
-                let v = resolve(r, c)?;
-                row_items.push(cell_value_to_py(py, &v)?);
-            }
-            rows.push(PyList::new(py, row_items)?.into_any());
-        }
-        Ok(PyList::new(py, rows)?.into_any())
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        ov.merge_cells(&self.sheet_name, r1, c1, r2, c2).map_err(turbo_err_to_py)?;
+        Ok(())
     }
 
-    fn __setitem__(&self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        let Some((r1, c1, r2, c2)) = parse_ref_range_strict(key.as_bytes()) else {
-            return Err(PyValueError::new_err(format!(
-                "'{key}' is not a valid A1 cell or range"
-            )));
+    #[pyo3(signature = (range_string = None, start_row = None, start_column = None, end_row = None, end_column = None))]
+    fn unmerge_cells(
+        &self,
+        range_string: Option<&str>,
+        start_row: Option<u32>,
+        start_column: Option<u32>,
+        end_row: Option<u32>,
+        end_column: Option<u32>,
+    ) -> PyResult<()> {
+        let (r1, c1, r2, c2) = if let Some(s) = range_string {
+            let Some((a, b, c, d)) = parse_ref_range_strict(s.as_bytes()) else {
+                return Err(PyValueError::new_err(format!("invalid unmerge range string '{s}'")));
+            };
+            (a, b, c, d)
+        } else if let (Some(r1), Some(c1), Some(r2), Some(c2)) = (start_row, start_column, end_row, end_column) {
+            (r1, c1, r2, c2)
+        } else {
+            return Err(PyValueError::new_err("unmerge_cells requires either range_string or start_row/start_column/end_row/end_column"));
         };
-        if r1 == r2 && c1 == c2 {
-            let cell_val = py_to_cell_value(value, false)?;
-            let mut ov = self
-                .overlay
-                .lock()
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            ov.set_cell(&self.sheet_name, r1, c1, cell_val);
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        ov.unmerge_cells(&self.sheet_name, r1, c1, r2, c2).map_err(turbo_err_to_py)?;
+        Ok(())
+    }
+
+    #[getter]
+    fn freeze_panes(&self) -> Option<String> {
+        let Ok(ov) = self.overlay.lock() else { return None; };
+        ov.sheet_overlays.get(&self.sheet_name).and_then(|so| so.freeze_panes.clone())
+    }
+
+    #[setter]
+    fn set_freeze_panes(&self, val: Option<&str>) -> PyResult<()> {
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        so.freeze_panes = val.map(|s| s.to_string());
+        so.is_dirty = true;
+        Ok(())
+    }
+
+    #[getter]
+    fn tab_color(&self) -> Option<String> {
+        let Ok(ov) = self.overlay.lock() else { return None; };
+        ov.sheet_overlays.get(&self.sheet_name).and_then(|so| so.tab_color.clone())
+    }
+
+    #[setter]
+    fn set_tab_color(&self, val: Option<&str>) -> PyResult<()> {
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        so.tab_color = val.map(|s| s.to_string());
+        so.is_dirty = true;
+        Ok(())
+    }
+
+    #[getter]
+    fn auto_filter(&self) -> Option<String> {
+        let Ok(ov) = self.overlay.lock() else { return None; };
+        ov.sheet_overlays.get(&self.sheet_name).and_then(|so| so.auto_filter.clone())
+    }
+
+    #[setter]
+    fn set_auto_filter(&self, val: Option<&str>) -> PyResult<()> {
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        so.auto_filter = val.map(|s| s.to_string());
+        so.is_dirty = true;
+        Ok(())
+    }
+
+    fn __getitem__<'py>(&self, py: Python<'py>, key: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        use pyo3::types::PySlice;
+        use pyo3::IntoPyObjectExt;
+        let (r1, c1, r2, c2) = parse_sheet_key_bounds(key)?;
+        let is_slice = key.cast::<PySlice>().is_ok();
+        if !is_slice && r1 == r2 && c1 == c2 {
+            let cell = PyCell {
+                sheet_name: self.sheet_name.clone(),
+                overlay: Arc::clone(&self.overlay),
+                row: r1,
+                col: c1,
+            };
+            return Ok(cell.into_bound_py_any(py)?);
+        }
+        let mut rows = Vec::with_capacity((r2.saturating_sub(r1) + 1) as usize);
+        for r in r1..=r2 {
+            let mut row_items = Vec::with_capacity((c2.saturating_sub(c1) + 1) as usize);
+            for c in c1..=c2 {
+                let cell = PyCell {
+                    sheet_name: self.sheet_name.clone(),
+                    overlay: Arc::clone(&self.overlay),
+                    row: r,
+                    col: c,
+                };
+                row_items.push(cell.into_bound_py_any(py)?);
+            }
+            rows.push(PyTuple::new(py, row_items)?.into_any());
+        }
+        Ok(PyTuple::new(py, rows)?.into_any())
+    }
+
+    fn __setitem__(&self, key: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        use pyo3::types::PySlice;
+        let (r1, c1, r2, c2) = parse_sheet_key_bounds(key)?;
+        let is_slice = key.cast::<PySlice>().is_ok();
+        if !is_slice && r1 == r2 && c1 == c2 {
+            let _ = self.cell(r1, c1, Some(value))?;
             return Ok(());
         }
-        let nrows = (r2 - r1 + 1) as usize;
-        let ncols = (c2 - c1 + 1) as usize;
+        let nrows = (r2.saturating_sub(r1) + 1) as usize;
+        let ncols = (c2.saturating_sub(c1) + 1) as usize;
         let matrix = extract_2d_values(value, nrows, ncols)?;
         let mut ov = self
             .overlay
@@ -4243,8 +5278,57 @@ impl PyEditableSheet {
     }
 }
 
+fn parse_sheet_key_bounds(key: &Bound<'_, PyAny>) -> PyResult<(u32, u32, u32, u32)> {
+    use pyo3::types::PySlice;
+    if let Ok(slice) = key.cast::<PySlice>() {
+        let step_obj = slice.getattr("step")?;
+        if !step_obj.is_none() {
+            if let Ok(step_val) = step_obj.extract::<isize>() {
+                if step_val != 1 {
+                    return Err(PyValueError::new_err("slice step != 1 is not supported in sheet indexing"));
+                }
+            }
+        }
+        let start_obj = slice.getattr("start")?;
+        let stop_obj = slice.getattr("stop")?;
+        let start_str: String = start_obj.extract().map_err(|_| {
+            PyValueError::new_err("slice start must be a cell coordinate string (e.g. 'A1')")
+        })?;
+        let stop_str: String = stop_obj.extract().map_err(|_| {
+            PyValueError::new_err("slice stop must be a cell coordinate string (e.g. 'C5')")
+        })?;
+        let Some((r1, c1, _, _)) = parse_ref_range_strict(start_str.as_bytes()) else {
+            return Err(PyValueError::new_err(format!("invalid slice start '{start_str}'")));
+        };
+        let Some((_, _, r2, c2)) = parse_ref_range_strict(stop_str.as_bytes()) else {
+            return Err(PyValueError::new_err(format!("invalid slice stop '{stop_str}'")));
+        };
+        return Ok((r1, c1, r2, c2));
+    }
+    if let Ok(key_str) = key.extract::<String>() {
+        let Some((r1, c1, r2, c2)) = parse_ref_range_strict(key_str.as_bytes()) else {
+            return Err(PyValueError::new_err(format!(
+                "'{key_str}' is not a valid A1 cell or range"
+            )));
+        };
+        return Ok((r1, c1, r2, c2));
+    }
+    Err(PyTypeError::new_err("sheet key must be a coordinate string or slice"))
+}
+
 impl PyEditableSheet {
     fn compute_bounds(&self) -> PyResult<(u32, u32, u32, u32)> {
+        let (min_r, max_r, min_c, max_c) = self.compute_bounds_raw()?;
+        if min_r == u32::MAX {
+            Ok((1, 1, 1, 1))
+        } else {
+            Ok((min_r, max_r, min_c, max_c))
+        }
+    }
+
+    /// Like [`compute_bounds`] but without the empty-sheet clamp: `min == u32::MAX`
+    /// means "no cells yet" so callers can distinguish empty from A1-clamped.
+    fn compute_bounds_raw(&self) -> PyResult<(u32, u32, u32, u32)> {
         let ov = self
             .overlay
             .lock()
@@ -4272,8 +5356,8 @@ impl PyEditableSheet {
         }
 
         if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
-            for (&(r, c), val) in &so.modified_cells {
-                if !matches!(val, CellValue::Empty) {
+            for (&(r, c), v) in &so.modified_cells {
+                if !matches!(v, CellValue::Empty) {
                     min_r = min_r.min(r);
                     max_r = max_r.max(r);
                     min_c = min_c.min(c);
@@ -4281,12 +5365,7 @@ impl PyEditableSheet {
                 }
             }
         }
-
-        if min_r == u32::MAX {
-            Ok((1, 0, 1, 0))
-        } else {
-            Ok((min_r, max_r, min_c, max_c))
-        }
+        Ok((min_r, max_r, min_c, max_c))
     }
 
     fn record(&self, f: impl FnOnce(&mut WorkbookOverlay)) -> PyResult<()> {
@@ -4344,7 +5423,7 @@ impl PyEditableSheet {
 }
 
 /// Convert a `CellValue` to the Python scalar returned by `ws[key]`.
-fn cell_value_to_py<'py>(py: Python<'py>, v: &CellValue) -> PyResult<Bound<'py, PyAny>> {
+fn cell_value_to_py<'py>(py: Python<'py>, v: &CellValue, data_only: bool) -> PyResult<Bound<'py, PyAny>> {
     use pyo3::IntoPyObjectExt;
     Ok(match v {
         CellValue::Empty => py.None().into_bound(py),
@@ -4381,12 +5460,22 @@ fn cell_value_to_py<'py>(py: Python<'py>, v: &CellValue) -> PyResult<Bound<'py, 
             }
             text.into_bound_py_any(py)?
         }
-        CellValue::Formula { text, .. } => {
-            let trimmed = text.strip_prefix('=').unwrap_or(text);
-            let mut s = String::with_capacity(trimmed.len() + 1);
-            s.push('=');
-            s.push_str(trimmed);
-            s.into_bound_py_any(py)?
+        CellValue::Formula { text, cached, .. } => {
+            if data_only {
+                match cached {
+                    Some(CachedValue::Number(n)) => n.into_bound_py_any(py)?,
+                    Some(CachedValue::Bool(b)) => b.into_bound_py_any(py)?,
+                    Some(CachedValue::Error(s)) => s.as_str().into_bound_py_any(py)?,
+                    Some(CachedValue::Str(s)) => s.as_str().into_bound_py_any(py)?,
+                    None => py.None().into_bound(py),
+                }
+            } else {
+                let trimmed = text.strip_prefix('=').unwrap_or(text);
+                let mut s = String::with_capacity(trimmed.len() + 1);
+                s.push('=');
+                s.push_str(trimmed);
+                s.into_bound_py_any(py)?
+            }
         }
     })
 }
@@ -4757,10 +5846,12 @@ impl PyEditableWorkbook {
 }
 
 #[pyfunction(name = "edit_excel")]
-pub fn py_edit_excel(py: Python<'_>, path: &str) -> PyResult<PyEditableWorkbook> {
+#[pyo3(signature = (path, data_only=false))]
+pub fn py_edit_excel(py: Python<'_>, path: &str, data_only: bool) -> PyResult<PyEditableWorkbook> {
     let zip_bytes = py.detach(|| std::fs::read(path)).map_err(write_err_to_py)?;
     let archive_map = ArchiveMap::parse(Arc::new(zip_bytes)).map_err(turbo_err_to_py)?;
-    let overlay = WorkbookOverlay::new(archive_map);
+    let mut overlay = WorkbookOverlay::new(archive_map);
+    overlay.data_only = data_only;
     Ok(PyEditableWorkbook {
         overlay: Arc::new(std::sync::Mutex::new(overlay)),
         active_idx: std::sync::atomic::AtomicUsize::new(0),

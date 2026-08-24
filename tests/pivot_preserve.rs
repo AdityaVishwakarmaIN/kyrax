@@ -110,7 +110,7 @@ fn part(zip: &[u8], name: &str) -> Vec<u8> {
         .unwrap_or_else(|| panic!("part {name} missing from output"))
 }
 
-fn save(ov: &WorkbookOverlay) -> Vec<u8> {
+fn save(ov: &mut WorkbookOverlay) -> Vec<u8> {
     ov.save().expect("save must succeed")
 }
 
@@ -128,7 +128,7 @@ fn edit_outside_source_range_preserves_pivot_bytes() {
     let (src, _map, mut ov) = load_overlay();
     // H20 is far outside the cache source A1:C5 and the pivot location E3:G8.
     ov.set_cell("Data", 20, 8, CellValue::Number(1.0));
-    let saved = save(&ov);
+    let saved = save(&mut ov);
     for p in [CACHE_PART, PTABLE_PART, SHEET_RELS, PTABLE_RELS] {
         assert_eq!(
             part(&saved, p),
@@ -142,7 +142,7 @@ fn edit_outside_source_range_preserves_pivot_bytes() {
 fn edit_inside_source_range_marks_cache_stale_only() {
     let (src, _map, mut ov) = load_overlay();
     ov.set_cell("Data", 2, 1, CellValue::Str("North".to_string()));
-    let saved = save(&ov);
+    let saved = save(&mut ov);
     let cache = text(&part(&saved, CACHE_PART));
     // The ref did not move (no insert/delete), but the content did: the cache
     // must be tagged so Excel refreshes the stale materialised records on open.
@@ -169,7 +169,7 @@ fn insert_row_inside_source_shifts_cache_and_location() {
     // The case that silently corrupts a pivot today: a row inserted INSIDE the
     // source range A1:C5 without shifting the cache ref.
     ov.insert_rows("Data", 3, 1);
-    let saved = save(&ov);
+    let saved = save(&mut ov);
     let cache = text(&part(&saved, CACHE_PART));
     assert!(cache.contains(r#"ref="A1:C6""#), "{cache}");
     assert!(cache.contains(r#"refreshOnLoad="1""#), "{cache}");
@@ -182,7 +182,7 @@ fn insert_row_inside_source_shifts_cache_and_location() {
 fn insert_row_above_source_shifts_cache_and_location() {
     let (_src, _map, mut ov) = load_overlay();
     ov.insert_rows("Data", 1, 2);
-    let saved = save(&ov);
+    let saved = save(&mut ov);
     let cache = text(&part(&saved, CACHE_PART));
     assert!(cache.contains(r#"ref="A3:C7""#), "{cache}");
     assert!(cache.contains(r#"refreshOnLoad="1""#), "{cache}");
@@ -194,7 +194,7 @@ fn insert_row_above_source_shifts_cache_and_location() {
 fn delete_row_inside_source_shrinks_cache_and_location() {
     let (_src, _map, mut ov) = load_overlay();
     ov.delete_rows("Data", 3, 2);
-    let saved = save(&ov);
+    let saved = save(&mut ov);
     let cache = text(&part(&saved, CACHE_PART));
     // Rows 3-4 go; row 5 shifts up to 3.
     assert!(cache.contains(r#"ref="A1:C3""#), "{cache}");
@@ -209,7 +209,7 @@ fn insert_row_below_source_preserves_pivot_bytes() {
     // Nothing at or below row 10: the source range neither moves nor changes,
     // so the pivot parts are byte-identical (no refreshOnLoad either).
     ov.insert_rows("Data", 10, 3);
-    let saved = save(&ov);
+    let saved = save(&mut ov);
     for p in [CACHE_PART, PTABLE_PART, SHEET_RELS, PTABLE_RELS] {
         assert_eq!(
             part(&saved, p),
@@ -227,7 +227,7 @@ fn insert_row_below_source_preserves_pivot_bytes() {
 fn insert_col_inside_source_shifts_cache_and_location() {
     let (_src, _map, mut ov) = load_overlay();
     ov.insert_cols("Data", 2, 1);
-    let saved = save(&ov);
+    let saved = save(&mut ov);
     let cache = text(&part(&saved, CACHE_PART));
     assert!(cache.contains(r#"ref="A1:D5""#), "{cache}");
     assert!(cache.contains(r#"refreshOnLoad="1""#), "{cache}");
@@ -239,7 +239,7 @@ fn insert_col_inside_source_shifts_cache_and_location() {
 fn delete_col_inside_source_shrinks_cache_and_location() {
     let (_src, _map, mut ov) = load_overlay();
     ov.delete_cols("Data", 2, 1);
-    let saved = save(&ov);
+    let saved = save(&mut ov);
     let cache = text(&part(&saved, CACHE_PART));
     assert!(cache.contains(r#"ref="A1:B5""#), "{cache}");
     assert!(cache.contains(r#"refreshOnLoad="1""#), "{cache}");
@@ -256,7 +256,7 @@ fn delete_col_inside_source_shrinks_cache_and_location() {
 fn move_range_away_from_source_preserves_pivot_bytes() {
     let (src, _map, mut ov) = load_overlay();
     ov.move_range("Data", 8, 1, 9, 2, 1, 0, false);
-    let saved = save(&ov);
+    let saved = save(&mut ov);
     for p in [CACHE_PART, PTABLE_PART, SHEET_RELS, PTABLE_RELS] {
         assert_eq!(
             part(&saved, p),
@@ -273,7 +273,7 @@ fn move_range_over_source_marks_cache_stale() {
     // source range changes, so the cache must refresh on load. The ref itself
     // is untouched — move_range does not shift the grid.
     ov.move_range("Data", 1, 1, 2, 3, 1, 0, false);
-    let saved = save(&ov);
+    let saved = save(&mut ov);
     let cache = text(&part(&saved, CACHE_PART));
     assert!(cache.contains(r#"ref="A1:C5""#), "{cache}");
     assert!(cache.contains(r#"refreshOnLoad="1""#), "{cache}");
@@ -293,7 +293,7 @@ fn insert_then_delete_roundtrip_restores_ref_keeps_stale_tag() {
     let (_src, _map, mut ov) = load_overlay();
     ov.insert_rows("Data", 3, 1);
     ov.delete_rows("Data", 3, 1);
-    let saved = save(&ov);
+    let saved = save(&mut ov);
     let cache = text(&part(&saved, CACHE_PART));
     assert!(cache.contains(r#"ref="A1:C5""#), "{cache}");
     // The tag is retained by design (documented in fixup.rs): a cache that has
@@ -313,7 +313,7 @@ fn insert_then_delete_roundtrip_restores_ref_keeps_stale_tag() {
 fn saved_workbook_reads_back_shifted_pivot_metadata() {
     let (_src, _map, mut ov) = load_overlay();
     ov.insert_rows("Data", 1, 2);
-    let saved = save(&ov);
+    let saved = save(&mut ov);
     let path = std::env::temp_dir().join("kyrax_pivot_preserve_readback.xlsx");
     std::fs::write(&path, &saved).expect("write temp workbook");
     let wb = read_workbook_turbo(path.to_str().unwrap(), Features::PIVOTS)
@@ -345,7 +345,7 @@ fn mutate_host_sheet_but_cache_sources_other_sheet() {
     // cache definition byte-identical — no ref shift, no stale tag.
     let (src, _map, mut ov) = synthetic_pivot(Some("OtherSheet"));
     ov.insert_rows("Data", 1, 2);
-    let saved = save(&ov);
+    let saved = save(&mut ov);
 
     let pt = text(&part(&saved, PTABLE_PART));
     assert!(pt.contains(r#"<location ref="E5:G10""#), "{pt}");

@@ -117,7 +117,8 @@ fn _kyrax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // turbo write path (W1 silo A core)
     {
         use crate::turbo::write::python::{
-            PyCell, PyEditableSheet, PyEditableWorkbook, PySheetRowIter,
+            PyAlignment, PyBorder, PyCell, PyComment, PyEditableSheet, PyEditableWorkbook,
+            PyFont, PyPatternFill, PyProtection, PySheetRowIter, PySide,
             py_column_index_from_string, py_coordinate_to_tuple, py_edit_excel,
             py_get_column_letter, py_quote_sheetname, py_range_boundaries,
             py_write_excel_turbo, py_write_excel_turbo_bytes, py_write_excel_turbo_stream,
@@ -135,6 +136,13 @@ fn _kyrax(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<PyEditableSheet>()?;
         m.add_class::<PyCell>()?;
         m.add_class::<PySheetRowIter>()?;
+        m.add_class::<PyFont>()?;
+        m.add_class::<PyPatternFill>()?;
+        m.add_class::<PySide>()?;
+        m.add_class::<PyBorder>()?;
+        m.add_class::<PyAlignment>()?;
+        m.add_class::<PyProtection>()?;
+        m.add_class::<PyComment>()?;
     }
 
     // C2 validate & repair

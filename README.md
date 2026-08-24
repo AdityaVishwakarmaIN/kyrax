@@ -1,5 +1,7 @@
 # `kyrax`
 
+[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://adityamukherjee-99.github.io/kyrax/)
+
 A fast excel file reader for Python and Rust.
 
 Docs:
@@ -131,35 +133,62 @@ kyrax.write_excel_turbo_stream(
 )
 ```
 
-### Edit Mode (Byte-Preserving Round-Trip)
+### Openpyxl Drop-in Replacement
 
-Modify worksheet cells while preserving non-`<sheetData>` XML structures (`cols`, `mergeCells`, `conditionalFormatting`, `dataValidations`) byte-for-byte:
+`kyrax` provides a drop-in replacement for openpyxl workflows with full style objects, cell mutation, merge/unmerge, sheet controls, and 10x-50x speedups:
+
+```python
+import kyrax
+from kyrax.styles import Font, PatternFill, Side, Border, Alignment
+
+# Create or load workbook
+wb = kyrax.Workbook()  # or kyrax.load_workbook("financials.xlsx")
+ws = wb.active
+ws.title = "Summary"
+
+# Cell assignment and 2D slicing
+ws["A1"] = "Quarterly Revenue"
+ws["A1":"C1"] = [["Quarterly Revenue", 10500.5, True]]
+
+# Styling with standard openpyxl classes
+ws["A1"].font = Font(name="Calibri", size=14, bold=True, color="0070C0")
+ws["A1"].fill = PatternFill(fill_type="solid", start_color="FFFFE0")
+ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+
+thin = Side(style="thin", color="000000")
+ws["A1"].border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+# Merging and sheet controls
+ws.merge_cells("A1:C1")
+ws.freeze_panes = "A2"
+ws.tab_color = "0070C0"
+
+# Save with byte-preservation
+wb.save("summary.xlsx")
+```
+
+### High-Throughput Read-Only Ingestion
 
 ```python
 import kyrax
 
-# Load workbook in edit mode
-wb = kyrax.load_workbook("existing.xlsx", edit_mode=True)
-ws = wb["Sheet1"]
+# Fast read-only iterator backed by Rust turbo engine
+wb = kyrax.load_workbook("huge_dataset.xlsx", read_only=True)
+ws = wb.active
 
-# Update cell value and apply cell styles
-ws["A1"] = "New Header"
-ws.set_cell_style(0, 0, font={"bold": True, "color": "FF0000"})
-
-# Save byte-preserving changes
-wb.save("existing_updated.xlsx")
+for row in ws.iter_rows(values_only=True):
+    pass
 ```
 
 ## Key Features
 
-- **Zero-copy data exchange** via [Arrow PyCapsule Interface](https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html)
-- **High-speed Turbo engine** - selective XLSX feature reading (`read_excel_turbo`), declarative writing (`write_excel_turbo`), and streaming (`write_excel_turbo_stream`)
-- **Byte-preserving edit mode** - edit cells while keeping original XML metadata intact (`load_workbook(..., edit_mode=True)`)
-- **Flexible dependencies** - use with Polars (no PyArrow needed) or Pandas (includes PyArrow)
-- **Seamless Polars integration** - `pl.DataFrame(sheet)` and `sheet.to_polars()` work without PyArrow via PyCapsule interface
-- **High performance** - written in Rust with [calamine](https://github.com/tafia/calamine), [rayon](https://github.com/rayon-rs/rayon), and [Apache Arrow](https://arrow.apache.org/)
-- **Memory efficient** - lazy loading, zero-copy NumPy/PyArrow paths, and optional eager evaluation
-- **Type safety** - automatic type inference with manual override options
+- **Openpyxl drop-in replacement**: `load_workbook`, `Workbook`, `Font`, `PatternFill`, `Border`, `Side`, `Alignment`, `Protection`, `Comment`, `merge_cells`, `freeze_panes`.
+- **Zero-copy data exchange** via [Arrow PyCapsule Interface](https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html) into Polars and Pandas.
+- **High-speed Turbo engine** - selective XLSX feature reading (`read_excel_turbo`), declarative writing (`write_excel_turbo`), and streaming (`write_excel_turbo_stream`).
+- **Byte-preserving edit mode** - edit cells while keeping original untouched XML parts, macros, and styles byte-for-byte intact.
+- **Standalone formula evaluation** - evaluate formulas, track dependencies, and recalculate spreadsheets with `kyrax.formulas`.
+- **Validation & repair** - inspect corrupted spreadsheets and fix repairable findings with `validate_excel` and `repair_excel`.
+- **High performance** - 100% Rust core with zero feature logic in Python.
 
 ## Contributing & Development
 

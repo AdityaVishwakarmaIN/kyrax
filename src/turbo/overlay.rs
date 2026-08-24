@@ -1,4 +1,4 @@
-﻿//! Sparse overlay table for edit_excel / load_workbook (Plan 01).
+//! Sparse overlay table for edit_excel / load_workbook (Plan 01).
 
 use ahash::{AHashMap, AHashSet};
 use std::borrow::Cow;
@@ -14,6 +14,7 @@ use crate::turbo::mutate::{
     attr_value_span, delete_cols, delete_rows, insert_cols, insert_rows, move_range,
 };
 use crate::turbo::refshift::Axis;
+use crate::turbo::scan::parse_ref_range_strict;
 use crate::turbo::structural::{
     RelKind, parse_rels, parse_workbook_pivot_caches, resolve_zip_path,
 };
@@ -36,6 +37,18 @@ pub struct SheetOverlay {
     /// Row/column insert-delete operations recorded in user order. Applied at
     /// save time, each as mutate-splice then fixup, BEFORE cell edits.
     pub ops: Vec<SheetOp>,
+    pub merges: Vec<String>,
+    pub deleted_merges: AHashSet<String>,
+    pub merged_lookup: Option<AHashSet<(u32, u32)>>,
+    pub merged_bounds: Vec<(u32, u32, u32, u32)>,
+    pub hyperlinks: AHashMap<(u32, u32), String>,
+    pub comments: AHashMap<(u32, u32), (String, String)>,
+    pub freeze_panes: Option<String>,
+    pub tab_color: Option<String>,
+    pub auto_filter: Option<String>,
+    pub protection: Option<crate::turbo::write::model::SheetProtection>,
+    pub page_setup: Option<crate::turbo::write::model::PageSetup>,
+    pub data_validations: Vec<crate::turbo::write::DataValidation>,
     pub is_dirty: bool,
 }
 
@@ -103,6 +116,44 @@ impl SheetOverlay {
             cols,
             translate,
         });
+        self.is_dirty = true;
+    }
+
+    /// Record a merged range (1-based inclusive).
+    pub fn merge_cells(&mut self, r1: u32, c1: u32, r2: u32, c2: u32) {
+        if r1 == 0 || c1 == 0 || r2 == 0 || c2 == 0 {
+            return;
+        }
+        let (min_r, max_r) = (r1.min(r2), r1.max(r2));
+        let (min_c, max_c) = (c1.min(c2), c1.max(c2));
+        let range_str = crate::turbo::range_a1(&crate::turbo::CellRange {
+            r0: min_r - 1,
+            c0: min_c - 1,
+            r1: max_r - 1,
+            c1: max_c - 1,
+        });
+        self.deleted_merges.remove(&range_str);
+        if !self.merges.contains(&range_str) {
+            self.merges.push(range_str);
+        }
+        self.is_dirty = true;
+    }
+
+    /// Unmerge a range (1-based inclusive).
+    pub fn unmerge_cells(&mut self, r1: u32, c1: u32, r2: u32, c2: u32) {
+        if r1 == 0 || c1 == 0 || r2 == 0 || c2 == 0 {
+            return;
+        }
+        let (min_r, max_r) = (r1.min(r2), r1.max(r2));
+        let (min_c, max_c) = (c1.min(c2), c1.max(c2));
+        let range_str = crate::turbo::range_a1(&crate::turbo::CellRange {
+            r0: min_r - 1,
+            c0: min_c - 1,
+            r1: max_r - 1,
+            c1: max_c - 1,
+        });
+        self.merges.retain(|m| m != &range_str);
+        self.deleted_merges.insert(range_str);
         self.is_dirty = true;
     }
 }
@@ -280,6 +331,9 @@ pub struct WorkbookOverlay {
     pub renamed_sheets: Vec<(String, String)>,
     pub structure_dirty: bool,
     pub hydrated: AHashMap<String, Arc<Sheet>>,
+    pub data_only: bool,
+    pub base_styles: AHashMap<String, AHashMap<(u32, u32), StyleDesc>>,
+    pub base_styles_resolved: AHashSet<String>,
 }
 
 impl WorkbookOverlay {
@@ -292,7 +346,243 @@ impl WorkbookOverlay {
             renamed_sheets: Vec::new(),
             structure_dirty: false,
             hydrated: AHashMap::default(),
+            data_only: false,
+            base_styles: AHashMap::default(),
+            base_styles_resolved: AHashSet::default(),
         }
+    }
+
+    pub fn ensure_base_styles(&mut self, sheet_name: &str) -> TurboResult<()> {
+        if self.base_styles_resolved.contains(sheet_name) {
+            return Ok(());
+        }
+        self.base_styles_resolved.insert(sheet_name.to_string());
+        let Some(target) = self.archive_map.sheet_name_map.get(sheet_name) else {
+            return Ok(());
+        };
+        let Some(xml) = inflate_entry(&self.archive_map, target)? else {
+            return Ok(());
+        };
+        let styles_xml = inflate_entry(&self.archive_map, "xl/styles.xml")?;
+        let style_table = styles_xml.as_deref().map(crate::turbo::styles::parse_style_table);
+        let Some(st) = style_table else {
+            return Ok(());
+        };
+        let mut map: AHashMap<(u32, u32), StyleDesc> = AHashMap::default();
+        let mut pos = 0usize;
+        while let Some(c_pos) = find_element(&xml[pos..], b"c", 0) {
+            let s = pos + c_pos;
+            let gt = s + memchr::memchr(b'>', &xml[s..]).unwrap_or(0);
+            let tag = &xml[s..=gt];
+            if let (Some(r_attr), Some(s_attr)) = (extract_xml_attr(tag, b"r"), extract_xml_attr(tag, b"s")) {
+                if let (Some((row, col)), Ok(xf_idx)) = (
+                parse_ref_range_strict(r_attr.as_bytes()).map(|(r, c, _, _)| (r, c)),
+                s_attr.parse::<usize>(),
+            ) {
+                    if xf_idx < st.xfs.len() {
+                        let res = st.resolve(xf_idx as u32);
+                        let mut desc = StyleDesc::default();
+                        let fd = crate::turbo::write::style_engine::FontDesc {
+                            name: Some(res.font.name.clone()),
+                            sz_bits: Some((res.font.sz as f64).to_bits()),
+                            bold: Some(res.font.bold),
+                            italic: Some(res.font.italic),
+                            underline: res.font.underline.clone(),
+                            strike: Some(res.font.strike),
+                            color: Some(match res.font.color.kind {
+                                crate::turbo::styles::CKind::Rgb => crate::turbo::write::style_engine::ColorSpec::Rgb(res.font.color.val),
+                                crate::turbo::styles::CKind::Theme => crate::turbo::write::style_engine::ColorSpec::Theme(res.font.color.val, (res.font.color.tint as f64).to_bits()),
+                                crate::turbo::styles::CKind::Indexed => crate::turbo::write::style_engine::ColorSpec::Indexed(res.font.color.val),
+                                _ => crate::turbo::write::style_engine::ColorSpec::Auto,
+                            }),
+                            ..Default::default()
+                        };
+                        desc.font = Some(fd);
+
+                        if res.fill.pattern != "none" {
+                            let fg = match res.fill.fg.kind {
+                                crate::turbo::styles::CKind::Rgb => Some(crate::turbo::write::style_engine::ColorSpec::Rgb(res.fill.fg.val)),
+                                crate::turbo::styles::CKind::Theme => Some(crate::turbo::write::style_engine::ColorSpec::Theme(res.fill.fg.val, (res.fill.fg.tint as f64).to_bits())),
+                                crate::turbo::styles::CKind::Indexed => Some(crate::turbo::write::style_engine::ColorSpec::Indexed(res.fill.fg.val)),
+                                _ => None,
+                            };
+                            let bg = match res.fill.bg.kind {
+                                crate::turbo::styles::CKind::Rgb => Some(crate::turbo::write::style_engine::ColorSpec::Rgb(res.fill.bg.val)),
+                                crate::turbo::styles::CKind::Theme => Some(crate::turbo::write::style_engine::ColorSpec::Theme(res.fill.bg.val, (res.fill.bg.tint as f64).to_bits())),
+                                crate::turbo::styles::CKind::Indexed => Some(crate::turbo::write::style_engine::ColorSpec::Indexed(res.fill.bg.val)),
+                                _ => None,
+                            };
+                            desc.fill = Some(crate::turbo::write::style_engine::FillDesc::Pattern {
+                                pattern_type: Some(res.fill.pattern.clone()),
+                                fg,
+                                bg,
+                            });
+                        }
+
+                        let conv_side = |s: &crate::turbo::styles::Side| -> Option<crate::turbo::write::style_engine::SideDesc> {
+                            s.style.as_ref().map(|st_name| {
+                                let col = match s.color.kind {
+                                    crate::turbo::styles::CKind::Rgb => Some(crate::turbo::write::style_engine::ColorSpec::Rgb(s.color.val)),
+                                    crate::turbo::styles::CKind::Theme => Some(crate::turbo::write::style_engine::ColorSpec::Theme(s.color.val, (s.color.tint as f64).to_bits())),
+                                    crate::turbo::styles::CKind::Indexed => Some(crate::turbo::write::style_engine::ColorSpec::Indexed(s.color.val)),
+                                    _ => None,
+                                };
+                                crate::turbo::write::style_engine::SideDesc {
+                                    style: Some(st_name.clone()),
+                                    color: col,
+                                }
+                            })
+                        };
+                        desc.border = Some(crate::turbo::write::style_engine::BorderDesc {
+                            left: conv_side(&res.border.left),
+                            right: conv_side(&res.border.right),
+                            top: conv_side(&res.border.top),
+                            bottom: conv_side(&res.border.bottom),
+                            diagonal: conv_side(&res.border.diagonal),
+                            diagonal_up: res.border.diagonal_up,
+                            diagonal_down: res.border.diagonal_down,
+                            outline: res.border.outline,
+                            emit_empty_sides: false,
+                        });
+
+                        desc.alignment = Some(crate::turbo::write::style_engine::AlignDesc {
+                            horizontal: res.alignment.horizontal.clone(),
+                            vertical: res.alignment.vertical.clone(),
+                            text_rotation: res.alignment.text_rotation as i32,
+                            wrap_text: res.alignment.wrap_text,
+                            shrink_to_fit: res.alignment.shrink_to_fit,
+                            indent: res.alignment.indent as i32,
+                            relative_indent: res.alignment.relative_indent as i32,
+                            justify_last_line: res.alignment.justify_last_line,
+                            reading_order: res.alignment.reading_order as i32,
+                        });
+
+                        desc.protection = Some(crate::turbo::write::style_engine::ProtDesc {
+                            locked: res.protection.locked,
+                            hidden: res.protection.hidden,
+                        });
+
+                        desc.num_fmt = if res.number_format.is_empty() { None } else { Some(res.number_format.clone()) };
+                        desc.named_style = res.style_name.clone();
+
+                        map.insert((row, col), desc);
+                    }
+                }
+            }
+            pos = gt + 1;
+        }
+        self.base_styles.insert(sheet_name.to_string(), map);
+        Ok(())
+    }
+
+    pub fn ensure_merged_cache(&mut self, sheet_name: &str) -> TurboResult<()> {
+        let so = self.sheet_overlays.entry(sheet_name.to_string()).or_default();
+        if so.merged_lookup.is_some() {
+            return Ok(());
+        }
+        let mut bounds = Vec::new();
+        if let Some(target) = self.archive_map.sheet_name_map.get(sheet_name) {
+            if let Some(xml) = inflate_entry(&self.archive_map, target)? {
+                if let Some(m_start) = find_element(&xml, b"mergeCells", 0) {
+                    let m_end = if let Some(close_pos) = memchr::memmem::find(&xml[m_start..], b"</mergeCells>") {
+                        m_start + close_pos + b"</mergeCells>".len()
+                    } else if let Some(gt_pos) = memchr::memchr(b'>', &xml[m_start..]) {
+                        m_start + gt_pos + 1
+                    } else {
+                        m_start
+                    };
+                    let m_region = &xml[m_start..m_end];
+                    let mut pos = 0usize;
+                    while let Some(cell_pos) = find_element(&m_region[pos..], b"mergeCell", 0) {
+                        let s = pos + cell_pos;
+                        let gt = s + memchr::memchr(b'>', &m_region[s..]).unwrap_or(0);
+                        let tag = &m_region[s..=gt];
+                        if let Some(r) = extract_xml_attr(tag, b"ref") {
+                            if let Some((r1, c1, r2, c2)) = parse_ref_range_strict(r.as_bytes()) {
+                                bounds.push((r1, c1, r2, c2));
+                            }
+                        }
+                        pos = gt + 1;
+                    }
+                }
+            }
+        }
+        for del in &so.deleted_merges {
+            if let Some(b) = parse_ref_range_strict(del.as_bytes()) {
+                bounds.retain(|m| m != &b);
+            }
+        }
+        for add in &so.merges {
+            if let Some(b) = parse_ref_range_strict(add.as_bytes()) {
+                if !bounds.contains(&b) {
+                    bounds.push(b);
+                }
+            }
+        }
+        let mut lookup = AHashSet::default();
+        for &(r1, c1, r2, c2) in &bounds {
+            for r in r1..=r2 {
+                for c in c1..=c2 {
+                    if r != r1 || c != c1 {
+                        lookup.insert((r, c));
+                    }
+                }
+            }
+        }
+        so.merged_bounds = bounds;
+        so.merged_lookup = Some(lookup);
+        Ok(())
+    }
+
+    pub fn merge_cells(&mut self, sheet_name: &str, r1: u32, c1: u32, r2: u32, c2: u32) -> TurboResult<()> {
+        self.ensure_merged_cache(sheet_name)?;
+        let so = self.sheet_overlays.entry(sheet_name.to_string()).or_default();
+        for &(a1, b1, a2, b2) in &so.merged_bounds {
+            if r1 <= a2 && r2 >= a1 && c1 <= b2 && c2 >= b1 {
+                let range_str = format!("{}:{}:{}:{}", r1, c1, r2, c2);
+                let existing_str = format!("{}:{}:{}:{}", a1, b1, a2, b2);
+                return Err(TurboError::Format(format!(
+                    "range '{range_str}' overlaps existing merge '{existing_str}'"
+                )));
+            }
+        }
+        let (lo_r, hi_r) = (r1.min(r2), r1.max(r2));
+        let (lo_c, hi_c) = (c1.min(c2), c1.max(c2));
+        let r_str = crate::turbo::range_a1(&crate::turbo::CellRange {
+            r0: lo_r - 1,
+            c0: lo_c - 1,
+            r1: hi_r - 1,
+            c1: hi_c - 1,
+        });
+        so.deleted_merges.remove(&r_str);
+        if !so.merges.contains(&r_str) {
+            so.merges.push(r_str);
+        }
+        so.merged_lookup = None;
+        so.is_dirty = true;
+        Ok(())
+    }
+
+    pub fn unmerge_cells(&mut self, sheet_name: &str, r1: u32, c1: u32, r2: u32, c2: u32) -> TurboResult<()> {
+        self.ensure_merged_cache(sheet_name)?;
+        let so = self.sheet_overlays.entry(sheet_name.to_string()).or_default();
+        let to_remove: Vec<(u32, u32, u32, u32)> = so.merged_bounds.iter()
+            .copied()
+            .filter(|&(a1, b1, a2, b2)| r1 <= a2 && r2 >= a1 && c1 <= b2 && c2 >= b1)
+            .collect();
+        for (a1, b1, a2, b2) in to_remove {
+            let s = crate::turbo::range_a1(&crate::turbo::CellRange {
+                r0: a1.min(a2) - 1,
+                c0: b1.min(b2) - 1,
+                r1: a1.max(a2) - 1,
+                c1: b1.max(b2) - 1,
+            });
+            so.merges.retain(|m| m != &s);
+            so.deleted_merges.insert(s);
+        }
+        so.merged_lookup = None;
+        so.is_dirty = true;
+        Ok(())
     }
 
     pub fn new_blank() -> TurboResult<Self> {
@@ -901,7 +1191,8 @@ impl WorkbookOverlay {
             let resolved = sheet_resolved_styles.get(sheet_name);
             if let Some(xml) = sheet_xml {
                 if let Some(spliced) = splice_sheet_xml(&xml, overlay, resolved) {
-                    rendered.insert(entry_name.clone(), spliced);
+                    let final_xml = splice_sheet_controls(spliced, overlay);
+                    rendered.insert(entry_name.clone(), final_xml);
                     continue;
                 }
             }
@@ -979,6 +1270,185 @@ impl WorkbookOverlay {
                     if let Some(stripped) = strip_formula_cached_values(&orig) {
                         rendered.insert(entry_name.clone(), stripped);
                     }
+                }
+            }
+        }
+
+        for (sheet_name, overlay) in &self.sheet_overlays {
+            let entry_name = self.archive_map.sheet_name_map.get(sheet_name)
+                .cloned()
+                .unwrap_or_else(|| format!("xl/worksheets/{sheet_name}.xml"));
+            let stem = entry_name.strip_prefix("xl/worksheets/").unwrap_or("sheet1.xml");
+            let rels_path = format!("xl/worksheets/_rels/{stem}.rels");
+
+            if !overlay.hyperlinks.is_empty() {
+                let mut rels_xml = match rendered.get(&rels_path) {
+                    Some(rx) => String::from_utf8_lossy(rx).to_string(),
+                    None => match inflate_entry(&self.archive_map, &rels_path)? {
+                        Some(rx) => String::from_utf8_lossy(&rx).to_string(),
+                        None => "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\n</Relationships>".to_string(),
+                    },
+                };
+                let mut max_id = 0u32;
+                let mut scan_pos = 0usize;
+                while let Some(rid_pos) = rels_xml[scan_pos..].find("Id=\"rId") {
+                    let start = scan_pos + rid_pos + "Id=\"rId".len();
+                    if let Some(end_quote) = rels_xml[start..].find('"') {
+                        if let Ok(num) = rels_xml[start..start + end_quote].parse::<u32>() {
+                            max_id = max_id.max(num);
+                        }
+                        scan_pos = start + end_quote;
+                    } else {
+                        break;
+                    }
+                }
+                let mut next_rid = max_id;
+                let mut additions = String::new();
+                let mut hl_items: Vec<(&(u32, u32), &String)> = overlay.hyperlinks.iter().collect();
+                hl_items.sort_by_key(|item| *item.0);
+                for (_pos, url) in &hl_items {
+                    next_rid += 1;
+                    additions.push_str(&format!(
+                        "<Relationship Id=\"rId{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"{}\" TargetMode=\"External\"/>",
+                        next_rid,
+                        crate::turbo::write::xml::escape_text(url)
+                    ));
+                }
+                if let Some(ins) = rels_xml.rfind("</Relationships>") {
+                    rels_xml.insert_str(ins, &additions);
+                    rendered.insert(rels_path.clone(), rels_xml.into_bytes());
+                }
+
+                if let Some(sheet_xml) = rendered.get_mut(&entry_name) {
+                    let mut hl_tags = String::from("<hyperlinks>");
+                    let mut link_id = max_id;
+                    for (k, _) in &hl_items {
+                        let (r, c) = *k;
+                        link_id += 1;
+                        let ref_str = crate::turbo::range_a1(&crate::turbo::CellRange {
+                            r0: r - 1,
+                            c0: c - 1,
+                            r1: r - 1,
+                            c1: c - 1,
+                        });
+                        hl_tags.push_str(&format!("<hyperlink ref=\"{ref_str}\" r:id=\"rId{link_id}\"/>"));
+                    }
+                    hl_tags.push_str("</hyperlinks>");
+                    splice_element(sheet_xml, b"hyperlinks", Some(hl_tags.as_bytes()), &[b"</mergeCells>", b"</sheetData>"]);
+                }
+            }
+        }
+
+        let mut comment_counter = 0u32;
+        for entry in self.archive_map.entry_order.iter() {
+            if entry.starts_with("xl/comments/comment") && entry.ends_with(".xml") {
+                if let Some(num_str) = entry.strip_prefix("xl/comments/comment").and_then(|s| s.strip_suffix(".xml")) {
+                    if let Ok(num) = num_str.parse::<u32>() {
+                        comment_counter = comment_counter.max(num);
+                    }
+                }
+            }
+        }
+
+        let mut ct_overrides_to_add: Vec<String> = Vec::new();
+        let mut ct_needs_vml = false;
+
+        for (sheet_name, overlay) in &self.sheet_overlays {
+            if !overlay.comments.is_empty() {
+                comment_counter += 1;
+                let cid = comment_counter;
+                let mut comments_vec: Vec<crate::turbo::write::model::Comment> = Vec::new();
+                let mut comm_items: Vec<(&(u32, u32), &(String, String))> = overlay.comments.iter().collect();
+                comm_items.sort_by_key(|item| *item.0);
+                for (&(r, c), (text, author)) in comm_items {
+                    let ref_str = crate::turbo::range_a1(&crate::turbo::CellRange {
+                        r0: r - 1,
+                        c0: c - 1,
+                        r1: r - 1,
+                        c1: c - 1,
+                    });
+                    comments_vec.push(crate::turbo::write::model::Comment {
+                        ref_: ref_str,
+                        author: if author.is_empty() { "Author".into() } else { author.clone() },
+                        text: text.clone(),
+                        height: 79,
+                        width: 144,
+                    });
+                }
+                let (comments_xml, vml) = crate::turbo::write::write_comments(&comments_vec);
+                let comments_path = format!("xl/comments/comment{cid}.xml");
+                let vml_path = format!("xl/drawings/commentsDrawing{cid}.vml");
+                rendered.insert(comments_path.clone(), comments_xml.into_bytes());
+                rendered.insert(vml_path.clone(), vml.into_bytes());
+                ct_overrides_to_add.push(comments_path);
+                ct_needs_vml = true;
+
+                let entry_name = self.archive_map.sheet_name_map.get(sheet_name)
+                    .cloned()
+                    .unwrap_or_else(|| format!("xl/worksheets/{sheet_name}.xml"));
+                let stem = entry_name.strip_prefix("xl/worksheets/").unwrap_or("sheet1.xml");
+                let rels_path = format!("xl/worksheets/_rels/{stem}.rels");
+                let mut rels_xml = match rendered.get(&rels_path) {
+                    Some(rx) => String::from_utf8_lossy(rx).to_string(),
+                    None => match inflate_entry(&self.archive_map, &rels_path)? {
+                        Some(rx) => String::from_utf8_lossy(&rx).to_string(),
+                        None => "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\n</Relationships>".to_string(),
+                    },
+                };
+                let mut max_id = 0u32;
+                let mut scan_pos = 0usize;
+                while let Some(rid_pos) = rels_xml[scan_pos..].find("Id=\"rId") {
+                    let start = scan_pos + rid_pos + "Id=\"rId".len();
+                    if let Some(end_quote) = rels_xml[start..].find('"') {
+                        if let Ok(num) = rels_xml[start..start + end_quote].parse::<u32>() {
+                            max_id = max_id.max(num);
+                        }
+                        scan_pos = start + end_quote;
+                    } else {
+                        break;
+                    }
+                }
+                let c_rid = format!("rId{}", max_id + 1);
+                let v_rid = format!("rId{}", max_id + 2);
+                let comm_rel = format!(
+                    "<Relationship Id=\"{c_rid}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments\" Target=\"../comments/comment{cid}.xml\"/>\
+                     <Relationship Id=\"{v_rid}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing\" Target=\"../drawings/commentsDrawing{cid}.vml\"/>"
+                );
+                if let Some(ins) = rels_xml.rfind("</Relationships>") {
+                    rels_xml.insert_str(ins, &comm_rel);
+                    rendered.insert(rels_path, rels_xml.into_bytes());
+                }
+
+                if let Some(sheet_xml) = rendered.get_mut(&entry_name) {
+                    if !sheet_xml.windows(b"<legacyDrawing".len()).any(|w| w == b"<legacyDrawing") {
+                        let leg = format!("<legacyDrawing r:id=\"{v_rid}\"/>");
+                        splice_element(sheet_xml, b"legacyDrawing", Some(leg.as_bytes()), &[b"</sheetData>", b"</worksheet>"]);
+                    }
+                }
+            }
+        }
+
+        if !ct_overrides_to_add.is_empty() || ct_needs_vml {
+            let mut ct_str = match rendered.get("[Content_Types].xml") {
+                Some(cx) => String::from_utf8_lossy(cx).to_string(),
+                None => match inflate_entry(&self.archive_map, "[Content_Types].xml")? {
+                    Some(cx) => String::from_utf8_lossy(&cx).to_string(),
+                    None => String::new(),
+                },
+            };
+            if !ct_str.is_empty() {
+                let mut ct_additions = String::new();
+                for override_path in ct_overrides_to_add {
+                    ct_additions.push_str(&format!(
+                        "<Override PartName=\"/{override_path}\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml\"/>"
+                    ));
+                }
+                if ct_needs_vml && !ct_str.contains("Extension=\"vml\"") {
+                    ct_additions.push_str("<Default Extension=\"vml\" ContentType=\"application/vnd.openxmlformats-officedocument.vmlDrawing\"/>");
+                }
+                if let Some(ins) = ct_str.rfind("</Types>") {
+                    ct_str.insert_str(ins, &ct_additions);
+                    rendered.insert("[Content_Types].xml".into(), ct_str.into_bytes());
                 }
             }
         }
@@ -1999,6 +2469,235 @@ fn emit_cell(out: &mut Vec<u8>, row: u32, col: u32, val: &CellValue, s_attr: Opt
             push(out, b"</c>");
         }
     }
+}
+
+pub(crate) fn splice_element(
+    xml: &mut Vec<u8>,
+    tag: &[u8],
+    replacement: Option<&[u8]>,
+    fallback_insert_after: &[&[u8]],
+) {
+    if let Some(s_pos) = find_element(xml, tag, 0) {
+        let tag_close = format!("</{}>", std::str::from_utf8(tag).unwrap_or(""));
+        let e_pos = if let Some(close_pos) = memchr::memmem::find(&xml[s_pos..], tag_close.as_bytes()) {
+            s_pos + close_pos + tag_close.len()
+        } else if let Some(gt_pos) = memchr::memchr(b'>', &xml[s_pos..]) {
+            s_pos + gt_pos + 1
+        } else {
+            s_pos
+        };
+        let mut new_xml = Vec::with_capacity(xml.len() + replacement.map_or(0, |r| r.len()));
+        new_xml.extend_from_slice(&xml[..s_pos]);
+        if let Some(rep) = replacement {
+            new_xml.extend_from_slice(rep);
+        }
+        new_xml.extend_from_slice(&xml[e_pos..]);
+        *xml = new_xml;
+    } else if let Some(rep) = replacement {
+        let mut ins_pos = None;
+        for &anchor in fallback_insert_after {
+            if let Some(pos) = memchr::memmem::find(xml, anchor) {
+                ins_pos = Some(pos + anchor.len());
+                break;
+            }
+        }
+        let pos = ins_pos.unwrap_or_else(|| {
+            memchr::memchr(b'>', xml).map(|p| p + 1).unwrap_or(0)
+        });
+        let mut new_xml = Vec::with_capacity(xml.len() + rep.len());
+        new_xml.extend_from_slice(&xml[..pos]);
+        new_xml.extend_from_slice(rep);
+        new_xml.extend_from_slice(&xml[pos..]);
+        *xml = new_xml;
+    }
+}
+
+pub(crate) fn splice_sheet_controls(
+    mut xml: Vec<u8>,
+    overlay: &SheetOverlay,
+) -> Vec<u8> {
+    // 1. Tab Color in <sheetPr>
+    if let Some(ref tc) = overlay.tab_color {
+        let tc_clean = tc.trim_start_matches('#');
+        let tab_color_tag = format!("<tabColor rgb=\"{}\"/>", tc_clean);
+        if let Some(pos) = find_element(&xml, b"sheetPr", 0) {
+            let gt = pos + memchr::memchr(b'>', &xml[pos..]).unwrap_or(0);
+            let is_self_closing = gt > pos && xml[gt - 1] == b'/';
+            if is_self_closing {
+                let mut new_xml = Vec::with_capacity(xml.len() + 64);
+                new_xml.extend_from_slice(&xml[..gt - 1]);
+                new_xml.extend_from_slice(b">");
+                new_xml.extend_from_slice(tab_color_tag.as_bytes());
+                new_xml.extend_from_slice(b"</sheetPr>");
+                new_xml.extend_from_slice(&xml[gt + 1..]);
+                xml = new_xml;
+            } else if let Some(tc_pos) = memchr::memmem::find(&xml[pos..gt], b"<tabColor") {
+                let tc_start = pos + tc_pos;
+                let tc_end = tc_start + memchr::memchr(b'>', &xml[tc_start..]).unwrap_or(0) + 1;
+                let mut new_xml = Vec::with_capacity(xml.len() + 64);
+                new_xml.extend_from_slice(&xml[..tc_start]);
+                new_xml.extend_from_slice(tab_color_tag.as_bytes());
+                new_xml.extend_from_slice(&xml[tc_end..]);
+                xml = new_xml;
+            } else {
+                let mut new_xml = Vec::with_capacity(xml.len() + 64);
+                new_xml.extend_from_slice(&xml[..gt + 1]);
+                new_xml.extend_from_slice(tab_color_tag.as_bytes());
+                new_xml.extend_from_slice(&xml[gt + 1..]);
+                xml = new_xml;
+            }
+        } else {
+            let sheet_pr = format!("<sheetPr>{}</sheetPr>", tab_color_tag);
+            splice_element(&mut xml, b"sheetPr", Some(sheet_pr.as_bytes()), &[b"<worksheet>"]);
+        }
+    }
+
+    // 2. Freeze Panes in <sheetViews> (preserving sheetView attributes)
+    if let Some(ref fp) = overlay.freeze_panes {
+        if let Some((r, c, _, _)) = crate::turbo::scan::parse_ref_range_strict(fp.as_bytes()) {
+            let (pane_xml, sel_xml) = if c > 1 && r > 1 {
+                (
+                    format!(r#"<pane xSplit="{}" ySplit="{}" topLeftCell="{}" activePane="bottomRight" state="frozen"/>"#, c - 1, r - 1, fp),
+                    format!(r#"<selection pane="bottomRight" activeCell="{}" sqref="{}"/>"#, fp, fp),
+                )
+            } else if c == 1 && r > 1 {
+                (
+                    format!(r#"<pane ySplit="{}" topLeftCell="{}" activePane="bottomLeft" state="frozen"/>"#, r - 1, fp),
+                    format!(r#"<selection pane="bottomLeft" activeCell="{}" sqref="{}"/>"#, fp, fp),
+                )
+            } else if c > 1 && r == 1 {
+                (
+                    format!(r#"<pane xSplit="{}" topLeftCell="{}" activePane="topRight" state="frozen"/>"#, c - 1, fp),
+                    format!(r#"<selection pane="topRight" activeCell="{}" sqref="{}"/>"#, fp, fp),
+                )
+            } else {
+                (String::new(), String::new())
+            };
+            if !pane_xml.is_empty() {
+                if let Some(sv_start) = find_element(&xml, b"sheetViews", 0) {
+                    if let Some(view_start) = find_element(&xml[sv_start..], b"sheetView", 0) {
+                        let vs = sv_start + view_start;
+                        let view_gt = vs + memchr::memchr(b'>', &xml[vs..]).unwrap_or(0);
+                        let view_end = if let Some(c_pos) = memchr::memmem::find(&xml[vs..], b"</sheetView>") {
+                            vs + c_pos + b"</sheetView>".len()
+                        } else {
+                            view_gt + 1
+                        };
+                        let view_open = &xml[vs..=view_gt];
+                        let view_inner = &xml[view_gt + 1..view_end.saturating_sub(b"</sheetView>".len())];
+                        let mut cleaned_inner = view_inner.to_vec();
+                        splice_element(&mut cleaned_inner, b"pane", None, &[]);
+                        splice_element(&mut cleaned_inner, b"selection", None, &[]);
+
+                        let mut new_view = Vec::with_capacity(view_open.len() + pane_xml.len() + sel_xml.len() + cleaned_inner.len() + 16);
+                        if view_open.ends_with(b"/>") {
+                            new_view.extend_from_slice(&view_open[..view_open.len() - 2]);
+                            new_view.extend_from_slice(b">");
+                        } else {
+                            new_view.extend_from_slice(view_open);
+                        }
+                        new_view.extend_from_slice(pane_xml.as_bytes());
+                        new_view.extend_from_slice(sel_xml.as_bytes());
+                        new_view.extend_from_slice(&cleaned_inner);
+                        new_view.extend_from_slice(b"</sheetView>");
+
+                        let mut new_xml = Vec::with_capacity(xml.len() + new_view.len());
+                        new_xml.extend_from_slice(&xml[..vs]);
+                        new_xml.extend_from_slice(&new_view);
+                        new_xml.extend_from_slice(&xml[view_end..]);
+                        xml = new_xml;
+                    } else {
+                        let full_view = format!(r#"<sheetViews><sheetView workbookViewId="0">{pane_xml}{sel_xml}</sheetView></sheetViews>"#);
+                        splice_element(&mut xml, b"sheetViews", Some(full_view.as_bytes()), &[b"</sheetPr>", b"</dimension>", b"<worksheet>"]);
+                    }
+                } else {
+                    let full_view = format!(r#"<sheetViews><sheetView workbookViewId="0">{pane_xml}{sel_xml}</sheetView></sheetViews>"#);
+                    splice_element(&mut xml, b"sheetViews", Some(full_view.as_bytes()), &[b"</sheetPr>", b"</dimension>", b"<worksheet>"]);
+                }
+            }
+        }
+    }
+
+    // 3. Merges
+    if !overlay.merges.is_empty() || !overlay.deleted_merges.is_empty() {
+        let mut final_merges: Vec<String> = Vec::new();
+        if let Some(m_start) = find_element(&xml, b"mergeCells", 0) {
+            let m_end = if let Some(close_pos) = memchr::memmem::find(&xml[m_start..], b"</mergeCells>") {
+                m_start + close_pos + b"</mergeCells>".len()
+            } else if let Some(gt_pos) = memchr::memchr(b'>', &xml[m_start..]) {
+                m_start + gt_pos + 1
+            } else {
+                m_start
+            };
+            let m_region = &xml[m_start..m_end];
+            let mut pos = 0usize;
+            while let Some(cell_pos) = find_element(&m_region[pos..], b"mergeCell", 0) {
+                let s = pos + cell_pos;
+                let gt = s + memchr::memchr(b'>', &m_region[s..]).unwrap_or(0);
+                let tag = &m_region[s..=gt];
+                if let Some(r) = extract_xml_attr(tag, b"ref") {
+                    if !overlay.deleted_merges.contains(&r) && !final_merges.contains(&r) {
+                        final_merges.push(r);
+                    }
+                }
+                pos = gt + 1;
+            }
+            splice_element(&mut xml, b"mergeCells", None, &[]);
+        }
+        for m in &overlay.merges {
+            if !overlay.deleted_merges.contains(m) && !final_merges.contains(m) {
+                final_merges.push(m.clone());
+            }
+        }
+        if !final_merges.is_empty() {
+            let mut merge_block = Vec::with_capacity(final_merges.len() * 40 + 32);
+            crate::turbo::write::emit_merges(&mut merge_block, &final_merges);
+            splice_element(&mut xml, b"mergeCells", Some(&merge_block), &[b"</autoFilter>", b"</sheetData>"]);
+        }
+    }
+
+    // 4. AutoFilter
+    if let Some(ref af_range) = overlay.auto_filter {
+        let af_tag = format!("<autoFilter ref=\"{}\"/>", af_range);
+        splice_element(&mut xml, b"autoFilter", Some(af_tag.as_bytes()), &[b"</sheetData>"]);
+    }
+
+    // 5. Hyperlinks
+    if !overlay.hyperlinks.is_empty() {
+        let mut links: Vec<crate::turbo::write::model::Hyperlink> = Vec::new();
+        let mut hl_items: Vec<(&(u32, u32), &String)> = overlay.hyperlinks.iter().collect();
+        hl_items.sort_by_key(|item| *item.0);
+        for (&(r, c), url) in hl_items {
+            links.push(crate::turbo::write::model::Hyperlink {
+                ref_: crate::turbo::range_a1(&crate::turbo::CellRange {
+                    r0: r - 1,
+                    c0: c - 1,
+                    r1: r - 1,
+                    c1: c - 1,
+                }),
+                target: Some(url.clone()),
+                location: None,
+                display: None,
+            });
+        }
+        let mut hl_buf = Vec::new();
+        let mut next_rid = 0;
+        let _ = crate::turbo::write::emit_hyperlinks(&mut hl_buf, &links, &mut next_rid);
+        if !hl_buf.is_empty() {
+            splice_element(&mut xml, b"hyperlinks", Some(&hl_buf), &[b"</mergeCells>", b"</sheetData>"]);
+        }
+    }
+
+    // 6. Sheet Protection
+    if let Some(ref prot) = overlay.protection {
+        let mut prot_buf = Vec::new();
+        crate::turbo::write::emit_sheet_protection(&mut prot_buf, prot);
+        if !prot_buf.is_empty() {
+            splice_element(&mut xml, b"sheetProtection", Some(&prot_buf), &[b"</sheetData>"]);
+        }
+    }
+
+    xml
 }
 
 /// Find `<name` at an element boundary (next byte is space / `>` / `/`).

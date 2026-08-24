@@ -37,7 +37,9 @@ pub use model::{
 };
 pub use pivot::{PivotAgg, PivotDataField, PivotField, PivotTableSpec, build_pivot_parts};
 pub use rich_text::{RichRun, RichText, RunFont};
-pub use structural::{hash_password, write_comments, write_table};
+pub use structural::{
+    emit_hyperlinks, emit_merges, emit_sheet_protection, hash_password, write_comments, write_table,
+};
 pub use style_engine::{
     AlignDesc, BorderDesc, ColorSpec, DxfDesc, FillDesc, FontDesc, ProtDesc, SideDesc, StyleArray,
     StyleDesc, StyleEngine,

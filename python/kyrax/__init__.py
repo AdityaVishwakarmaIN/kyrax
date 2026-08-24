@@ -57,10 +57,17 @@ except ImportError:
     _encryption_info = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
 try:
     from ._kyrax import (
+        Alignment,
+        Border,
         Cell,
+        Comment,
         EditableSheet,
         EditableWorkbook,
+        Font,
+        PatternFill,
+        Protection,
         SheetStream,
+        Side,
         column_index_from_string,
         coordinate_to_tuple,
         edit_excel,
@@ -69,15 +76,20 @@ try:
         range_boundaries,
         read_excel_turbo_iter,
     )
-    load_workbook = edit_excel
     Workbook = EditableWorkbook
 except ImportError:
     edit_excel = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
-    load_workbook = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     EditableWorkbook = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
     Workbook = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
     EditableSheet = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
     Cell = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
+    Font = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
+    PatternFill = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
+    Side = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
+    Border = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
+    Alignment = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
+    Protection = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
+    Comment = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
     SheetStream = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
     read_excel_turbo_iter = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     get_column_letter = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
@@ -136,27 +148,38 @@ def repair_excel(
 
 def load_workbook(
     filename: Path | str,
-    edit_mode: bool | None = None,
     read_only: bool = False,
-    **kwargs: Any,
-) -> Any:
+    data_only: bool = False,
+    edit_mode: bool | None = None,
+    **kwargs: typing.Any,
+) -> typing.Any:
     """Load an Excel workbook (openpyxl-compatible entry point).
 
     By default (or when ``edit_mode=True``), returns an :class:`EditableWorkbook` for
-    in-place editing, sheet creation/deletion, and cell mutation.
+    in-place editing, sheet creation/deletion, cell mutation, styling, and formula evaluation.
 
-    If ``read_only=True`` or ``edit_mode=False``, returns a :class:`TurboReader`
-    (or Calamine-backed reader) for high-throughput read-only workloads.
+    If ``read_only=True``, returns a :class:`ReadOnlyWorkbook` backed by TurboReader.
     """
-    if read_only or edit_mode is False:
+    if isinstance(filename, Path):
+        filename = expanduser(str(filename))
+    elif isinstance(filename, str):
+        filename = expanduser(filename)
+
+    if read_only:
+        reader = read_excel_turbo(filename)
+        return ReadOnlyWorkbook(reader)
+
+    if edit_mode is False:
         if kwargs:
             return read_excel(filename, **kwargs)
         return read_excel_turbo(filename)
+
     if kwargs:
         raise TypeError(f"unsupported arguments: {sorted(kwargs)}")
     if edit_excel is None:
         raise NotImplementedError("edit_excel is not available in this build")
-    return edit_excel(str(filename))
+    wb = edit_excel(str(filename), data_only=data_only)
+    return wb
 
 
 DType = Literal["null", "int", "float", "string", "boolean", "datetime", "date", "duration"]
@@ -876,6 +899,14 @@ class TurboSheet:
             )
         return self._sheet.to_arrow()
 
+    def to_arrow_with_errors(self) -> tuple[pa.RecordBatch, pa.RecordBatch]:
+        """Values and errors as a pair of pyarrow RecordBatches: (values, errors)."""
+        if not _PYARROW_AVAILABLE:
+            raise ImportError(
+                "pyarrow is required for to_arrow_with_errors(). Install with: pip install 'kyrax[pyarrow]'"
+            )
+        return self._sheet.to_arrow_with_errors()
+
     def cell_errors(self) -> pa.RecordBatch:
         """Sparse typed error caches from ``t=\"e\"`` cells as a RecordBatch.
 
@@ -1108,6 +1139,90 @@ class TurboReader:
 
     def __repr__(self) -> str:
         return self._reader.__repr__()
+
+
+class ReadOnlyWorksheet:
+    """Read-only worksheet wrapping TurboSheet."""
+
+    def __init__(self, sheet: TurboSheet) -> None:
+        self._sheet = sheet
+
+    @property
+    def title(self) -> str:
+        return self._sheet.name
+
+    @property
+    def max_row(self) -> int:
+        return self._sheet.nrows
+
+    @property
+    def max_column(self) -> int:
+        return self._sheet.ncols
+
+    @property
+    def min_row(self) -> int:
+        return 1
+
+    @property
+    def min_column(self) -> int:
+        return 1
+
+    def iter_rows(
+        self,
+        min_row: int | None = None,
+        max_row: int | None = None,
+        min_col: int | None = None,
+        max_col: int | None = None,
+        values_only: bool = False,
+    ) -> typing.Iterator[tuple[typing.Any, ...]]:
+        batch = self._sheet.to_arrow()
+        pydict = batch.to_pydict()
+        cols = list(pydict.keys())
+        nrows = batch.num_rows
+        r1 = (min_row or 1) - 1
+        r2 = min(max_row or nrows, nrows)
+        c1 = (min_col or 1) - 1
+        c2 = min(max_col or len(cols), len(cols))
+        selected_cols = [pydict[cols[c]] for c in range(c1, c2)]
+        for r in range(r1, r2):
+            yield tuple(col[r] for col in selected_cols)
+
+    @property
+    def values(self) -> typing.Iterator[tuple[typing.Any, ...]]:
+        return self.iter_rows(values_only=True)
+
+
+class ReadOnlyWorkbook:
+    """Read-only workbook wrapping TurboReader."""
+
+    def __init__(self, reader: TurboReader) -> None:
+        self._reader = reader
+
+    @property
+    def sheetnames(self) -> list[str]:
+        return self._reader.sheet_names
+
+    @property
+    def worksheets(self) -> list[ReadOnlyWorksheet]:
+        return [self[name] for name in self.sheetnames]
+
+    @property
+    def active(self) -> ReadOnlyWorksheet:
+        names = self.sheetnames
+        if not names:
+            raise ValueError("workbook contains no sheets")
+        return self[names[0]]
+
+    def __getitem__(self, key: str | int) -> ReadOnlyWorksheet:
+        ts = self._reader.load_sheet(key, features="values", header_row=None)
+        return ReadOnlyWorksheet(ts)
+
+    def load_sheet(self, idx_or_name: str | int, **kwargs):
+        """Passthrough to the underlying :class:`TurboReader.load_sheet`."""
+        return self._reader.load_sheet(idx_or_name, **kwargs)
+
+    def close(self) -> None:
+        pass
 
 
 def read_excel_turbo(path: Path | str, password: str | None = None) -> TurboReader:
@@ -1349,6 +1464,18 @@ __all__ = (
     "edit_excel",
     "EditableWorkbook",
     "EditableSheet",
+    "Workbook",
+    "Cell",
+    "ReadOnlyWorkbook",
+    "ReadOnlyWorksheet",
+    # style classes
+    "Font",
+    "PatternFill",
+    "Side",
+    "Border",
+    "Alignment",
+    "Protection",
+    "Comment",
     # Python types
     "DType",
     "DTypeMap",
@@ -1392,6 +1519,10 @@ def __getattr__(name: str):
         import importlib
 
         return importlib.import_module(f"{__name__}.formulas")
+    if name == "styles":
+        import importlib
+
+        return importlib.import_module(f"{__name__}.styles")
     if name == "io":
         import importlib
 
