@@ -207,10 +207,9 @@ impl SheetData {
         NameTarget::Ref { sheet: scope, core }
     }
 
-    /// Store a freshly computed value for a formula cell so that dependent
-    /// formulas read it through `CellResolver::cell`. Returns `false` when the
-    /// position does not name a formula cell (or the sheet index is out of
-    /// range) — the caller must not treat that as success.
+    /// Store a freshly computed value for a formula or materialized spill cell
+    /// so that dependent formulas read it through `CellResolver::cell`. Returns
+    /// `false` only if the sheet index is out of range.
     pub fn update_computed(&mut self, sheet: u32, row: u32, col: u32, value: CalcValue) -> bool {
         let Some(gs) = self.data.sheets.get_mut(sheet as usize) else {
             return false;
@@ -218,17 +217,38 @@ impl SheetData {
         let Ok(col) = u16::try_from(col) else {
             return false;
         };
-        let i = match gs
+        match gs
             .cells
             .binary_search_by(|c| (c.row, c.col).cmp(&(row, col)))
         {
-            Ok(i) => i,
-            Err(_) => return false,
-        };
-        if !gs.cells[i].is_formula {
-            return false;
+            Ok(i) => {
+                gs.cells[i].value = value;
+            }
+            Err(pos) => {
+                gs.cells.insert(
+                    pos,
+                    GridCell {
+                        row,
+                        col,
+                        value,
+                        is_formula: false,
+                    },
+                );
+                if let Some(ref mut b) = gs.bounds {
+                    b.row0 = b.row0.min(row);
+                    b.row1 = b.row1.max(row);
+                    b.col0 = b.col0.min(col);
+                    b.col1 = b.col1.max(col);
+                } else {
+                    gs.bounds = Some(UsedRegion {
+                        row0: row,
+                        col0: col,
+                        row1: row,
+                        col1: col,
+                    });
+                }
+            }
         }
-        gs.cells[i].value = value;
         true
     }
 
@@ -333,7 +353,11 @@ impl CellResolver for SheetData {
             .binary_search_by(|c| (c.row, c.col).cmp(&(row, col)))
             .ok()?;
         let v = &gs.cells[i].value;
-        if v.is_blank() { None } else { Some(v.clone()) }
+        if v.is_blank() {
+            None
+        } else {
+            Some(v.clone())
+        }
     }
 
     fn sheet_index(&self, name: &str) -> Option<u32> {

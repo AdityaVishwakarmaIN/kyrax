@@ -23,10 +23,11 @@ use crate::turbo::calc::eval::eval;
 use crate::turbo::calc::functions::{FuncCtx, MAX_COLS, MAX_ROWS};
 use crate::turbo::calc::parser::parse_formula;
 use crate::turbo::calc::sheetdata::SheetData;
-use crate::turbo::calc::value::{ArrayValue, CalcValue};
+use crate::turbo::calc::spill::SpillRegion;
+use crate::turbo::calc::value::{ArrayValue, CalcError, CalcValue};
 use crate::turbo::calc::{CalcOptions, CalcReport};
-use crate::turbo::write::model::{Cell, CellValue, Row, Sheet, Workbook};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use crate::turbo::write::model::{CachedValue, Cell, CellValue, Row, Sheet, Workbook};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 /// Evaluate `wb`'s formula cells and fill their `cached` slots.
@@ -165,13 +166,19 @@ pub fn hydrate_workbook(wb: &mut Workbook, options: &CalcOptions) -> CalcReport 
             Err(_) => None,
         };
         if let Some(arr) = spill {
-            if persist_spill(&mut data, wb, key, &arr) {
-                report.computed += 1;
-                if arr.get(0, 0).is_error() {
+            match persist_spill(&mut data, wb, key, &arr) {
+                PersistOutcome::Computed => {
+                    report.computed += 1;
+                    if arr.get(0, 0).is_error() {
+                        report.error_cells += 1;
+                    }
+                }
+                PersistOutcome::BlockedError => {
                     report.error_cells += 1;
                 }
-            } else {
-                report.fallback += 1;
+                PersistOutcome::Fallback => {
+                    report.fallback += 1;
+                }
             }
             continue;
         }
@@ -186,7 +193,22 @@ pub fn hydrate_workbook(wb: &mut Workbook, options: &CalcOptions) -> CalcReport 
                     report.fallback += 1;
                 }
             }
-            None => report.fallback += 1,
+            None => {
+                if options.force_recalc {
+                    if let Some(sheet) = wb.sheets.get_mut(key.sheet as usize) {
+                        let r = key.row + 1;
+                        let c = u32::from(key.col) + 1;
+                        if let Some(row) = sheet.rows.iter_mut().find(|row| row.row == r) {
+                            if let Some(cell) = row.cells.iter_mut().find(|cell| cell.col == c) {
+                                if let CellValue::Formula { cached, .. } = &mut cell.value {
+                                    *cached = None;
+                                }
+                            }
+                        }
+                    }
+                }
+                report.fallback += 1;
+            }
         }
     }
 
@@ -206,57 +228,185 @@ fn scalar_cache(v: &CalcValue) -> Option<CalcValue> {
     }
 }
 
+enum PersistOutcome {
+    Computed,
+    BlockedError,
+    Fallback,
+}
+
+fn cell_matches_calc_value(cv: &CellValue, val: &CalcValue) -> bool {
+    match (cv, val) {
+        (CellValue::Number(n1), CalcValue::Number(n2)) => (n1 - n2).abs() < f64::EPSILON,
+        (CellValue::Str(s1), CalcValue::Text(s2)) => s1 == s2.as_ref(),
+        (CellValue::Bool(b1), CalcValue::Bool(b2)) => b1 == b2,
+        (CellValue::Error(e1), CalcValue::Error(e2)) => e1 == e2.code(),
+        _ => false,
+    }
+}
+
+fn cache_anchor_error(data: &mut SheetData, wb: &mut Workbook, key: &CellKey) {
+    let (r0, c0) = (key.row, u32::from(key.col));
+    if let Some(sheet) = wb.sheets.get_mut(key.sheet as usize) {
+        if let Some(prev) = sheet.spills.iter().find(|s| s.anchor == (r0, c0)).copied() {
+            remove_region_cells(sheet, prev, None);
+        }
+        sheet.spills.retain(|s| s.anchor != (r0, c0));
+        let r = r0 + 1;
+        let c = c0 + 1;
+        if let Some(row) = sheet.rows.iter_mut().find(|row| row.row == r) {
+            if let Some(cell) = row.cells.iter_mut().find(|cell| cell.col == c) {
+                if let CellValue::Formula { cached, .. } = &mut cell.value {
+                    *cached = Some(CachedValue::Error("#SPILL!".to_string()));
+                }
+            }
+        }
+    }
+    let _ = data.update_computed(key.sheet, r0, c0, CalcValue::Error(CalcError::Spill));
+}
+
+fn remove_region_cells(
+    sheet: &mut Sheet,
+    old_region: SpillRegion,
+    new_region: Option<SpillRegion>,
+) {
+    let (or0, oc0) = old_region.anchor;
+    for r in or0..or0 + old_region.rows {
+        for c in oc0..oc0 + old_region.cols {
+            if r == or0 && c == oc0 {
+                continue; // anchor stays
+            }
+            if let Some(nr) = new_region {
+                let (nr0, nc0) = nr.anchor;
+                if r >= nr0 && r < nr0 + nr.rows && c >= nc0 && c < nc0 + nr.cols {
+                    continue; // inside new region, keep
+                }
+            }
+            let row_num = r + 1;
+            let col_num = c + 1;
+            if let Some(row) = sheet.rows.iter_mut().find(|row| row.row == row_num) {
+                row.cells.retain(|cell| cell.col != col_num);
+            }
+        }
+    }
+    sheet.rows.retain(|row| !row.cells.is_empty());
+}
+
 /// Materialize a spilled array into `wb` using Excel's no-rich-metadata model:
 /// the anchor keeps its formula (its cached `<v>` comes from the first element
 /// via `write_back`), and every other element becomes a plain value cell at its
-/// row/col. Returns `false` when the spill cannot be persisted — off the grid,
-/// or its rectangle collides with content it must not overwrite — in which
-/// case the anchor is left uncached and `fullCalcOnLoad` makes Excel report
-/// `#SPILL!` itself.
+/// row/col.
 fn persist_spill(
     data: &mut SheetData,
     wb: &mut Workbook,
     key: &CellKey,
     arr: &Arc<ArrayValue>,
-) -> bool {
+) -> PersistOutcome {
     let (rows, cols) = arr.shape();
     let (r0, c0) = (key.row, u32::from(key.col));
     if r0 + rows > MAX_ROWS || c0 + cols > MAX_COLS as u32 {
-        return false; // off the grid: Excel would report #SPILL!
+        cache_anchor_error(data, wb, key);
+        return PersistOutcome::BlockedError;
     }
     let Some(sheet) = wb.sheets.get_mut(key.sheet as usize) else {
-        return false;
+        return PersistOutcome::Fallback;
     };
-    // The anchor cell itself is occupied (it holds the formula) but every other
-    // cell in the rectangle must be empty, or writing would clobber user data.
-    let mut occupied = HashSet::with_capacity(64);
-    for row in &sheet.rows {
-        for cell in &row.cells {
-            if !matches!(cell.value, CellValue::Empty) {
-                occupied.insert((row.row, cell.col));
-            }
-        }
-    }
+
+    // Anchor's own previous region, if any
+    let my_prev_region = sheet.spills.iter().find(|s| s.anchor == (r0, c0)).copied();
+
+    // Obstacle rule (only a cell that is non-empty, not the anchor):
     for dr in 0..rows {
         for dc in 0..cols {
             if dr == 0 && dc == 0 {
                 continue;
             }
-            if occupied.contains(&(r0 + dr + 1, c0 + dc + 1)) {
-                return false;
+            let r = r0 + dr;
+            let c = c0 + dc;
+            let row_1b = r + 1;
+            let col_1b = c + 1;
+
+            let cell_opt = sheet
+                .rows
+                .iter()
+                .find(|row| row.row == row_1b)
+                .and_then(|row| row.cells.iter().find(|cell| cell.col == col_1b));
+
+            if let Some(cell) = cell_opt {
+                if !matches!(cell.value, CellValue::Empty) {
+                    // 1. Inside this anchor's previous region (sheet.spills find by anchor) -> reclaimable (own).
+                    let inside_my_prev = my_prev_region.is_some_and(|pr| {
+                        let (pr0, pc0) = pr.anchor;
+                        r >= pr0 && r < pr0 + pr.rows && c >= pc0 && c < pc0 + pr.cols
+                    });
+                    if inside_my_prev {
+                        continue;
+                    }
+
+                    // 2. Inside a different anchor's region -> obstacle (foreign spill).
+                    let inside_other_spill = sheet.spills.iter().any(|s| {
+                        s.anchor != (r0, c0)
+                            && r >= s.anchor.0
+                            && r < s.anchor.0 + s.rows
+                            && c >= s.anchor.1
+                            && c < s.anchor.1 + s.cols
+                    });
+                    if inside_other_spill {
+                        cache_anchor_error(data, wb, key);
+                        return PersistOutcome::BlockedError;
+                    }
+
+                    // 3. Value-matches computed element -> reclaimable (reload fallback).
+                    let expected_val = arr.get(dr, dc);
+                    if cell_matches_calc_value(&cell.value, expected_val) {
+                        continue;
+                    }
+
+                    // 4. Else -> obstacle -> Blocked.
+                    cache_anchor_error(data, wb, key);
+                    return PersistOutcome::BlockedError;
+                }
             }
         }
     }
-    // Anchor: give the resolver the first element so downstream formulas read
-    // it; `write_back` later stores it as the anchor's cached `<v>`.
+
+    // Shrink by region: remove only previous-region cells outside the new region
+    let new_region = SpillRegion {
+        anchor: (r0, c0),
+        rows,
+        cols,
+    };
+    if let Some(prev) = my_prev_region {
+        remove_region_cells(sheet, prev, Some(new_region));
+    }
+
+    // Update sheet.spills: retain out anchor's old entry and push new_region
+    sheet.spills.retain(|s| s.anchor != (r0, c0));
+    sheet.spills.push(new_region);
+
+    // Anchor: give the resolver the first element so downstream formulas read it
     let _ = data.update_computed(
         key.sheet,
         key.row,
         u32::from(key.col),
         arr.get(0, 0).clone(),
     );
+
+    // Materialize non-anchor plain cells into sheet.rows
     materialize_spill_cells(sheet, r0, c0, arr);
-    true
+
+    // Downstream visibility: push all non-blank elements into SheetData
+    for (i, v) in arr.data.iter().enumerate() {
+        let dr = (i as u32) / cols;
+        let dc = (i as u32) % cols;
+        if dr == 0 && dc == 0 {
+            continue;
+        }
+        if let Some(cv) = scalar_cache(v) {
+            let _ = data.update_computed(key.sheet, r0 + dr, c0 + dc, cv);
+        }
+    }
+
+    PersistOutcome::Computed
 }
 
 /// Write the spilled values of `arr` (whose anchor is `r0, c0`, 0-based) into
@@ -285,7 +435,9 @@ fn materialize_spill_cells(sheet: &mut Sheet, r0: u32, c0: u32, arr: &ArrayValue
         if let Some(row) = sheet.rows.iter_mut().find(|r| r.row == row_num) {
             for (col, cv) in cells {
                 match row.cells.binary_search_by(|c| c.col.cmp(&col)) {
-                    Ok(_) => {} // defensive: the collision check already excluded these
+                    Ok(pos) => {
+                        row.cells[pos].value = cv;
+                    }
                     Err(pos) => row.cells.insert(pos, Cell::new(col, cv)),
                 }
             }
@@ -493,10 +645,33 @@ mod tests {
     }
 
     #[test]
-    fn a_spill_that_would_overwrite_content_is_dropped_not_clobbered() {
-        // A2 already holds 99; SEQUENCE(2) in A1 would write over it, so the
-        // spill is refused and the anchor is left uncached for Excel to
-        // recompute (#SPILL!) rather than silently clobbering user data.
+    fn two_dimensional_spill_materializes_row_major() {
+        let mut wb = book(vec![formula_cell(1, "=SEQUENCE(2,3,10,10)")]);
+        let report = hydrate_workbook(&mut wb, &CalcOptions::default());
+        assert_eq!(report.total_formulas, 1);
+        assert_eq!(report.computed, 1, "{report:?}");
+        assert_eq!(report.error_cells, 0);
+        assert_eq!(cached_of(&wb, 1, 1), Some("Number(10.0)".to_string()));
+
+        assert!(
+            matches!(cell_value_of(&wb, 1, 2), Some(CellValue::Number(n)) if (*n - 20.0).abs() < f64::EPSILON)
+        );
+        assert!(
+            matches!(cell_value_of(&wb, 1, 3), Some(CellValue::Number(n)) if (*n - 30.0).abs() < f64::EPSILON)
+        );
+        assert!(
+            matches!(cell_value_of(&wb, 2, 1), Some(CellValue::Number(n)) if (*n - 40.0).abs() < f64::EPSILON)
+        );
+        assert!(
+            matches!(cell_value_of(&wb, 2, 2), Some(CellValue::Number(n)) if (*n - 50.0).abs() < f64::EPSILON)
+        );
+        assert!(
+            matches!(cell_value_of(&wb, 2, 3), Some(CellValue::Number(n)) if (*n - 60.0).abs() < f64::EPSILON)
+        );
+    }
+
+    #[test]
+    fn blocked_spill_caches_spill_error_without_clobbering() {
         let mut wb = Workbook::new();
         let mut r1 = Row::new(1);
         r1.cells = vec![formula_cell(1, "=SEQUENCE(2)")];
@@ -505,11 +680,269 @@ mod tests {
         wb.sheets[0].rows = vec![r1, r2];
         let report = hydrate_workbook(&mut wb, &CalcOptions::default());
         assert_eq!(report.computed, 0, "{report:?}");
-        assert!(report.fallback >= 1, "{report:?}");
-        assert_eq!(cached_of(&wb, 1, 1), None);
+        assert_eq!(report.error_cells, 1, "{report:?}");
+        assert_eq!(report.fallback, 0, "{report:?}");
+        assert_eq!(cached_of(&wb, 1, 1), Some("Error(\"#SPILL!\")".to_string()));
+        assert!(
+            matches!(cell_value_of(&wb, 2, 1), Some(CellValue::Number(n)) if (*n - 99.0).abs() < f64::EPSILON)
+        );
+    }
+
+    #[test]
+    fn clearing_obstacle_rehydrates_and_repeat_recalc_is_idempotent() {
+        let mut wb = Workbook::new();
+        let mut r1 = Row::new(1);
+        r1.cells = vec![formula_cell(1, "=SEQUENCE(2)")];
+        let mut r2 = Row::new(2);
+        r2.cells = vec![num_cell(1, 99.0)];
+        wb.sheets[0].rows = vec![r1, r2];
+
+        // Pass 1: blocked by 99.0
+        let rep1 = hydrate_workbook(&mut wb, &CalcOptions::default());
+        assert_eq!(rep1.error_cells, 1);
+        assert_eq!(cached_of(&wb, 1, 1), Some("Error(\"#SPILL!\")".to_string()));
+
+        // Clear obstacle at row 2 col 1
+        wb.sheets[0].rows[1].cells.clear();
+        let forced = CalcOptions {
+            force_recalc: true,
+            ..CalcOptions::default()
+        };
+
+        // Pass 2: now unblocked -> computes
+        let rep2 = hydrate_workbook(&mut wb, &forced);
+        assert_eq!(rep2.computed, 1);
+        assert_eq!(rep2.error_cells, 0);
+        assert_eq!(cached_of(&wb, 1, 1), Some("Number(1.0)".to_string()));
+        assert!(
+            matches!(cell_value_of(&wb, 2, 1), Some(CellValue::Number(n)) if (*n - 2.0).abs() < f64::EPSILON)
+        );
+
+        // Pass 3: repeat recalc is idempotent (self-cells are not treated as obstacles)
+        let rep3 = hydrate_workbook(&mut wb, &forced);
+        assert_eq!(rep3.computed, 1);
+        assert_eq!(rep3.error_cells, 0);
+        assert_eq!(cached_of(&wb, 1, 1), Some("Number(1.0)".to_string()));
+        assert!(
+            matches!(cell_value_of(&wb, 2, 1), Some(CellValue::Number(n)) if (*n - 2.0).abs() < f64::EPSILON)
+        );
+    }
+
+    #[test]
+    fn shrink_clears_vacated_cells() {
+        let mut wb = book(vec![formula_cell(1, "=SEQUENCE(5)")]);
+        let forced = CalcOptions {
+            force_recalc: true,
+            ..CalcOptions::default()
+        };
+        let rep1 = hydrate_workbook(&mut wb, &forced);
+        assert_eq!(rep1.computed, 1);
+        assert!(
+            matches!(cell_value_of(&wb, 5, 1), Some(CellValue::Number(n)) if (*n - 5.0).abs() < f64::EPSILON)
+        );
+        assert_eq!(wb.sheets[0].rows.len(), 5);
+
+        // Shrink formula from SEQUENCE(5) to SEQUENCE(2)
+        if let CellValue::Formula { text, cached, .. } = &mut wb.sheets[0].rows[0].cells[0].value {
+            *text = "=SEQUENCE(2)".to_string();
+            *cached = None;
+        }
+        let rep2 = hydrate_workbook(&mut wb, &forced);
+        assert_eq!(rep2.computed, 1);
+        assert!(
+            matches!(cell_value_of(&wb, 2, 1), Some(CellValue::Number(n)) if (*n - 2.0).abs() < f64::EPSILON)
+        );
+        assert!(cell_value_of(&wb, 3, 1).is_none());
+        assert!(cell_value_of(&wb, 4, 1).is_none());
+        assert!(cell_value_of(&wb, 5, 1).is_none());
+        assert_eq!(wb.sheets[0].rows.len(), 2);
+    }
+
+    #[test]
+    fn downstream_formula_reads_spill_in_same_pass() {
+        // A1 = SEQUENCE(3) (spills A1:A3)
+        // A4 = SUM(A1:A3)
+        let mut wb = Workbook::new();
+        let mut r1 = Row::new(1);
+        r1.cells = vec![formula_cell(1, "=SEQUENCE(3)")];
+        let mut r4 = Row::new(4);
+        r4.cells = vec![formula_cell(1, "=SUM(A1:A3)")];
+        wb.sheets[0].rows = vec![r1, r4];
+
+        let report = hydrate_workbook(&mut wb, &CalcOptions::default());
+        assert_eq!(report.total_formulas, 2);
+        assert_eq!(report.computed, 2, "{report:?}");
+        assert_eq!(report.fallback, 0, "{report:?}");
+        assert_eq!(cached_of(&wb, 1, 1), Some("Number(1.0)".to_string()));
+        assert_eq!(cached_of(&wb, 4, 1), Some("Number(6.0)".to_string()));
+    }
+
+    #[test]
+    fn forced_recalc_overwrites_stale_with_spill_error() {
+        let mut wb = Workbook::new();
+        let mut r1 = Row::new(1);
+        let mut f = formula_cell(1, "=SEQUENCE(2)");
+        if let CellValue::Formula { cached, .. } = &mut f.value {
+            *cached = Some(CachedValue::Number(42.0));
+        }
+        r1.cells = vec![f];
+        let mut r2 = Row::new(2);
+        r2.cells = vec![num_cell(1, 99.0)];
+        wb.sheets[0].rows = vec![r1, r2];
+
+        // Without force_recalc, stale cache stands
+        let rep1 = hydrate_workbook(&mut wb, &CalcOptions::default());
+        assert_eq!(rep1.computed, 0);
+        assert_eq!(cached_of(&wb, 1, 1), Some("Number(42.0)".to_string()));
+
+        // With force_recalc, stale cache is overwritten with #SPILL!
+        let forced = CalcOptions {
+            force_recalc: true,
+            ..CalcOptions::default()
+        };
+        let rep2 = hydrate_workbook(&mut wb, &forced);
+        assert_eq!(rep2.error_cells, 1);
+        assert_eq!(cached_of(&wb, 1, 1), Some("Error(\"#SPILL!\")".to_string()));
+    }
+
+    #[test]
+    fn recalc_after_input_change_recomputes_spill_not_spill() {
+        // A1 holds 2.0, B1 = SEQUENCE(A1) spills B1:B2 with 1, 2.
+        let mut wb = Workbook::new();
+        let mut r1 = Row::new(1);
+        r1.cells = vec![num_cell(1, 2.0), formula_cell(2, "=SEQUENCE(A1)")];
+        wb.sheets[0].rows = vec![r1];
+
+        let rep1 = hydrate_workbook(&mut wb, &CalcOptions::default());
+        assert_eq!(rep1.computed, 1);
+        assert_eq!(cached_of(&wb, 1, 2), Some("Number(1.0)".to_string()));
+        assert!(
+            matches!(cell_value_of(&wb, 2, 2), Some(CellValue::Number(n)) if (*n - 2.0).abs() < f64::EPSILON)
+        );
+
+        // Change A1 to 3.0: B1 should recompute to 3 rows (B1..B3) with values 1, 2, 3 without #SPILL!
+        if let Some(row) = wb.sheets[0].rows.iter_mut().find(|r| r.row == 1) {
+            if let Some(cell) = row.cells.iter_mut().find(|c| c.col == 1) {
+                cell.value = CellValue::Number(3.0);
+            }
+        }
+        let forced = CalcOptions {
+            force_recalc: true,
+            ..CalcOptions::default()
+        };
+        let rep2 = hydrate_workbook(&mut wb, &forced);
+        assert_eq!(rep2.computed, 1);
+        assert_eq!(rep2.error_cells, 0);
+        assert_eq!(cached_of(&wb, 1, 2), Some("Number(1.0)".to_string()));
+        assert!(
+            matches!(cell_value_of(&wb, 2, 2), Some(CellValue::Number(n)) if (*n - 2.0).abs() < f64::EPSILON)
+        );
+        assert!(
+            matches!(cell_value_of(&wb, 3, 2), Some(CellValue::Number(n)) if (*n - 3.0).abs() < f64::EPSILON)
+        );
+    }
+
+    #[test]
+    fn shrunk_spill_keeps_user_value_outside_region() {
+        // A1 = SEQUENCE(4) spills A1..A4. User data at A10 = 999.0.
+        let mut wb = Workbook::new();
+        let mut r1 = Row::new(1);
+        r1.cells = vec![formula_cell(1, "=SEQUENCE(4)")];
+        let mut r10 = Row::new(10);
+        r10.cells = vec![num_cell(1, 999.0)];
+        wb.sheets[0].rows = vec![r1, r10];
+
+        let rep1 = hydrate_workbook(&mut wb, &CalcOptions::default());
+        assert_eq!(rep1.computed, 1);
+        assert_eq!(wb.sheets[0].spills.len(), 1);
+        assert_eq!(
+            wb.sheets[0].spills[0],
+            SpillRegion {
+                anchor: (0, 0),
+                rows: 4,
+                cols: 1
+            }
+        );
+        assert!(
+            matches!(cell_value_of(&wb, 10, 1), Some(CellValue::Number(n)) if (*n - 999.0).abs() < f64::EPSILON)
+        );
+
+        // Shrink A1 to SEQUENCE(2)
+        if let CellValue::Formula { text, cached, .. } = &mut wb.sheets[0].rows[0].cells[0].value {
+            *text = "=SEQUENCE(2)".to_string();
+            *cached = None;
+        }
+        let forced = CalcOptions {
+            force_recalc: true,
+            ..CalcOptions::default()
+        };
+        let rep2 = hydrate_workbook(&mut wb, &forced);
+        assert_eq!(rep2.computed, 1);
+        assert_eq!(
+            wb.sheets[0].spills[0],
+            SpillRegion {
+                anchor: (0, 0),
+                rows: 2,
+                cols: 1
+            }
+        );
         assert!(matches!(
-            cell_value_of(&wb, 2, 1),
-            Some(CellValue::Number(99.0))
+            cell_value_of(&wb, 1, 1),
+            Some(CellValue::Formula { .. })
         ));
+        assert!(
+            matches!(cell_value_of(&wb, 2, 1), Some(CellValue::Number(n)) if (*n - 2.0).abs() < f64::EPSILON)
+        );
+        assert!(cell_value_of(&wb, 3, 1).is_none());
+        assert!(cell_value_of(&wb, 4, 1).is_none());
+        // User cell at row 10 must be preserved!
+        assert!(
+            matches!(cell_value_of(&wb, 10, 1), Some(CellValue::Number(n)) if (*n - 999.0).abs() < f64::EPSILON)
+        );
+    }
+
+    #[test]
+    fn blocked_spill_clears_its_previous_region() {
+        // A1 = SEQUENCE(2) spills A1..A2
+        let mut wb = book(vec![formula_cell(1, "=SEQUENCE(2)")]);
+        let rep1 = hydrate_workbook(&mut wb, &CalcOptions::default());
+        assert_eq!(rep1.computed, 1);
+        assert_eq!(wb.sheets[0].spills.len(), 1);
+        assert_eq!(
+            wb.sheets[0].spills[0],
+            SpillRegion {
+                anchor: (0, 0),
+                rows: 2,
+                cols: 1
+            }
+        );
+        assert!(
+            matches!(cell_value_of(&wb, 2, 1), Some(CellValue::Number(n)) if (*n - 2.0).abs() < f64::EPSILON)
+        );
+
+        // User puts obstacle at A3 (row 3, col 1 = 99.0)
+        let mut r3 = Row::new(3);
+        r3.cells = vec![num_cell(1, 99.0)];
+        wb.sheets[0].rows.push(r3);
+
+        // Change formula to =SEQUENCE(3) which expands into A3
+        if let CellValue::Formula { text, cached, .. } = &mut wb.sheets[0].rows[0].cells[0].value {
+            *text = "=SEQUENCE(3)".to_string();
+            *cached = None;
+        }
+
+        // Force recalc: A3 blocks the spill -> A1 becomes #SPILL!, A2 (previous neighbor) is cleared!
+        let forced = CalcOptions {
+            force_recalc: true,
+            ..CalcOptions::default()
+        };
+        let rep2 = hydrate_workbook(&mut wb, &forced);
+        assert_eq!(rep2.error_cells, 1);
+        assert_eq!(cached_of(&wb, 1, 1), Some("Error(\"#SPILL!\")".to_string()));
+        assert!(cell_value_of(&wb, 2, 1).is_none()); // previous neighbor cleared!
+        assert!(
+            matches!(cell_value_of(&wb, 3, 1), Some(CellValue::Number(n)) if (*n - 99.0).abs() < f64::EPSILON)
+        );
+        assert!(wb.sheets[0].spills.is_empty());
     }
 }

@@ -3,6 +3,7 @@
 use ahash::AHashMap;
 use std::sync::Arc;
 
+use crate::turbo::calc::spill::SpillRegion;
 use crate::turbo::meta::AutoFilterMeta;
 
 use super::cf_dv::{ConditionalFormatting, DataValidation};
@@ -103,9 +104,14 @@ pub enum CellValue {
 
 /// Validate an Excel worksheet name according to ECMA-376 and Excel UI rules.
 #[allow(dead_code)]
-pub fn validate_sheet_name(name: &str, existing: &[String]) -> Result<(), crate::turbo::error::TurboError> {
+pub fn validate_sheet_name(
+    name: &str,
+    existing: &[String],
+) -> Result<(), crate::turbo::error::TurboError> {
     if name.is_empty() {
-        return Err(crate::turbo::error::TurboError::Format("sheet name cannot be empty".into()));
+        return Err(crate::turbo::error::TurboError::Format(
+            "sheet name cannot be empty".into(),
+        ));
     }
     let char_len = name.chars().count();
     if char_len > 31 {
@@ -128,7 +134,7 @@ pub fn validate_sheet_name(name: &str, existing: &[String]) -> Result<(), crate:
     }
     if name.eq_ignore_ascii_case("History") {
         return Err(crate::turbo::error::TurboError::Format(
-            "sheet name \"History\" is reserved by Excel".into()
+            "sheet name \"History\" is reserved by Excel".into(),
         ));
     }
     for ex in existing {
@@ -449,6 +455,8 @@ pub struct Sheet {
     pub print_titles: Option<String>,
     /// Pivot tables authored on this sheet (Task B5b).
     pub pivots: Vec<PivotTableSpec>,
+    /// Active dynamic array spill regions persisted on this sheet.
+    pub spills: Vec<SpillRegion>,
 }
 
 impl Sheet {
@@ -488,6 +496,7 @@ impl Sheet {
             print_area: None,
             print_titles: None,
             pivots: Vec::new(),
+            spills: Vec::new(),
         }
     }
 
