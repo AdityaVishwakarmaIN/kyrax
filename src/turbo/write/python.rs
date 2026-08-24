@@ -3831,6 +3831,7 @@ fn build_workbook_from_py(
     creator: Option<&str>,
     macro_enabled: bool,
     recalculate: bool,
+    vba_archive_path: Option<&str>,
 ) -> PyResult<Workbook> {
     let mut opts = WriteOptions {
         string_mode: parse_string_mode(string_mode)?,
@@ -3864,6 +3865,21 @@ fn build_workbook_from_py(
         macro_enabled,
         vba_archive_path: None,
     };
+
+    if let Some(vap) = vba_archive_path {
+        let file_bytes = std::fs::read(vap).map_err(|e| {
+            PyValueError::new_err(format!("vba_archive_path '{vap}' cannot be read: {e}"))
+        })?;
+        let map = crate::turbo::zipmin::ArchiveMap::parse(std::sync::Arc::new(file_bytes))
+            .map_err(|e| PyValueError::new_err(format!("vba_archive_path '{vap}' is not a valid zip: {e}")))?;
+        if !map.entry_order.iter().any(|e| e == "xl/vbaProject.bin") {
+            return Err(PyValueError::new_err(format!(
+                "vba_archive_path '{vap}' has no xl/vbaProject.bin"
+            )));
+        }
+        wb.vba_archive_path = Some(vap.to_string());
+        wb.macro_enabled = true;
+    }
 
     // `grid` is a write-only fast path: it is consumed here into `numeric_columns`
     // and never read by `parse_sheet_dict`, so any rejection must raise rather than
@@ -4050,6 +4066,7 @@ fn build_workbook_from_py(
     creator = None,
     macro_enabled = false,
     recalculate = false,
+    vba_archive_path = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn py_write_excel_turbo(
@@ -4071,6 +4088,7 @@ pub fn py_write_excel_turbo(
     creator: Option<&str>,
     macro_enabled: bool,
     recalculate: bool,
+    vba_archive_path: Option<&str>,
 ) -> PyResult<()> {
     let wb = build_workbook_from_py(
         sheets,
@@ -4089,6 +4107,7 @@ pub fn py_write_excel_turbo(
         creator,
         macro_enabled,
         recalculate,
+        vba_archive_path,
     )?;
     py.detach(|| save_workbook(&wb, path))
         .map_err(write_err_to_py)
@@ -4115,6 +4134,7 @@ pub fn py_write_excel_turbo(
     creator = None,
     macro_enabled = false,
     recalculate = false,
+    vba_archive_path = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn py_write_excel_turbo_stream(
@@ -4136,6 +4156,7 @@ pub fn py_write_excel_turbo_stream(
     creator: Option<&str>,
     macro_enabled: bool,
     recalculate: bool,
+    vba_archive_path: Option<&str>,
 ) -> PyResult<()> {
     let wb = build_workbook_from_py(
         sheets,
@@ -4154,6 +4175,7 @@ pub fn py_write_excel_turbo_stream(
         creator,
         macro_enabled,
         recalculate,
+        vba_archive_path,
     )?;
     py.detach(|| {
         let file = std::fs::File::create(path)?;
@@ -4183,6 +4205,7 @@ pub fn py_write_excel_turbo_stream(
     creator = None,
     macro_enabled = false,
     recalculate = false,
+    vba_archive_path = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn py_write_excel_turbo_bytes<'py>(
@@ -4203,6 +4226,7 @@ pub fn py_write_excel_turbo_bytes<'py>(
     creator: Option<&str>,
     macro_enabled: bool,
     recalculate: bool,
+    vba_archive_path: Option<&str>,
 ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
     let wb = build_workbook_from_py(
         sheets,
@@ -4221,6 +4245,7 @@ pub fn py_write_excel_turbo_bytes<'py>(
         creator,
         macro_enabled,
         recalculate,
+        vba_archive_path,
     )?;
     let bytes = py
         .detach(|| write_workbook_bytes(&wb))
@@ -5219,6 +5244,193 @@ impl PyEditableSheet {
         let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
         let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
         so.auto_filter = val.map(|s| s.to_string());
+        so.is_dirty = true;
+        Ok(())
+    }
+
+    #[getter]
+    fn protection<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
+            if let Some(ref p) = so.protection {
+                let d = PyDict::new(py);
+                d.set_item("sheet", p.sheet)?;
+                d.set_item("password", p.password.clone())?;
+                return Ok(Some(d));
+            }
+        }
+        let _ = ov.ensure_protection(&self.sheet_name);
+        if let Some(Some(p)) = ov.protection_cache.get(&self.sheet_name) {
+            let d = PyDict::new(py);
+            d.set_item("sheet", p.sheet)?;
+            d.set_item("password", p.password.clone())?;
+            return Ok(Some(d));
+        }
+        Ok(None)
+    }
+
+    #[setter]
+    fn set_protection(&self, val: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let prot = match val {
+            Some(v) => {
+                if v.is_none() {
+                    None
+                } else {
+                    let d = v.cast::<PyDict>().map_err(|_| PyValueError::new_err("protection must be a dict"))?;
+                    let sheet = opt_bool(d, "sheet")?.unwrap_or(true);
+                    let password = opt_str(d, "password")?;
+                    Some(crate::turbo::write::model::SheetProtection {
+                        sheet,
+                        password,
+                        already_hashed: false,
+                    })
+                }
+            }
+            None => None,
+        };
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        so.protection = prot;
+        so.is_dirty = true;
+        Ok(())
+    }
+
+    #[getter]
+    fn page_setup<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
+            if let Some(ref ps) = so.page_setup {
+                let d = PyDict::new(py);
+                if let Some(ref o) = ps.orientation {
+                    d.set_item("orientation", o)?;
+                }
+                if let Some(p) = ps.paper_size {
+                    d.set_item("paper_size", p)?;
+                }
+                if let Some(s) = ps.scale {
+                    d.set_item("scale", s)?;
+                }
+                if let Some(w) = ps.fit_to_width {
+                    d.set_item("fit_to_width", w)?;
+                }
+                if let Some(h) = ps.fit_to_height {
+                    d.set_item("fit_to_height", h)?;
+                }
+                d.set_item("fit_to_page", ps.fit_to_page)?;
+                return Ok(Some(d));
+            }
+        }
+        let _ = ov.ensure_page_setup(&self.sheet_name);
+        if let Some(Some(ps)) = ov.page_setup_cache.get(&self.sheet_name) {
+            let d = PyDict::new(py);
+            if let Some(ref o) = ps.orientation {
+                d.set_item("orientation", o)?;
+            }
+            if let Some(p) = ps.paper_size {
+                d.set_item("paper_size", p)?;
+            }
+            if let Some(s) = ps.scale {
+                d.set_item("scale", s)?;
+            }
+            if let Some(w) = ps.fit_to_width {
+                d.set_item("fit_to_width", w)?;
+            }
+            if let Some(h) = ps.fit_to_height {
+                d.set_item("fit_to_height", h)?;
+            }
+            d.set_item("fit_to_page", ps.fit_to_page)?;
+            return Ok(Some(d));
+        }
+        Ok(None)
+    }
+
+    #[setter]
+    fn set_page_setup(&self, val: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let ps = match val {
+            Some(v) => {
+                if v.is_none() {
+                    None
+                } else {
+                    Some(parse_page_setup(v)?)
+                }
+            }
+            None => None,
+        };
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        so.page_setup = ps;
+        so.is_dirty = true;
+        Ok(())
+    }
+
+    #[getter]
+    fn data_validations<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut list_to_convert: Option<Vec<crate::turbo::write::DataValidation>> = None;
+        if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
+            if !so.data_validations.is_empty() {
+                list_to_convert = Some(so.data_validations.clone());
+            }
+        }
+        if list_to_convert.is_none() {
+            let _ = ov.ensure_data_validations(&self.sheet_name);
+            if let Some(dvs) = ov.data_validations_cache.get(&self.sheet_name) {
+                list_to_convert = Some(dvs.clone());
+            }
+        }
+        let list = PyList::empty(py);
+        if let Some(dvs) = list_to_convert {
+            for dv in dvs {
+                let d = PyDict::new(py);
+                if let Some(ref t) = dv.type_ {
+                    d.set_item("type", t)?;
+                }
+                if let Some(ref op) = dv.operator {
+                    d.set_item("operator", op)?;
+                }
+                if let Some(ref f1) = dv.formula1 {
+                    d.set_item("formula1", f1)?;
+                }
+                if let Some(ref f2) = dv.formula2 {
+                    d.set_item("formula2", f2)?;
+                }
+                d.set_item("sqref", dv.sqref)?;
+                d.set_item("allow_blank", dv.allow_blank)?;
+                d.set_item("show_input_message", dv.show_input_message)?;
+                d.set_item("show_error_message", dv.show_error_message)?;
+                if let Some(ref et) = dv.error_title {
+                    d.set_item("error_title", et)?;
+                }
+                if let Some(ref err) = dv.error {
+                    d.set_item("error", err)?;
+                }
+                if let Some(ref pt) = dv.prompt_title {
+                    d.set_item("prompt_title", pt)?;
+                }
+                if let Some(ref p) = dv.prompt {
+                    d.set_item("prompt", p)?;
+                }
+                list.append(d)?;
+            }
+        }
+        Ok(list)
+    }
+
+    #[setter]
+    fn set_data_validations(&self, val: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let dvs = match val {
+            Some(v) => {
+                if v.is_none() {
+                    Vec::new()
+                } else {
+                    parse_data_validations(v)?
+                }
+            }
+            None => Vec::new(),
+        };
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        so.data_validations = dvs;
         so.is_dirty = true;
         Ok(())
     }

@@ -814,7 +814,7 @@ pub fn py_recalculate<'py>(
 ) -> PyResult<Bound<'py, PyBytes>> {
     crate::turbo::write::python::py_write_excel_turbo_bytes(
         py, sheets, "inline", true, false, false, None, 0, None, None, None, None, false, None,
-        None, false, true,
+        None, false, true, None,
     )
 }
 

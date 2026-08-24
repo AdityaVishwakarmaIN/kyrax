@@ -555,6 +555,35 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
         .map(|(i, _)| format!("rId{}", pivot_rel_base + i + 1))
         .collect();
 
+    let mut has_vba = wb.macro_enabled;
+    let mut vba_bin: Option<Vec<u8>> = None;
+    let mut vba_sig: Option<Vec<u8>> = None;
+    if let Some(ref src_path) = wb.vba_archive_path {
+        let file_bytes = std::fs::read(src_path)
+            .map_err(|e| std::io::Error::other(format!("cannot read vba_archive_path '{src_path}': {e}")))?;
+        let map = crate::turbo::zipmin::ArchiveMap::parse(std::sync::Arc::new(file_bytes))
+            .map_err(|e| std::io::Error::other(format!("invalid zip archive at '{src_path}': {e}")))?;
+        let bin = crate::turbo::overlay::inflate_entry(&map, "xl/vbaProject.bin")
+            .map_err(|e| std::io::Error::other(format!("cannot read vbaProject.bin in '{src_path}': {e}")))?
+            .ok_or_else(|| std::io::Error::other(format!("vba_archive_path '{src_path}' has no xl/vbaProject.bin")))?;
+        vba_bin = Some(bin);
+        if let Some(sig) = crate::turbo::overlay::inflate_entry(&map, "xl/vbaProjectSignature.bin")
+            .map_err(|e| std::io::Error::other(format!("cannot read vbaProjectSignature.bin in '{src_path}': {e}")))? {
+            vba_sig = Some(sig);
+            all_ct_overrides.push((
+                "/xl/vbaProjectSignature.bin".to_string(),
+                "application/vnd.ms-office.vbaProjectSignature",
+            ));
+        }
+        has_vba = true;
+    }
+    if let Some(ref vba_data) = vba_bin {
+        zip.add_stored("xl/vbaProject.bin", vba_data);
+    }
+    if let Some(ref sig_data) = vba_sig {
+        zip.add_stored("xl/vbaProjectSignature.bin", sig_data);
+    }
+
     let sheet_names_states: Vec<(String, SheetState)> = if let Some(g) = &wb.numeric_columns {
         vec![(g.sheet_name.clone(), SheetState::Visible)]
     } else {
@@ -583,6 +612,7 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
             cs_count,
             wb.external_links.len(),
             has_sst,
+            has_vba,
             &pivot_wirings,
             &pivot_rel_ids,
         ),
@@ -594,15 +624,12 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
             ws_count,
             cs_count,
             has_sst,
-            wb.macro_enabled,
+            has_vba,
             need_vml_default,
             &all_ct_overrides,
             &interner.media_defaults(),
         ),
     );
-
-    // F101 VBA preserve: deferred (no zip-read dep for copy-if-present in this merge).
-    let _ = &wb.vba_archive_path;
 
     let bytes = zip.finish()?;
 
@@ -874,6 +901,39 @@ pub fn save_workbook_stream<W: io::Write + Seek>(wb: &Workbook, w: W) -> io::Res
         .map(|(i, _)| format!("rId{}", pivot_rel_base + i + 1))
         .collect();
 
+    let mut has_vba = wb.macro_enabled;
+    let mut vba_bin: Option<Vec<u8>> = None;
+    let mut vba_sig: Option<Vec<u8>> = None;
+    if let Some(ref src_path) = wb.vba_archive_path {
+        let file_bytes = std::fs::read(src_path)
+            .map_err(|e| std::io::Error::other(format!("cannot read vba_archive_path '{src_path}': {e}")))?;
+        let map = crate::turbo::zipmin::ArchiveMap::parse(std::sync::Arc::new(file_bytes))
+            .map_err(|e| std::io::Error::other(format!("invalid zip archive at '{src_path}': {e}")))?;
+        let bin = crate::turbo::overlay::inflate_entry(&map, "xl/vbaProject.bin")
+            .map_err(|e| std::io::Error::other(format!("cannot read vbaProject.bin in '{src_path}': {e}")))?
+            .ok_or_else(|| std::io::Error::other(format!("vba_archive_path '{src_path}' has no xl/vbaProject.bin")))?;
+        vba_bin = Some(bin);
+        if let Some(sig) = crate::turbo::overlay::inflate_entry(&map, "xl/vbaProjectSignature.bin")
+            .map_err(|e| std::io::Error::other(format!("cannot read vbaProjectSignature.bin in '{src_path}': {e}")))? {
+            vba_sig = Some(sig);
+            all_ct_overrides.push((
+                "/xl/vbaProjectSignature.bin".to_string(),
+                "application/vnd.ms-office.vbaProjectSignature",
+            ));
+        }
+        has_vba = true;
+    }
+    if let Some(ref vba_data) = vba_bin {
+        zip.start_entry("xl/vbaProject.bin", 0)?;
+        zip.write_chunk(vba_data)?;
+        zip.finish_entry()?;
+    }
+    if let Some(ref sig_data) = vba_sig {
+        zip.start_entry("xl/vbaProjectSignature.bin", 0)?;
+        zip.write_chunk(sig_data)?;
+        zip.finish_entry()?;
+    }
+
     let sheet_names_states: Vec<(String, SheetState)> = if let Some(g) = &wb.numeric_columns {
         vec![(g.sheet_name.clone(), SheetState::Visible)]
     } else {
@@ -904,6 +964,7 @@ pub fn save_workbook_stream<W: io::Write + Seek>(wb: &Workbook, w: W) -> io::Res
             cs_count,
             wb.external_links.len(),
             has_sst,
+            has_vba,
             &pivot_wirings,
             &pivot_rel_ids,
         ),
@@ -920,7 +981,7 @@ pub fn save_workbook_stream<W: io::Write + Seek>(wb: &Workbook, w: W) -> io::Res
             ws_count,
             cs_count,
             has_sst,
-            wb.macro_enabled,
+            has_vba,
             need_vml_default,
             &all_ct_overrides,
             &interner.media_defaults(),
@@ -1668,6 +1729,12 @@ fn write_content_types(
             br#"<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>"#,
         );
     }
+    if macro_enabled {
+        push(
+            &mut out,
+            br#"<Override PartName="/xl/vbaProject.bin" ContentType="application/vnd.ms-office.vbaProject"/>"#,
+        );
+    }
     for (part, ct) in extra_overrides {
         if part.contains("/chartsheets/") {
             continue;
@@ -1687,6 +1754,7 @@ fn write_workbook_rels(
     chartsheet_count: usize,
     ext_link_count: usize,
     has_sst: bool,
+    has_vba: bool,
     pivot_wirings: &[PivotCacheWiring],
     pivot_rel_ids: &[String],
 ) -> Vec<u8> {
@@ -1751,15 +1819,25 @@ fn write_workbook_rels(
         );
         write_u32(&mut out, rid);
         push(&mut out, br#""/>"#);
+        rid += 1;
     }
-    for (w, rid) in pivot_wirings.iter().zip(pivot_rel_ids.iter()) {
+    if has_vba {
+        push(
+            &mut out,
+            br#"<Relationship Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin" Id="rId"#,
+        );
+        write_u32(&mut out, rid);
+        push(&mut out, br#""/>"#);
+        rid += 1;
+    }
+    for (w, rid_val) in pivot_wirings.iter().zip(pivot_rel_ids.iter()) {
         push(
             &mut out,
             br#"<Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="pivotCache/pivotCacheDefinition"#,
         );
         write_u32(&mut out, (w.part_index + 1) as u32);
         push(&mut out, br#".xml" Id=""#);
-        push_str(&mut out, rid);
+        push_str(&mut out, rid_val);
         push(&mut out, br#""/>"#);
     }
     push(&mut out, b"</Relationships>");

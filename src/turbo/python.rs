@@ -626,8 +626,8 @@ impl PyTurboSheet {
                 .cell_errors
                 .iter()
                 .map(|e| crate::types::excelsheet::CellError {
-                    position: (e.row as usize, e.col as usize),
-                    row_offset: 0,
+                    position: (e.row as usize + 1, e.col as usize),
+                    row_offset: 1,
                     detail: e.code.clone(),
                 })
                 .collect(),
@@ -1779,6 +1779,19 @@ impl PySheetStream {
         slf
     }
 
+    /// Header row (sheet row 1) captured by the stream's schema pre-pass.
+    /// Exposed so the Python read_only doorway can yield full grid rows
+    /// (openpyxl parity) while the engine itself streams data rows only.
+    #[getter]
+    fn column_names(&self) -> PyResult<Vec<String>> {
+        if let Ok(guard) = self.inner.lock() {
+            if let Some(s) = guard.as_ref() {
+                return Ok(s.column_names().to_vec());
+            }
+        }
+        Ok(Vec::new())
+    }
+
     fn __next__<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
         // First check pending sliced batch
         if let Ok(mut pending_guard) = self.pending.lock() {
@@ -1845,6 +1858,27 @@ impl PySheetStream {
                 *guard = None;
                 Ok(None)
             }
+        }
+    }
+
+    fn close(&self) -> PyResult<()> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        *guard = None;
+        if let Ok(mut pending_guard) = self.pending.lock() {
+            *pending_guard = None;
+        }
+        Ok(())
+    }
+
+    #[getter]
+    fn closed(&self) -> bool {
+        if let Ok(guard) = self.inner.lock() {
+            guard.is_none()
+        } else {
+            true
         }
     }
 }

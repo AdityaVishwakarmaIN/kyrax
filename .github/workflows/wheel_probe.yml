@@ -1,0 +1,53 @@
+name: Wheel Compatibility Probe
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'pyproject.toml'
+      - '.github/workflows/wheel_probe.yml'
+
+jobs:
+  probe-manylinux2014-x86_64:
+    name: Probe manylinux2014 x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Build wheel on manylinux2014
+        uses: PyO3/maturin-action@v1
+        with:
+          manylinux: "2014"
+          command: build
+          args: "--release -o dist -i python3.10"
+      - name: Verify wheel audit
+        run: |
+          pip install auditwheel
+          auditwheel show dist/*.whl
+
+  probe-manylinux_2_28-matrix:
+    name: Standard manylinux_2_28 Matrix
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        architecture: [x86-64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Build release wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          manylinux: "2_28"
+          command: build
+          args: "--release -o dist -i python${{ matrix.python-version }}"
+          target: ${{ matrix.architecture == 'aarch64' && 'aarch64-unknown-linux-gnu' || null }}

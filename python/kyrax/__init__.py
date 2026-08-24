@@ -167,7 +167,7 @@ def load_workbook(
 
     if read_only:
         reader = read_excel_turbo(filename)
-        return ReadOnlyWorkbook(reader)
+        return ReadOnlyWorkbook(reader, filename)
 
     if edit_mode is False:
         if kwargs:
@@ -247,7 +247,7 @@ class ExcelSheet:
             )
         return self._sheet.to_arrow()
 
-    def to_arrow_with_errors(self) -> tuple[pa.RecordBatch, CellErrors | None]:
+    def to_arrow_with_errors(self) -> tuple[pa.RecordBatch, CellErrors]:
         """Converts the sheet to a pyarrow `RecordBatch` with error information.
 
         Stores the positions of any values that cannot be parsed as the specified type and were
@@ -259,10 +259,7 @@ class ExcelSheet:
             raise ImportError(
                 "pyarrow is required for to_arrow_with_errors(). Install with: pip install 'kyrax[pyarrow]'"  # noqa: E501
             )
-        rb, cell_errors = self._sheet.to_arrow_with_errors()
-        if not cell_errors.errors:
-            return (rb, None)
-        return (rb, cell_errors)
+        return self._sheet.to_arrow_with_errors()
 
     def to_pandas(self) -> pd.DataFrame:
         """Converts the sheet to a Pandas `DataFrame`.
@@ -899,8 +896,14 @@ class TurboSheet:
             )
         return self._sheet.to_arrow()
 
-    def to_arrow_with_errors(self) -> tuple[pa.RecordBatch, pa.RecordBatch]:
-        """Values and errors as a pair of pyarrow RecordBatches: (values, errors)."""
+    def to_arrow_with_errors(self) -> tuple[pa.RecordBatch, "CellErrors"]:
+        """Values plus typed cell errors: ``(values_record_batch, cell_errors)``.
+
+        ``cell_errors`` is always a :class:`CellErrors` instance (empty when the
+        sheet has no ``t="e"`` cells) — never ``None``. Each error carries
+        ``position`` (1-based raw sheet grid), ``offset_position``
+        (0-based, header row stripped), ``row_offset`` and ``detail``.
+        """
         if not _PYARROW_AVAILABLE:
             raise ImportError(
                 "pyarrow is required for to_arrow_with_errors(). Install with: pip install 'kyrax[pyarrow]'"
@@ -1141,23 +1144,58 @@ class TurboReader:
         return self._reader.__repr__()
 
 
-class ReadOnlyWorksheet:
-    """Read-only worksheet wrapping TurboSheet."""
+class _ReadOnlyCellProxy:
+    __slots__ = ("_value", "_row", "_col")
 
-    def __init__(self, sheet: TurboSheet) -> None:
+    def __init__(self, value: typing.Any, row: int, col: int) -> None:
+        self._value = value
+        self._row = row
+        self._col = col
+
+    @property
+    def value(self) -> typing.Any:
+        return self._value
+
+    @property
+    def row(self) -> int:
+        return self._row
+
+    @property
+    def column(self) -> int:
+        return self._col
+
+
+class ReadOnlyWorksheet:
+    """Read-only worksheet backed by forward streaming."""
+
+    def __init__(
+        self,
+        workbook: ReadOnlyWorkbook,
+        title: str,
+        sheet_idx: int,
+        sheet: TurboSheet | None = None,
+    ) -> None:
+        self._wb = workbook
+        self._title = title
+        self._sheet_idx = sheet_idx
         self._sheet = sheet
+        self._active_stream: typing.Any | None = None
 
     @property
     def title(self) -> str:
-        return self._sheet.name
+        return self._title
 
     @property
     def max_row(self) -> int:
-        return self._sheet.nrows
+        if self._sheet is not None:
+            return self._sheet.nrows
+        return 0
 
     @property
     def max_column(self) -> int:
-        return self._sheet.ncols
+        if self._sheet is not None:
+            return self._sheet.ncols
+        return 0
 
     @property
     def min_row(self) -> int:
@@ -1175,28 +1213,123 @@ class ReadOnlyWorksheet:
         max_col: int | None = None,
         values_only: bool = False,
     ) -> typing.Iterator[tuple[typing.Any, ...]]:
-        batch = self._sheet.to_arrow()
-        pydict = batch.to_pydict()
-        cols = list(pydict.keys())
-        nrows = batch.num_rows
-        r1 = (min_row or 1) - 1
-        r2 = min(max_row or nrows, nrows)
-        c1 = (min_col or 1) - 1
-        c2 = min(max_col or len(cols), len(cols))
-        selected_cols = [pydict[cols[c]] for c in range(c1, c2)]
-        for r in range(r1, r2):
-            yield tuple(col[r] for col in selected_cols)
+        if not values_only:
+            raise NotImplementedError(
+                "cell proxies are only supported in edit_mode "
+                "(load_workbook(..., read_only=False)); "
+                "read_only=True streaming is values_only forward streaming"
+            )
+
+        if read_excel_turbo_iter is None or not _PYARROW_AVAILABLE:
+            # Fail loudly instead of silently materializing the whole sheet:
+            # the read_only contract is bounded-memory streaming.
+            raise ImportError(
+                "read_only=True streaming requires pyarrow "
+                "(install kyrax[pandas+pyarrow]) — refusing to load the full sheet eagerly"
+            )
+
+        stream = read_excel_turbo_iter(
+            str(self._wb._path),
+            self._sheet_idx,
+            chunk_size=10000,
+        )
+        self._active_stream = stream
+        try:
+            # Grid semantics (openpyxl parity): sheet row 1 is the header row
+            # and IS yielded; streamed batches carry data rows 2..N.
+            c1 = (min_col or 1) - 1
+            c2_bound = max_col
+            r1_bound = min_row or 1
+            r2_bound = max_row
+
+            def _select(vals: list) -> tuple:
+                n = len(vals)
+                lo = c1
+                hi = n if c2_bound is None else min(c2_bound, n)
+                if lo >= hi:
+                    return ()
+                return tuple(vals[lo:hi])
+
+            batches = iter(stream)
+            first = next(batches, None)
+            # The engine strips sheet row 1 as the header during its pre-pass;
+            # the names become available on/after the first batch.
+            header = list(stream.column_names)
+            if not header and first is not None:
+                header = list(first.schema.names)
+
+            # Row 1 = header.
+            if r1_bound <= 1 <= (r2_bound if r2_bound is not None else 1):
+                if header or first is not None:
+                    yield _select(header)
+
+            data_row = 2  # grid row of the first streamed batch row
+            batch = first
+            while batch is not None:
+                num_batch_rows = batch.num_rows
+                batch_start_grid = data_row
+                batch_end_grid = data_row + num_batch_rows - 1
+                data_row += num_batch_rows
+
+                done = r2_bound is not None and batch_start_grid > r2_bound
+
+                if not done and batch_end_grid >= r1_bound:
+                    pydict = batch.to_pydict()
+                    cols = list(pydict.keys())
+                    num_cols = len(cols)
+                    c2 = min(c2_bound or num_cols, num_cols) if c2_bound else num_cols
+                    selected_cols = [pydict[cols[c]] for c in range(c1, c2)]
+
+                    sub_start = max(0, r1_bound - batch_start_grid)
+                    sub_end = (
+                        min(num_batch_rows, r2_bound - batch_start_grid + 1)
+                        if r2_bound is not None
+                        else num_batch_rows
+                    )
+
+                    for r in range(sub_start, sub_end):
+                        yield tuple(col[r] for col in selected_cols)
+
+                if done:
+                    break
+                batch = next(batches, None)
+        finally:
+            if stream is not None:
+                stream.close()
+            self._active_stream = None
 
     @property
     def values(self) -> typing.Iterator[tuple[typing.Any, ...]]:
         return self.iter_rows(values_only=True)
 
+    def cell(self, row: int, column: int) -> _ReadOnlyCellProxy:
+        for r_idx, r_tuple in enumerate(
+            self.iter_rows(
+                min_row=row,
+                max_row=row,
+                min_col=column,
+                max_col=column,
+                values_only=True,
+            ),
+            start=row,
+        ):
+            val = r_tuple[0] if r_tuple else None
+            return _ReadOnlyCellProxy(val, row, column)
+        return _ReadOnlyCellProxy(None, row, column)
+
+    def close(self) -> None:
+        if self._active_stream is not None:
+            self._active_stream.close()
+            self._active_stream = None
+
 
 class ReadOnlyWorkbook:
-    """Read-only workbook wrapping TurboReader."""
+    """Read-only workbook wrapping TurboReader and streaming engine."""
 
-    def __init__(self, reader: TurboReader) -> None:
+    def __init__(self, reader: TurboReader, path: str | Path) -> None:
         self._reader = reader
+        self._path = path
+        self._cached_sheets: dict[str, ReadOnlyWorksheet] = {}
 
     @property
     def sheetnames(self) -> list[str]:
@@ -1211,18 +1344,42 @@ class ReadOnlyWorkbook:
         names = self.sheetnames
         if not names:
             raise ValueError("workbook contains no sheets")
-        return self[names[0]]
+        active_idx = 0
+        try:
+            active_idx = getattr(self._reader, "active_tab", 0)
+        except Exception:
+            active_idx = 0
+        if active_idx < 0 or active_idx >= len(names):
+            active_idx = 0
+        return self[names[active_idx]]
 
     def __getitem__(self, key: str | int) -> ReadOnlyWorksheet:
-        ts = self._reader.load_sheet(key, features="values", header_row=None)
-        return ReadOnlyWorksheet(ts)
+        names = self.sheetnames
+        if isinstance(key, int):
+            if key < 0 or key >= len(names):
+                raise IndexError(f"sheet index {key} out of range (total {len(names)})")
+            name = names[key]
+            idx = key
+        elif isinstance(key, str):
+            if key not in names:
+                raise KeyError(f"sheet '{key}' not found in workbook")
+            name = key
+            idx = names.index(key)
+        else:
+            raise TypeError("sheet key must be an integer index or sheet name string")
+
+        if name not in self._cached_sheets:
+            self._cached_sheets[name] = ReadOnlyWorksheet(self, name, idx)
+        return self._cached_sheets[name]
 
     def load_sheet(self, idx_or_name: str | int, **kwargs):
         """Passthrough to the underlying :class:`TurboReader.load_sheet`."""
         return self._reader.load_sheet(idx_or_name, **kwargs)
 
     def close(self) -> None:
-        pass
+        for ws in self._cached_sheets.values():
+            ws.close()
+        self._cached_sheets.clear()
 
 
 def read_excel_turbo(path: Path | str, password: str | None = None) -> TurboReader:
@@ -1299,6 +1456,7 @@ def write_excel_turbo(
     creator: str | None = None,
     macro_enabled: bool = False,
     recalculate: bool = False,
+    vba_archive_path: Path | str | None = None,
 ) -> None:
     """Write an XLSX workbook via the turbo write path (silo A+B+C).
 
@@ -1308,7 +1466,8 @@ def write_excel_turbo(
       - ``tab_color``, ``print_area``, ``print_titles``, row/col breaks
 
     Workbook kwargs: ``props``, ``defined_names``, ``chartsheets``,
-    ``lock_structure``, ``external_links``, ``macro_enabled``.
+    ``lock_structure``, ``external_links``, ``macro_enabled``,
+    ``vba_archive_path``.
 
     :param features: ``core`` | ``all`` | ``styles`` or list of feature names
         (``merges``, ``hyperlinks``, ``comments``, ``tables``, ``charts``,
@@ -1319,11 +1478,17 @@ def write_excel_turbo(
         reference, circular reference) are left uncomputed and the workbook
         keeps ``calcPr fullCalcOnLoad="1"`` so Excel fills them on open — a
         wrong number is never written.
+    :param vba_archive_path: path to a source `.xlsm` file to copy VBA project
+        and macros from.
     """
     if isinstance(path, Path):
         path = expanduser(str(path))
     elif isinstance(path, str):
         path = expanduser(path)
+    if isinstance(vba_archive_path, Path):
+        vba_archive_path = expanduser(str(vba_archive_path))
+    elif isinstance(vba_archive_path, str):
+        vba_archive_path = expanduser(vba_archive_path)
     _write_excel_turbo(
         path,
         sheets,
@@ -1342,6 +1507,7 @@ def write_excel_turbo(
         creator=creator,
         macro_enabled=macro_enabled,
         recalculate=recalculate,
+        vba_archive_path=vba_archive_path,
     )
 
 
@@ -1364,6 +1530,7 @@ def write_excel_turbo_stream(
     creator: str | None = None,
     macro_enabled: bool = False,
     recalculate: bool = False,
+    vba_archive_path: Path | str | None = None,
 ) -> None:
     """Stream an XLSX workbook straight to disk (openpyxl ``write_only`` analogue).
 
@@ -1379,6 +1546,10 @@ def write_excel_turbo_stream(
         path = expanduser(str(path))
     elif isinstance(path, str):
         path = expanduser(path)
+    if isinstance(vba_archive_path, Path):
+        vba_archive_path = expanduser(str(vba_archive_path))
+    elif isinstance(vba_archive_path, str):
+        vba_archive_path = expanduser(vba_archive_path)
     _write_excel_turbo_stream(
         path,
         sheets,
@@ -1397,6 +1568,7 @@ def write_excel_turbo_stream(
         creator=creator,
         macro_enabled=macro_enabled,
         recalculate=recalculate,
+        vba_archive_path=vba_archive_path,
     )
 
 
@@ -1418,8 +1590,13 @@ def write_excel_turbo_bytes(
     creator: str | None = None,
     macro_enabled: bool = False,
     recalculate: bool = False,
+    vba_archive_path: Path | str | None = None,
 ) -> bytes:
     """Write an XLSX workbook and return bytes (same options as write_excel_turbo)."""
+    if isinstance(vba_archive_path, Path):
+        vba_archive_path = expanduser(str(vba_archive_path))
+    elif isinstance(vba_archive_path, str):
+        vba_archive_path = expanduser(vba_archive_path)
     return _write_excel_turbo_bytes(
         sheets,
         string_mode=string_mode,
@@ -1437,6 +1614,7 @@ def write_excel_turbo_bytes(
         creator=creator,
         macro_enabled=macro_enabled,
         recalculate=recalculate,
+        vba_archive_path=vba_archive_path,
     )
 
 

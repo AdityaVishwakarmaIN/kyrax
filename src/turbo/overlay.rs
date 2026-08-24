@@ -334,6 +334,9 @@ pub struct WorkbookOverlay {
     pub data_only: bool,
     pub base_styles: AHashMap<String, AHashMap<(u32, u32), StyleDesc>>,
     pub base_styles_resolved: AHashSet<String>,
+    pub page_setup_cache: AHashMap<String, Option<crate::turbo::write::model::PageSetup>>,
+    pub data_validations_cache: AHashMap<String, Vec<crate::turbo::write::DataValidation>>,
+    pub protection_cache: AHashMap<String, Option<crate::turbo::write::model::SheetProtection>>,
 }
 
 impl WorkbookOverlay {
@@ -349,7 +352,102 @@ impl WorkbookOverlay {
             data_only: false,
             base_styles: AHashMap::default(),
             base_styles_resolved: AHashSet::default(),
+            page_setup_cache: AHashMap::default(),
+            data_validations_cache: AHashMap::default(),
+            protection_cache: AHashMap::default(),
         }
+    }
+
+    pub fn ensure_page_setup(&mut self, sheet_name: &str) -> TurboResult<()> {
+        if self.page_setup_cache.contains_key(sheet_name) {
+            return Ok(());
+        }
+        let Some(target) = self.archive_map.sheet_name_map.get(sheet_name) else {
+            self.page_setup_cache.insert(sheet_name.to_string(), None);
+            return Ok(());
+        };
+        let Some(xml) = inflate_entry(&self.archive_map, target)? else {
+            self.page_setup_cache.insert(sheet_name.to_string(), None);
+            return Ok(());
+        };
+        let ps = if let Some(meta) = crate::turbo::meta::scan_page_setup(&xml) {
+            Some(crate::turbo::write::model::PageSetup {
+                orientation: meta.orientation,
+                paper_size: meta.paper_size.map(|v| v as i32),
+                scale: meta.scale.map(|v| v as i32),
+                fit_to_width: meta.fit_to_width.map(|v| v as i32),
+                fit_to_height: meta.fit_to_height.map(|v| v as i32),
+                fit_to_page: meta.fit_to_width.is_some() || meta.fit_to_height.is_some(),
+            })
+        } else {
+            None
+        };
+        self.page_setup_cache.insert(sheet_name.to_string(), ps);
+        Ok(())
+    }
+
+    pub fn ensure_data_validations(&mut self, sheet_name: &str) -> TurboResult<()> {
+        if self.data_validations_cache.contains_key(sheet_name) {
+            return Ok(());
+        }
+        let Some(target) = self.archive_map.sheet_name_map.get(sheet_name) else {
+            self.data_validations_cache.insert(sheet_name.to_string(), Vec::new());
+            return Ok(());
+        };
+        let Some(xml) = inflate_entry(&self.archive_map, target)? else {
+            self.data_validations_cache.insert(sheet_name.to_string(), Vec::new());
+            return Ok(());
+        };
+        let recs = crate::turbo::meta::scan_data_validations(&xml);
+        let dvs: Vec<crate::turbo::write::DataValidation> = recs
+            .into_iter()
+            .map(|r| crate::turbo::write::DataValidation {
+                type_: r.type_,
+                operator: r.operator,
+                allow_blank: r.allow_blank,
+                show_input_message: r.show_input_message,
+                show_error_message: r.show_error_message,
+                show_drop_down: r.show_drop_down,
+                error_title: r.error_title,
+                error: r.error,
+                prompt_title: r.prompt_title,
+                prompt: r.prompt,
+                sqref: r.sqref,
+                formula1: r.formula1,
+                formula2: r.formula2,
+            })
+            .collect();
+        self.data_validations_cache.insert(sheet_name.to_string(), dvs);
+        Ok(())
+    }
+
+    pub fn ensure_protection(&mut self, sheet_name: &str) -> TurboResult<()> {
+        if self.protection_cache.contains_key(sheet_name) {
+            return Ok(());
+        }
+        let Some(target) = self.archive_map.sheet_name_map.get(sheet_name) else {
+            self.protection_cache.insert(sheet_name.to_string(), None);
+            return Ok(());
+        };
+        let Some(xml) = inflate_entry(&self.archive_map, target)? else {
+            self.protection_cache.insert(sheet_name.to_string(), None);
+            return Ok(());
+        };
+        let prot = if let Some(p_start) = find_element(&xml, b"sheetProtection", 0) {
+            let gt = p_start + memchr::memchr(b'>', &xml[p_start..]).unwrap_or(0);
+            let tag = &xml[p_start..=gt];
+            let sheet = extract_xml_attr(tag, b"sheet").map(|v| v == "1" || v == "true").unwrap_or(true);
+            let password = extract_xml_attr(tag, b"password");
+            Some(crate::turbo::write::model::SheetProtection {
+                sheet,
+                password,
+                already_hashed: true,
+            })
+        } else {
+            None
+        };
+        self.protection_cache.insert(sheet_name.to_string(), prot);
+        Ok(())
     }
 
     pub fn ensure_base_styles(&mut self, sheet_name: &str) -> TurboResult<()> {
@@ -1055,7 +1153,15 @@ impl WorkbookOverlay {
             .values()
             .any(|o| o.is_dirty && (!o.modified_cells.is_empty() || !o.ops.is_empty()));
 
-        for (sheet_name, overlay) in &self.sheet_overlays {
+        // Deterministic (G3): process dirty sheets in sorted name order.
+        let mut dirty_names: Vec<&String> = self.sheet_overlays
+            .iter()
+            .filter(|(_, o)| o.is_dirty)
+            .map(|(k, _)| k)
+            .collect();
+        dirty_names.sort();
+        for sheet_name in dirty_names {
+            let overlay = &self.sheet_overlays[sheet_name];
             if !overlay.is_dirty {
                 continue;
             }
@@ -1274,7 +1380,13 @@ impl WorkbookOverlay {
             }
         }
 
-        for (sheet_name, overlay) in &self.sheet_overlays {
+        // Deterministic (G3): iterate sheets in sorted name order so rel-id
+        // allocation and Content-Types/Override ordering never depend on
+        // AHashMap iteration order.
+        let mut overlay_names: Vec<&String> = self.sheet_overlays.keys().collect();
+        overlay_names.sort();
+        for sheet_name in overlay_names {
+            let overlay = &self.sheet_overlays[sheet_name];
             let entry_name = self.archive_map.sheet_name_map.get(sheet_name)
                 .cloned()
                 .unwrap_or_else(|| format!("xl/worksheets/{sheet_name}.xml"));
@@ -1642,7 +1754,7 @@ impl WorkbookOverlay {
 
 /// Inflate one ZIP part by entry path. `Ok(None)` when the part is absent or
 /// cannot be inflated (the callers decide whether that is an error).
-fn inflate_entry(map: &ArchiveMap, name: &str) -> TurboResult<Option<Vec<u8>>> {
+pub(crate) fn inflate_entry(map: &ArchiveMap, name: &str) -> TurboResult<Option<Vec<u8>>> {
     let Some(entry) = map.entries.get(name) else {
         return Ok(None);
     };
@@ -2618,7 +2730,22 @@ pub(crate) fn splice_sheet_controls(
         }
     }
 
-    // 3. Merges
+    // 3. Sheet Protection (ECMA: after sheetData, before autoFilter)
+    if let Some(ref prot) = overlay.protection {
+        let mut prot_buf = Vec::new();
+        crate::turbo::write::emit_sheet_protection(&mut prot_buf, prot);
+        if !prot_buf.is_empty() {
+            splice_element(&mut xml, b"sheetProtection", Some(&prot_buf), &[b"</sheetData>"]);
+        }
+    }
+
+    // 4. AutoFilter (ECMA: after sheetProtection, before mergeCells)
+    if let Some(ref af_range) = overlay.auto_filter {
+        let af_tag = format!("<autoFilter ref=\"{}\"/>", af_range);
+        splice_element(&mut xml, b"autoFilter", Some(af_tag.as_bytes()), &[b"</sheetProtection>", b"</sheetData>"]);
+    }
+
+    // 5. Merges (ECMA: after autoFilter, before conditionalFormatting / dataValidations)
     if !overlay.merges.is_empty() || !overlay.deleted_merges.is_empty() {
         let mut final_merges: Vec<String> = Vec::new();
         if let Some(m_start) = find_element(&xml, b"mergeCells", 0) {
@@ -2652,48 +2779,29 @@ pub(crate) fn splice_sheet_controls(
         if !final_merges.is_empty() {
             let mut merge_block = Vec::with_capacity(final_merges.len() * 40 + 32);
             crate::turbo::write::emit_merges(&mut merge_block, &final_merges);
-            splice_element(&mut xml, b"mergeCells", Some(&merge_block), &[b"</autoFilter>", b"</sheetData>"]);
+            splice_element(&mut xml, b"mergeCells", Some(&merge_block), &[b"</autoFilter>", b"</sheetProtection>", b"</sheetData>"]);
         }
     }
 
-    // 4. AutoFilter
-    if let Some(ref af_range) = overlay.auto_filter {
-        let af_tag = format!("<autoFilter ref=\"{}\"/>", af_range);
-        splice_element(&mut xml, b"autoFilter", Some(af_tag.as_bytes()), &[b"</sheetData>"]);
-    }
-
-    // 5. Hyperlinks
-    if !overlay.hyperlinks.is_empty() {
-        let mut links: Vec<crate::turbo::write::model::Hyperlink> = Vec::new();
-        let mut hl_items: Vec<(&(u32, u32), &String)> = overlay.hyperlinks.iter().collect();
-        hl_items.sort_by_key(|item| *item.0);
-        for (&(r, c), url) in hl_items {
-            links.push(crate::turbo::write::model::Hyperlink {
-                ref_: crate::turbo::range_a1(&crate::turbo::CellRange {
-                    r0: r - 1,
-                    c0: c - 1,
-                    r1: r - 1,
-                    c1: c - 1,
-                }),
-                target: Some(url.clone()),
-                location: None,
-                display: None,
-            });
-        }
-        let mut hl_buf = Vec::new();
-        let mut next_rid = 0;
-        let _ = crate::turbo::write::emit_hyperlinks(&mut hl_buf, &links, &mut next_rid);
-        if !hl_buf.is_empty() {
-            splice_element(&mut xml, b"hyperlinks", Some(&hl_buf), &[b"</mergeCells>", b"</sheetData>"]);
+    // 6. Data Validations (ECMA: after mergeCells / conditionalFormatting, before hyperlinks)
+    // NOTE: hyperlinks are NOT spliced here — WorkbookOverlay::save() owns the
+    // <hyperlinks> splice because it must also allocate matching sheet-rel ids
+    // (deterministic max-existing-rId scheme). Emitting them in both places
+    // produced duplicate elements with dangling rIds.
+    if !overlay.data_validations.is_empty() {
+        let mut dv_buf = Vec::new();
+        crate::turbo::write::emit_data_validations(&overlay.data_validations, &mut dv_buf);
+        if !dv_buf.is_empty() {
+            splice_element(&mut xml, b"dataValidations", Some(&dv_buf), &[b"</conditionalFormatting>", b"</mergeCells>", b"</autoFilter>", b"</sheetProtection>", b"</sheetData>"]);
         }
     }
 
-    // 6. Sheet Protection
-    if let Some(ref prot) = overlay.protection {
-        let mut prot_buf = Vec::new();
-        crate::turbo::write::emit_sheet_protection(&mut prot_buf, prot);
-        if !prot_buf.is_empty() {
-            splice_element(&mut xml, b"sheetProtection", Some(&prot_buf), &[b"</sheetData>"]);
+    // 7. Page Setup (ECMA: after hyperlinks/pageMargins)
+    if let Some(ref ps) = overlay.page_setup {
+        let mut ps_buf = Vec::new();
+        crate::turbo::write::emit_page_setup(&mut ps_buf, ps);
+        if !ps_buf.is_empty() {
+            splice_element(&mut xml, b"pageSetup", Some(&ps_buf), &[b"</hyperlinks>", b"</dataValidations>", b"</mergeCells>", b"</sheetData>"]);
         }
     }
 
