@@ -19,7 +19,7 @@ jobs:
       matrix:
         architecture: [x86-64, aarch64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.architecture == 'aarch64' && 'aarch64-unknown-linux-gnu' || '' }}
@@ -74,7 +74,7 @@ jobs:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
         architecture: [x86-64, aarch64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
