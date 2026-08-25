@@ -52,7 +52,7 @@ jobs:
         run: |
           pip install auditwheel
           auditwheel show dist/*.whl
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
         if: matrix.architecture == 'aarch64'
       - name: Install & import kyrax in amazonlinux:2
         run: |
