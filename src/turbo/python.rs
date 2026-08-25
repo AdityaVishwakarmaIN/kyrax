@@ -11,7 +11,7 @@ use pyo3::{
     Bound, PyAny, PyResult, Python,
     exceptions::PyValueError,
     prelude::*,
-    types::{PyDict, PyList},
+    types::{PyDict, PyList, PyString, PyTuple},
 };
 
 use super::{
@@ -1931,6 +1931,370 @@ pub fn py_read_excel_turbo_iter(
         chunk_size,
         opts,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Read-only streaming row shaping / cell lookup / lifecycle (Rust-side)
+// ---------------------------------------------------------------------------
+//
+// The read_only doorway performs all grid-semantics shaping (header row 1
+// re-injection, min/max row/col selection, values_only tuples) and cell lookup
+// here in Rust so the Python layer stays a thin, loop-free API doorway.
+
+#[pyclass(name = "ReadOnlyRows", module = "kyrax._kyrax")]
+pub struct PyReadOnlyRowIter {
+    inner: Option<crate::turbo::stream::SheetStream>,
+    opts: crate::turbo::stream::StreamOptions,
+    // 1-based grid bounds (min_row/min_col clamped to >= 1).
+    min_row: usize,
+    max_row: Option<usize>,
+    min_col: usize,
+    max_col: Option<usize>,
+    header: Vec<String>,
+    header_done: bool,
+    data_row: usize,
+    finished: bool,
+    // Pending batch state: pyarrow lists for the selected columns, plus the
+    // row window within the batch that is still to be yielded. `pending_staged`
+    // distinguishes "a batch is staged" from "no columns were selected".
+    pending_staged: bool,
+    pending_arrays: Vec<Py<PyAny>>,
+    pending_sub_start: usize,
+    pending_sub_end: usize,
+    pending_row: usize,
+}
+
+impl PyReadOnlyRowIter {
+    /// Mirror the Python `_select` helper for the header row: `lo = min_col-1`,
+    /// `hi = min(max_col, n)` (or `n` when max_col is None), empty when lo>=hi.
+    fn header_hi(&self) -> usize {
+        match self.max_col {
+            Some(b) => b.min(self.header.len()),
+            None => self.header.len(),
+        }
+    }
+
+    /// Data-columns upper bound: `min(max_col, num_cols)` when max_col is a
+    /// positive value, else `num_cols` (mirrors Python's `c2_bound or num_cols`).
+    fn data_c2(&self, num_cols: usize) -> usize {
+        match self.max_col {
+            Some(b) if b > 0 => b.min(num_cols),
+            _ => num_cols,
+        }
+    }
+
+    fn build_header<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let lo = self.min_col.saturating_sub(1);
+        let hi = self.header_hi();
+        let mut items: Vec<Bound<'py, PyAny>> = Vec::new();
+        if lo < hi {
+            for i in lo..hi.min(self.header.len()) {
+                items.push(PyString::new(py, &self.header[i]).into_any());
+            }
+        }
+        Ok(PyTuple::new(py, items)?.into_any())
+    }
+
+    fn build_row<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let r = self.pending_row;
+        let mut items: Vec<Bound<'py, PyAny>> = Vec::with_capacity(self.pending_arrays.len());
+        for arr in &self.pending_arrays {
+            items.push(arr.bind(py).get_item(r)?);
+        }
+        Ok(PyTuple::new(py, items)?.into_any())
+    }
+
+    /// Select the columns and the row window for a batch and stage them for
+    /// `build_row`. Mirrors the Python batch shaping exactly.
+    fn prepare_batch<'py>(
+        &mut self,
+        py: Python<'py>,
+        batch: &RecordBatch,
+        batch_start: usize,
+        num: usize,
+    ) -> PyResult<()> {
+        #[cfg(feature = "pyarrow")]
+        {
+            use arrow_pyarrow::ToPyArrow;
+            let num_cols = batch.num_columns();
+            let c1 = self.min_col.saturating_sub(1);
+            let c2 = self.data_c2(num_cols);
+            let sub_start = self.min_row.saturating_sub(batch_start).min(num);
+            let sub_end = match self.max_row {
+                Some(m) => (m.saturating_sub(batch_start) + 1).min(num),
+                None => num,
+            };
+            let mut arrays: Vec<Py<PyAny>> = Vec::new();
+            if sub_start < sub_end {
+                for c in c1..c2 {
+                    if c < num_cols {
+                        let arr = batch.column(c).clone();
+                        let py_arr = arr
+                            .to_data()
+                            .to_pyarrow(py)
+                            .map_err(|e| arrow_err(e.to_string()))?;
+                        // to_pylist converts Arrow scalars to native Python
+                        // values (matching the old batch.to_pydict() path).
+                        let py_list = py_arr
+                            .call_method0("to_pylist")
+                            .map_err(|e| arrow_err(e.to_string()))?;
+                        arrays.push(py_list.unbind());
+                    }
+                }
+            }
+            self.pending_arrays = arrays;
+            self.pending_sub_start = sub_start;
+            self.pending_sub_end = sub_end;
+            self.pending_row = sub_start;
+            self.pending_staged = true;
+            Ok(())
+        }
+        #[cfg(not(feature = "pyarrow"))]
+        {
+            let _ = (py, batch, batch_start, num);
+            Err(PyValueError::new_err("pyarrow feature is not enabled"))
+        }
+    }
+}
+
+#[pymethods]
+impl PyReadOnlyRowIter {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__<'py>(&mut self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        // 0. A closed iterator yields no further rows (close() clears `inner`).
+        if self.inner.is_none() {
+            return Ok(None);
+        }
+
+        let mut stream = match self.inner.take() {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let opts = self.opts.clone();
+
+        loop {
+            // 1. Yield a staged row (an empty tuple when no columns matched).
+            if self.pending_staged {
+                if self.pending_row < self.pending_sub_end {
+                    let tup = self.build_row(py)?;
+                    self.pending_row += 1;
+                    self.inner = Some(stream);
+                    return Ok(Some(tup));
+                }
+                self.pending_staged = false;
+                self.pending_arrays = Vec::new();
+            }
+
+            // 2. Exhausted?
+            if self.finished {
+                self.inner = Some(stream);
+                return Ok(None);
+            }
+
+            // 3. Pull the next batch.
+            let batch = match py
+                .detach(|| stream.next_batch(&opts))
+                .map_err(turbo_err_to_py)?
+            {
+                Some(b) => b,
+                None => {
+                    self.finished = true;
+                    self.inner = Some(stream);
+                    return Ok(None);
+                }
+            };
+
+            if self.header.is_empty() {
+                self.header = stream.column_names().to_vec();
+            }
+
+            let num = batch.num_rows();
+            let batch_start = self.data_row;
+            let batch_end = self.data_row.saturating_add(num).saturating_sub(1);
+            self.data_row = self.data_row.saturating_add(num);
+
+            // 4. Grid row 1 is the header: re-inject it once, before the first
+            //    data batch, mirroring Python's openpyxl-parity semantics.
+            if !self.header_done {
+                self.header_done = true;
+                let in_bounds = self.min_row <= 1 && self.max_row.map_or(true, |m| m >= 1);
+                if in_bounds && (!self.header.is_empty() || num > 0) {
+                    let hdr = self.build_header(py)?;
+                    let done = self.max_row.map_or(false, |m| batch_start > m);
+                    if done {
+                        self.finished = true;
+                    } else if batch_end >= self.min_row {
+                        self.prepare_batch(py, &batch, batch_start, num)?;
+                    }
+                    self.inner = Some(stream);
+                    return Ok(Some(hdr));
+                }
+            }
+
+            // 5. Skip batches outside the requested data-row window.
+            let done = self.max_row.map_or(false, |m| batch_start > m);
+            if done {
+                self.finished = true;
+                continue;
+            }
+            if batch_end < self.min_row {
+                continue;
+            }
+
+            // 6. Stage the data-row window for this batch; loop to yield rows.
+            self.prepare_batch(py, &batch, batch_start, num)?;
+        }
+    }
+
+    fn close(&mut self) -> PyResult<()> {
+        self.inner = None;
+        Ok(())
+    }
+
+    #[getter]
+    fn closed(&self) -> bool {
+        self.inner.is_none()
+    }
+}
+
+/// Open a streaming read of a worksheet with grid-semantics row/column shaping
+/// applied in Rust. Yields Python tuples (values_only semantics), including the
+/// header row (grid row 1) for openpyxl parity.
+#[pyfunction(name = "read_excel_turbo_iter_rows")]
+#[pyo3(signature = (
+    path,
+    sheet_idx = 0,
+    min_row = None,
+    max_row = None,
+    min_col = None,
+    max_col = None,
+    chunk_size = 10000
+))]
+pub fn py_read_excel_turbo_iter_rows(
+    py: Python<'_>,
+    path: &str,
+    sheet_idx: usize,
+    min_row: Option<usize>,
+    max_row: Option<usize>,
+    min_col: Option<usize>,
+    max_col: Option<usize>,
+    chunk_size: usize,
+) -> PyResult<PyReadOnlyRowIter> {
+    sniff_magic_bytes(path).map_err(turbo_err_to_py)?;
+    let path_buf = path.to_string();
+    let opts = crate::turbo::stream::StreamOptions {
+        batch_rows: chunk_size,
+        ..Default::default()
+    };
+    let stream = py
+        .detach(|| crate::turbo::stream::SheetStream::open(&path_buf, sheet_idx, opts.clone()))
+        .map_err(turbo_err_to_py)?;
+    Ok(PyReadOnlyRowIter {
+        inner: Some(stream),
+        opts,
+        min_row: min_row.unwrap_or(1).max(1),
+        max_row,
+        min_col: min_col.unwrap_or(1).max(1),
+        max_col,
+        header: Vec::new(),
+        header_done: false,
+        data_row: 2,
+        finished: false,
+        pending_staged: false,
+        pending_arrays: Vec::new(),
+        pending_sub_start: 0,
+        pending_sub_end: 0,
+        pending_row: 0,
+    })
+}
+
+/// Look up a single grid cell value (row/column 1-based) in read_only mode.
+/// Grid row 1 is the header row. Returns the cell value or `None` when the cell
+/// is empty or out of range.
+#[pyfunction(name = "read_excel_turbo_cell")]
+#[pyo3(signature = (path, sheet_idx = 0, row = 1, column = 1, chunk_size = 10000))]
+pub fn py_read_excel_turbo_cell<'py>(
+    py: Python<'py>,
+    path: &str,
+    sheet_idx: usize,
+    row: usize,
+    column: usize,
+    chunk_size: usize,
+) -> PyResult<Bound<'py, PyAny>> {
+    sniff_magic_bytes(path).map_err(turbo_err_to_py)?;
+    let opts = crate::turbo::stream::StreamOptions {
+        batch_rows: chunk_size,
+        ..Default::default()
+    };
+    let mut stream = crate::turbo::stream::SheetStream::open(path, sheet_idx, opts.clone())
+        .map_err(turbo_err_to_py)?;
+    let col0 = column.saturating_sub(1);
+    let mut header_pending = true;
+    let mut data_row: usize = 2;
+    loop {
+        let batch = match py
+            .detach(|| stream.next_batch(&opts))
+            .map_err(turbo_err_to_py)?
+        {
+            Some(b) => b,
+            None => break,
+        };
+        if header_pending {
+            header_pending = false;
+            let names = stream.column_names().to_vec();
+            if row == 1 {
+                return if col0 < names.len() {
+                    Ok(PyString::new(py, &names[col0]).into_any())
+                } else {
+                    Ok(py.None().into_bound(py))
+                };
+            }
+        }
+        let num = batch.num_rows();
+        let batch_start = data_row;
+        let batch_end = data_row.saturating_add(num).saturating_sub(1);
+        data_row = data_row.saturating_add(num);
+        if row < batch_start || row > batch_end {
+            continue;
+        }
+        let idx = row - batch_start;
+        let num_cols = batch.num_columns();
+        if col0 >= num_cols {
+            return Ok(py.None().into_bound(py));
+        }
+        #[cfg(feature = "pyarrow")]
+        {
+            use arrow_pyarrow::ToPyArrow;
+            let arr = batch.column(col0).clone();
+            let py_arr = arr
+                .to_data()
+                .to_pyarrow(py)
+                .map_err(|e| arrow_err(e.to_string()))?;
+            let py_list = py_arr
+                .call_method0("to_pylist")
+                .map_err(|e| arrow_err(e.to_string()))?;
+            return Ok(py_list.get_item(idx)?);
+        }
+        #[cfg(not(feature = "pyarrow"))]
+        {
+            let _ = idx;
+            return Err(PyValueError::new_err("pyarrow feature is not enabled"));
+        }
+    }
+    Ok(py.None().into_bound(py))
+}
+
+/// Close a list of streaming readers/iterators without a Python-level loop.
+/// Used by the read_only workbook lifecycle to close every open stream.
+#[pyfunction(name = "close_streams")]
+pub fn py_close_streams(streams: Vec<Bound<'_, PyAny>>) -> PyResult<()> {
+    for s in &streams {
+        s.call_method0("close")?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

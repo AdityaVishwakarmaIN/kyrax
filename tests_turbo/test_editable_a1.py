@@ -26,18 +26,25 @@ def _editable(path: Path):
     return kyrax.load_workbook(path, edit_mode=True)["Sheet1"]
 
 
+def _range_values(ws, key):
+    """Value matrix of a range key: tuple-of-tuples of Cells -> nested lists of values."""
+    return [[cell.value for cell in row] for row in ws[key]]
+
+
 def test_editable_a1_scalar_and_range_reads(tmp_path: Path) -> None:
     path = tmp_path / "source.xlsx"
     _author_book(path)
     ws = _editable(path)
 
-    assert ws["A1"] == 1.0
-    assert ws["a2"] == 2.0
-    assert ws["B1"] is True
-    assert ws["C2"] == "y"
-    assert ws["D4"] is None
-    assert ws["B2:C3"] == [[False, "y"], [None, "z"]]
-    assert ws["$C$3:$B$2"] == [[False, "y"], [None, "z"]]
+    # Scalar __getitem__ returns a Cell; the value lives at .value.
+    assert ws["A1"].value == 1.0
+    assert ws["a2"].value == 2.0
+    assert ws["B1"].value is True
+    assert ws["C2"].value == "y"
+    assert ws["D4"].value is None
+    # Range __getitem__ returns tuple-of-tuples of Cells, normalized to top-left.
+    assert _range_values(ws, "B2:C3") == [[False, "y"], [None, "z"]]
+    assert _range_values(ws, "$C$3:$B$2") == [[False, "y"], [None, "z"]]
 
 
 def test_editable_a1_set_is_immediately_visible_and_round_trips(tmp_path: Path) -> None:
@@ -50,9 +57,9 @@ def test_editable_a1_set_is_immediately_visible_and_round_trips(tmp_path: Path) 
     ws["A1"] = 11.5
     ws["B2:C3"] = [[10, "alpha"], [20, "beta"]]
 
-    assert ws["A1"] == 11.5
-    assert ws["B2:C3"] == [[10.0, "alpha"], [20.0, "beta"]]
-    assert ws["$C$3:$B$2"] == [[10.0, "alpha"], [20.0, "beta"]]
+    assert ws["A1"].value == 11.5
+    assert _range_values(ws, "B2:C3") == [[10.0, "alpha"], [20.0, "beta"]]
+    assert _range_values(ws, "$C$3:$B$2") == [[10.0, "alpha"], [20.0, "beta"]]
 
     workbook.save(str(output))
     reopened = openpyxl.load_workbook(output, data_only=False)
@@ -75,14 +82,16 @@ def test_editable_a1_range_assignment_is_atomic(tmp_path: Path) -> None:
     _author_book(path)
     ws = _editable(path)
 
-    before = ws["A1:B1"]
+    # Range assignment validates the full matrix before any mutation, so compare
+    # value snapshots, not freshly allocated Cell object identity.
+    before = _range_values(ws, "A1:B1")
     with pytest.raises(TypeError):
         ws["A1:B1"] = [[99.0]]
-    assert ws["A1:B1"] == before
+    assert _range_values(ws, "A1:B1") == before
 
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         ws["A1:B1"] = [[99.0, _BadValue()]]
-    assert ws["A1:B1"] == before
+    assert _range_values(ws, "A1:B1") == before
 
 
 @pytest.mark.parametrize(

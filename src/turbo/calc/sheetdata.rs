@@ -353,11 +353,7 @@ impl CellResolver for SheetData {
             .binary_search_by(|c| (c.row, c.col).cmp(&(row, col)))
             .ok()?;
         let v = &gs.cells[i].value;
-        if v.is_blank() {
-            None
-        } else {
-            Some(v.clone())
-        }
+        if v.is_blank() { None } else { Some(v.clone()) }
     }
 
     fn sheet_index(&self, name: &str) -> Option<u32> {
@@ -815,7 +811,10 @@ mod tests {
         // C1 recomputes to 99; C2 stays uncomputed (blank).
         assert!(sd.update_computed(0, 0, 2, CalcValue::Number(99.0)));
         assert_eq!(sd.cell(0, 0, 2), Some(CalcValue::Number(99.0))); // dependents see it
-        assert!(!sd.update_computed(0, 0, 0, CalcValue::Number(1.0))); // not a formula
+        // A1 is not a formula: the value still materializes into the grid so
+        // later formulas in the same pass can read it (spill visibility).
+        assert!(sd.update_computed(0, 0, 0, CalcValue::Number(1.0)));
+        assert_eq!(sd.cell(0, 0, 0), Some(CalcValue::Number(1.0)));
         assert!(!sd.update_computed(9, 0, 0, CalcValue::Number(1.0))); // bad sheet
 
         assert_eq!(sd.write_back(&mut wb), 1);

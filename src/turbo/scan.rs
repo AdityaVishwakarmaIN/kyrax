@@ -1332,11 +1332,19 @@ impl Partial {
                 Column::Int { v, valid } => {
                     let is_date = is_col_date_styled(c, style_cols.as_ref(), style_table);
                     if is_date {
+                        // Excel 1900 system: serials in (0, 60) sit one day before
+                        // the real civil date because the phantom 1900-02-29 (serial
+                        // 60) is not representable; openpyxl `from_excel` shifts them
+                        // +1. The 1904 system has no such leap-day gap.
                         let offset = if date1904 { 24107 } else { 25569 };
                         let mut b = Date32Builder::with_capacity(nrows);
                         for (i, &val) in v.iter().take(nrows).enumerate() {
                             if valid.get(i) {
-                                b.append_value((val - offset) as i32);
+                                let mut day = val - offset;
+                                if !date1904 && val > 0 && val < 60 {
+                                    day += 1;
+                                }
+                                b.append_value(day as i32);
                             } else {
                                 b.append_null();
                             }
@@ -1372,7 +1380,11 @@ impl Partial {
                             let mut b = TimestampMillisecondBuilder::with_capacity(nrows);
                             for (i, &val) in v.iter().take(nrows).enumerate() {
                                 if valid.get(i) {
-                                    b.append_value(((val - offset) * 86_400_000.0).round() as i64);
+                                    let mut ms = (val - offset) * 86_400_000.0;
+                                    if !date1904 && val > 0.0 && val < 60.0 {
+                                        ms += 86_400_000.0;
+                                    }
+                                    b.append_value(ms.round() as i64);
                                 } else {
                                     b.append_null();
                                 }
@@ -1385,7 +1397,11 @@ impl Partial {
                             let mut b = Date32Builder::with_capacity(nrows);
                             for (i, &val) in v.iter().take(nrows).enumerate() {
                                 if valid.get(i) {
-                                    b.append_value((val - offset).round() as i32);
+                                    let mut day = (val - offset).round();
+                                    if !date1904 && val > 0.0 && val < 60.0 {
+                                        day += 1.0;
+                                    }
+                                    b.append_value(day as i32);
                                 } else {
                                     b.append_null();
                                 }
@@ -2586,6 +2602,33 @@ fn merge_partials(mut partials: Vec<Partial>, feat: ScanFeat) -> Partial {
                 }
             }
 
+            // Symmetric compatible numeric promotion: when a Float partition merges
+            // into an Int accumulator, widen the accumulator to Float first so the
+            // downstream match keeps a type-consistent numeric column. The reverse
+            // (Int partition into a Float accumulator) is handled directly by a
+            // dedicated arm below. Without this, an Int + Float pair fell through to
+            // the generic mismatch arm, demoting the whole column to Mixed (and, at
+            // render time, to Arrow strings).
+            if matches!(&gcols[c], Column::Int { .. }) && matches!(pcol, Column::Float { .. }) {
+                let mut gv: Vec<f64> = Vec::new();
+                let mut gvalid = BitVec::new();
+                if let Column::Int { v, valid } = &gcols[c] {
+                    for i in 0..v.len() {
+                        if i < valid.len && valid.get(i) {
+                            gv.push(v[i] as f64);
+                            gvalid.push(true);
+                        } else {
+                            gv.push(f64::NAN);
+                            gvalid.push(false);
+                        }
+                    }
+                }
+                gcols[c] = Column::Float {
+                    v: gv,
+                    valid: gvalid,
+                };
+            }
+
             match (pcol, &mut gcols[c]) {
                 (
                     Column::Int { v, valid },
@@ -2622,6 +2665,27 @@ fn merge_partials(mut partials: Vec<Partial>, feat: ScanFeat) -> Partial {
                     for irow in 0..p.nrows {
                         if irow < valid.len && valid.get(irow) {
                             gv.push(v[irow]);
+                            gvalid.push(true);
+                        } else {
+                            gv.push(f64::NAN);
+                            gvalid.push(false);
+                        }
+                    }
+                }
+                (
+                    Column::Int { v, valid },
+                    Column::Float {
+                        v: gv,
+                        valid: gvalid,
+                    },
+                ) => {
+                    while gv.len() < base {
+                        gv.push(f64::NAN);
+                        gvalid.push(false);
+                    }
+                    for irow in 0..p.nrows {
+                        if irow < valid.len && valid.get(irow) {
+                            gv.push(v[irow] as f64);
                             gvalid.push(true);
                         } else {
                             gv.push(f64::NAN);
@@ -3099,5 +3163,325 @@ mod tests {
         assert_eq!(col.translate(2, 0).as_deref(), Some("A2*2"));
         // Dependent (row 7, col 2) â†’ delta (5, 2) â†’ A2*2 becomes C7*2.
         assert_eq!(col.translate(7, 2).as_deref(), Some("C7*2"));
+    }
+
+    fn plain_feat() -> ScanFeat {
+        ScanFeat {
+            styles: false,
+            formulas: false,
+            row_meta: false,
+        }
+    }
+
+    fn partial_float(vals: Vec<Option<f64>>) -> Partial {
+        let n = vals.len();
+        let mut v = Vec::new();
+        let mut valid = BitVec::new();
+        for o in vals {
+            match o {
+                Some(x) => {
+                    v.push(x);
+                    valid.push(true);
+                }
+                None => {
+                    v.push(f64::NAN);
+                    valid.push(false);
+                }
+            }
+        }
+        Partial {
+            header: Vec::new(),
+            cols: vec![Column::Float { v, valid }],
+            dict: Dict::new(),
+            nrows: n,
+            ncols: 1,
+            abs_start: 0,
+            style_cols: Vec::new(),
+            fentries: Vec::new(),
+            fdict: Dict::new(),
+            anchors: Vec::new(),
+            cell_errors: Vec::new(),
+            row_dims: Vec::new(),
+        }
+    }
+
+    fn partial_int(vals: Vec<Option<i64>>) -> Partial {
+        let n = vals.len();
+        let mut v = Vec::new();
+        let mut valid = BitVec::new();
+        for o in vals {
+            match o {
+                Some(x) => {
+                    v.push(x);
+                    valid.push(true);
+                }
+                None => {
+                    v.push(0);
+                    valid.push(false);
+                }
+            }
+        }
+        Partial {
+            header: Vec::new(),
+            cols: vec![Column::Int { v, valid }],
+            dict: Dict::new(),
+            nrows: n,
+            ncols: 1,
+            abs_start: 0,
+            style_cols: Vec::new(),
+            fentries: Vec::new(),
+            fdict: Dict::new(),
+            anchors: Vec::new(),
+            cell_errors: Vec::new(),
+            row_dims: Vec::new(),
+        }
+    }
+
+    fn assert_float_column(col: &Column, expect: &[(bool, f64)]) {
+        match col {
+            Column::Float { v, valid } => {
+                assert_eq!(v.len(), expect.len(), "value count");
+                assert_eq!(valid.len, expect.len(), "valid count");
+                for (i, (vis_valid, x)) in expect.iter().enumerate() {
+                    assert_eq!(valid.get(i), *vis_valid, "row {i} validity");
+                    if *vis_valid {
+                        assert_eq!(v[i], *x, "row {i} value");
+                    }
+                }
+            }
+            _ => panic!("expected a Float column, got a non-float column"),
+        }
+    }
+
+    #[test]
+    fn merge_int_then_float_promotes_to_float() {
+        // Emulates the stress sheet: an integral chunk (99, 0) followed by a
+        // decimal chunk (1234.5). Must stay numeric Float, never Mixed/string.
+        let merged = merge_partials(
+            vec![
+                partial_int(vec![Some(99), Some(0)]),
+                partial_float(vec![Some(1234.5)]),
+            ],
+            plain_feat(),
+        );
+        assert_eq!(merged.nrows, 3);
+        assert_float_column(
+            &merged.cols[0],
+            &[(true, 99.0), (true, 0.0), (true, 1234.5)],
+        );
+    }
+
+    #[test]
+    fn merge_float_then_int_promotes_to_float() {
+        // Reverse order: decimal chunk first, integral chunk second.
+        let merged = merge_partials(
+            vec![
+                partial_float(vec![Some(1234.5)]),
+                partial_int(vec![Some(99), Some(0)]),
+            ],
+            plain_feat(),
+        );
+        assert_eq!(merged.nrows, 3);
+        assert_float_column(
+            &merged.cols[0],
+            &[(true, 1234.5), (true, 99.0), (true, 0.0)],
+        );
+    }
+
+    #[test]
+    fn merge_int_float_preserves_nulls_in_both_orders() {
+        // Nulls interleaved in both chunk orders must be preserved exactly.
+        let fwd = merge_partials(
+            vec![
+                partial_int(vec![Some(5), None, Some(7)]),
+                partial_float(vec![None, Some(2.5)]),
+            ],
+            plain_feat(),
+        );
+        assert_eq!(fwd.nrows, 5);
+        assert_float_column(
+            &fwd.cols[0],
+            &[
+                (true, 5.0),
+                (false, 0.0),
+                (true, 7.0),
+                (false, 0.0),
+                (true, 2.5),
+            ],
+        );
+
+        let rev = merge_partials(
+            vec![
+                partial_float(vec![None, Some(2.5)]),
+                partial_int(vec![Some(5), None, Some(7)]),
+            ],
+            plain_feat(),
+        );
+        assert_eq!(rev.nrows, 5);
+        assert_float_column(
+            &rev.cols[0],
+            &[
+                (false, 0.0),
+                (true, 2.5),
+                (true, 5.0),
+                (false, 0.0),
+                (true, 7.0),
+            ],
+        );
+    }
+
+    #[test]
+    fn merge_int_int_and_float_float_remain_typed() {
+        // Same-type chunks must keep their native types unchanged.
+        let ints = merge_partials(
+            vec![
+                partial_int(vec![Some(1), Some(2)]),
+                partial_int(vec![Some(3)]),
+            ],
+            plain_feat(),
+        );
+        assert!(
+            matches!(&ints.cols[0], Column::Int { .. }),
+            "Int + Int stays Int"
+        );
+
+        let floats = merge_partials(
+            vec![
+                partial_float(vec![Some(1.5)]),
+                partial_float(vec![Some(2.5)]),
+            ],
+            plain_feat(),
+        );
+        assert!(
+            matches!(&floats.cols[0], Column::Float { .. }),
+            "Float + Float stays Float"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Excel 1900-system date serial boundary regression (openpyxl parity)
+    // serials 1, 59, 60, 61 map to 1900-01-01, 1900-02-28, 1900-02-28,
+    // 1900-03-01; the phantom 1900-02-29 (serial 60) is not representable.
+    // ------------------------------------------------------------------
+
+    /// StyleTable whose xf index 1 is a date format (mm-dd-yy), index 0 not.
+    fn date_style_table() -> StyleTable {
+        StyleTable {
+            custom_numfmt: Default::default(),
+            fonts: Vec::new(),
+            fills: Vec::new(),
+            borders: Vec::new(),
+            xfs: Vec::new(),
+            border_count: 0,
+            named_styles: Vec::new(),
+            dxfs: Vec::new(),
+            indexed_palette: None,
+            xf_is_date: vec![false, true],
+            xf_is_timedelta: vec![false, false],
+            xf_numfmt_code: vec!["General".to_string(), "mm-dd-yy".to_string()],
+        }
+    }
+
+    fn date_partial_int(vals: Vec<Option<i64>>) -> Partial {
+        let mut p = partial_int(vals);
+        p.style_cols = vec![vec![1; p.nrows]];
+        p
+    }
+
+    fn date_partial_float(vals: Vec<Option<f64>>) -> Partial {
+        let mut p = partial_float(vals);
+        p.style_cols = vec![vec![1; p.nrows]];
+        p
+    }
+
+    #[test]
+    fn date32_1900_boundary_serials_int() {
+        let st = date_style_table();
+        let p = date_partial_int(vec![Some(1), Some(59), Some(60), Some(61), Some(0)]);
+        let cols = p.into_arrow_columns(Some(&st), false).unwrap();
+        let d = cols.1[0]
+            .as_any()
+            .downcast_ref::<arrow_array::Date32Array>()
+            .expect("date column");
+        // days since 1970-01-01: 1900-01-01=-25567, 1900-02-28=-25509,
+        // 1900-03-01=-25508, 1899-12-30(serial 0)=-25569
+        let expected = [-25567, -25509, -25509, -25508, -25569];
+        for (i, &e) in expected.iter().enumerate() {
+            assert_eq!(d.value(i), e, "serial row {i}");
+        }
+    }
+
+    #[test]
+    fn date32_1900_boundary_serials_float() {
+        let st = date_style_table();
+        let p = date_partial_float(vec![Some(1.0), Some(59.0), Some(60.0), Some(61.0)]);
+        let cols = p.into_arrow_columns(Some(&st), false).unwrap();
+        let d = cols.1[0]
+            .as_any()
+            .downcast_ref::<arrow_array::Date32Array>()
+            .expect("date column");
+        let expected = [-25567, -25509, -25509, -25508];
+        for (i, &e) in expected.iter().enumerate() {
+            assert_eq!(d.value(i), e, "serial row {i}");
+        }
+    }
+
+    #[test]
+    fn timestamp_1900_boundary_fractions() {
+        let st = date_style_table();
+        let p = date_partial_float(vec![Some(59.5), Some(60.5), Some(61.5)]);
+        let cols = p.into_arrow_columns(Some(&st), false).unwrap();
+        let t = cols.1[0]
+            .as_any()
+            .downcast_ref::<arrow_array::TimestampMillisecondArray>()
+            .expect("timestamp column");
+        let base_28 = -25509i64 * 86_400_000; // 1900-02-28 00:00
+        let base_01 = -25508i64 * 86_400_000; // 1900-03-01 00:00
+        let noon = 43_200_000;
+        // serial 59.5 and 60.5 both land on 1900-02-28 12:00; 61.5 on 1900-03-01 12:00.
+        assert_eq!(t.value(0), base_28 + noon);
+        assert_eq!(t.value(1), base_28 + noon);
+        assert_eq!(t.value(2), base_01 + noon);
+    }
+
+    #[test]
+    fn date32_1904_has_no_leap_shift() {
+        let st = date_style_table();
+        // 1904 system: serial 0 = 1904-01-01, no phantom leap day, no shift.
+        let p = date_partial_int(vec![Some(0), Some(59), Some(60)]);
+        let cols = p.into_arrow_columns(Some(&st), true).unwrap();
+        let d = cols.1[0]
+            .as_any()
+            .downcast_ref::<arrow_array::Date32Array>()
+            .expect("date column");
+        // 1904-01-01 = -24107 days, 1904-02-29 = -24048, 1904-03-01 = -24047.
+        let expected = [-24107, -24048, -24047];
+        for (i, &e) in expected.iter().enumerate() {
+            assert_eq!(d.value(i), e, "1904 serial row {i}");
+        }
+    }
+
+    #[test]
+    fn merged_int_float_date_column_keeps_boundaries() {
+        // The concurrent Int/Float merge fix must preserve raw serials so the
+        // leap-shift conversion still lands on the correct dates after merging.
+        let st = date_style_table();
+        let mut merged = merge_partials(
+            vec![
+                date_partial_int(vec![Some(59), Some(61)]),
+                date_partial_float(vec![Some(60.0)]),
+            ],
+            plain_feat(),
+        );
+        assert_eq!(merged.nrows, 3);
+        merged.style_cols = vec![vec![1; merged.nrows]];
+        let cols = merged.into_arrow_columns(Some(&st), false).unwrap();
+        let d = cols.1[0]
+            .as_any()
+            .downcast_ref::<arrow_array::Date32Array>()
+            .expect("date column");
+        assert_eq!(d.value(0), -25509); // 1900-02-28 (serial 59, shifted)
+        assert_eq!(d.value(1), -25508); // 1900-03-01 (serial 61)
+        assert_eq!(d.value(2), -25509); // 1900-02-28 (serial 60, no shift)
     }
 }

@@ -228,7 +228,7 @@ def test_bind_01_static_scan() -> None:
             _collect(child, enclosing)
 
     _collect(tree)
-    allowed = {"__future__", "typing", "collections", "os", "pathlib", "importlib"}
+    allowed = {"__future__", "typing", "collections", "os", "pathlib", "importlib", "sys"}
     for mod in sorted(imports - allowed - approved):
         unexpected.append(f"non-allowlisted runtime import: {mod}")
     if unexpected:
@@ -242,8 +242,8 @@ def test_bind_01_static_scan() -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if any(isinstance(n, (ast.For, ast.While, ast.AsyncFor)) for n in ast.walk(node)):
                 loop_funcs.append(node.name)
-    if loop_funcs != ["_validate_sheets"]:
-        findings.append(f"loop-containing functions beyond the shape guard: {loop_funcs}")
+    if loop_funcs:
+        findings.append(f"loop-containing functions in the binding layer: {loop_funcs}")
 
     wrapper_names = {
         "load_workbook",

@@ -96,15 +96,20 @@ fn _kyrax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // turbo fast-path (read)
     {
         use crate::turbo::python::{
-            PySheetStream, PyTurboReader, PyTurboSheet, py_is_encrypted, py_read_excel_turbo,
-            py_read_excel_turbo_iter,
+            PyReadOnlyRowIter, PySheetStream, PyTurboReader, PyTurboSheet, py_close_streams,
+            py_is_encrypted, py_read_excel_turbo, py_read_excel_turbo_cell,
+            py_read_excel_turbo_iter, py_read_excel_turbo_iter_rows,
         };
         m.add_function(wrap_pyfunction!(py_read_excel_turbo, m)?)?;
         m.add_function(wrap_pyfunction!(py_read_excel_turbo_iter, m)?)?;
+        m.add_function(wrap_pyfunction!(py_read_excel_turbo_iter_rows, m)?)?;
+        m.add_function(wrap_pyfunction!(py_read_excel_turbo_cell, m)?)?;
+        m.add_function(wrap_pyfunction!(py_close_streams, m)?)?;
         m.add_function(wrap_pyfunction!(py_is_encrypted, m)?)?;
         m.add_class::<PyTurboReader>()?;
         m.add_class::<PyTurboSheet>()?;
         m.add_class::<PySheetStream>()?;
+        m.add_class::<PyReadOnlyRowIter>()?;
     }
 
     // C1c encrypted-workbook metadata (requires the `encryption` feature)

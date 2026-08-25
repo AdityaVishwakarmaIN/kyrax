@@ -42,6 +42,7 @@ from ._kyrax import (
     _TurboReader,
     _TurboSheet,
 )
+from ._kyrax import close_streams as _close_streams
 from ._kyrax import is_encrypted as _is_encrypted
 from ._kyrax import read_excel as _read_excel
 from ._kyrax import read_excel_turbo as _read_excel_turbo
@@ -74,8 +75,11 @@ try:
         get_column_letter,
         quote_sheetname,
         range_boundaries,
+        read_excel_turbo_cell,
         read_excel_turbo_iter,
+        read_excel_turbo_iter_rows,
     )
+    close_streams = _close_streams
     Workbook = EditableWorkbook
 except ImportError:
     edit_excel = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
@@ -91,21 +95,15 @@ except ImportError:
     Protection = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
     Comment = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
     SheetStream = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
+    read_excel_turbo_cell = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     read_excel_turbo_iter = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    read_excel_turbo_iter_rows = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    close_streams = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     get_column_letter = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     column_index_from_string = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     coordinate_to_tuple = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     range_boundaries = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     quote_sheetname = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
-
-import sys
-
-if "pandas" in sys.modules:
-    try:
-        from . import pandas as _pandas
-    except Exception:
-        pass
-
 
 def validate_excel(path: Path | str) -> dict:
     """Validate a workbook and return a structured report — never raises for a
@@ -1236,7 +1234,7 @@ class ReadOnlyWorksheet:
                 "read_only=True streaming is values_only forward streaming"
             )
 
-        if read_excel_turbo_iter is None or not _PYARROW_AVAILABLE:
+        if read_excel_turbo_iter_rows is None or not _PYARROW_AVAILABLE:
             # Fail loudly instead of silently materializing the whole sheet:
             # the read_only contract is bounded-memory streaming.
             raise ImportError(
@@ -1244,74 +1242,22 @@ class ReadOnlyWorksheet:
                 "(install kyrax[pandas+pyarrow]) — refusing to load the full sheet eagerly"
             )
 
-        stream = read_excel_turbo_iter(
+        rowiter = read_excel_turbo_iter_rows(
             str(self._wb._path),
             self._sheet_idx,
-            chunk_size=10000,
+            min_row=min_row,
+            max_row=max_row,
+            min_col=min_col,
+            max_col=max_col,
         )
-        self._active_stream = stream
+        self._wb._register_stream(rowiter)
+        self._active_stream = rowiter
         try:
-            # Grid semantics (openpyxl parity): sheet row 1 is the header row
-            # and IS yielded; streamed batches carry data rows 2..N.
-            c1 = (min_col or 1) - 1
-            c2_bound = max_col
-            r1_bound = min_row or 1
-            r2_bound = max_row
-
-            def _select(vals: list) -> tuple:
-                n = len(vals)
-                lo = c1
-                hi = n if c2_bound is None else min(c2_bound, n)
-                if lo >= hi:
-                    return ()
-                return tuple(vals[lo:hi])
-
-            batches = iter(stream)
-            first = next(batches, None)
-            # The engine strips sheet row 1 as the header during its pre-pass;
-            # the names become available on/after the first batch.
-            header = list(stream.column_names)
-            if not header and first is not None:
-                header = list(first.schema.names)
-
-            # Row 1 = header.
-            if r1_bound <= 1 <= (r2_bound if r2_bound is not None else 1):
-                if header or first is not None:
-                    yield _select(header)
-
-            data_row = 2  # grid row of the first streamed batch row
-            batch = first
-            while batch is not None:
-                num_batch_rows = batch.num_rows
-                batch_start_grid = data_row
-                batch_end_grid = data_row + num_batch_rows - 1
-                data_row += num_batch_rows
-
-                done = r2_bound is not None and batch_start_grid > r2_bound
-
-                if not done and batch_end_grid >= r1_bound:
-                    pydict = batch.to_pydict()
-                    cols = list(pydict.keys())
-                    num_cols = len(cols)
-                    c2 = min(c2_bound or num_cols, num_cols) if c2_bound else num_cols
-                    selected_cols = [pydict[cols[c]] for c in range(c1, c2)]
-
-                    sub_start = max(0, r1_bound - batch_start_grid)
-                    sub_end = (
-                        min(num_batch_rows, r2_bound - batch_start_grid + 1)
-                        if r2_bound is not None
-                        else num_batch_rows
-                    )
-
-                    for r in range(sub_start, sub_end):
-                        yield tuple(col[r] for col in selected_cols)
-
-                if done:
-                    break
-                batch = next(batches, None)
+            yield from rowiter
         finally:
-            if stream is not None:
-                stream.close()
+            if rowiter is not None:
+                rowiter.close()
+                self._wb._unregister_stream(rowiter)
             self._active_stream = None
 
     @property
@@ -1321,19 +1267,13 @@ class ReadOnlyWorksheet:
 
     def cell(self, row: int, column: int) -> _ReadOnlyCellProxy:
         self._ensure_open()
-        for r_idx, r_tuple in enumerate(
-            self.iter_rows(
-                min_row=row,
-                max_row=row,
-                min_col=column,
-                max_col=column,
-                values_only=True,
-            ),
-            start=row,
-        ):
-            val = r_tuple[0] if r_tuple else None
-            return _ReadOnlyCellProxy(val, row, column)
-        return _ReadOnlyCellProxy(None, row, column)
+        if read_excel_turbo_cell is None or not _PYARROW_AVAILABLE:
+            raise ImportError(
+                "read_only cell lookup requires pyarrow "
+                "(install kyrax[pandas+pyarrow]) — refusing to load the full sheet eagerly"
+            )
+        val = read_excel_turbo_cell(str(self._wb._path), self._sheet_idx, row, column)
+        return _ReadOnlyCellProxy(val, row, column)
 
     def close(self) -> None:
         self._closed = True
@@ -1349,11 +1289,19 @@ class ReadOnlyWorkbook:
         self._reader = reader
         self._path = path
         self._cached_sheets: dict[str, ReadOnlyWorksheet] = {}
+        self._open_iterators: list = []
         self._closed = False
 
     def _ensure_open(self) -> None:
         if self._closed:
             raise ValueError("workbook is closed")
+
+    def __enter__(self) -> ReadOnlyWorkbook:
+        self._ensure_open()
+        return self
+
+    def __exit__(self, *args: typing.Any) -> None:
+        self.close()
 
     @property
     def sheetnames(self) -> list[str]:
@@ -1403,12 +1351,21 @@ class ReadOnlyWorkbook:
         self._ensure_open()
         return self._reader.load_sheet(idx_or_name, **kwargs)
 
+    def _register_stream(self, it: typing.Any) -> None:
+        self._open_iterators.append(it)
+
+    def _unregister_stream(self, it: typing.Any) -> None:
+        try:
+            self._open_iterators.remove(it)
+        except ValueError:
+            pass
+
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        for ws in self._cached_sheets.values():
-            ws.close()
+        _close_streams(self._open_iterators)
+        self._open_iterators = []
         self._cached_sheets.clear()
 
 
@@ -1450,21 +1407,6 @@ def encryption_info(path: Path | str) -> dict:
     if _encryption_info is None:
         raise KyraxError("encryption_info requires a kyrax build with the `encryption` feature")
     return _encryption_info(str(path))
-
-
-def _validate_sheets(sheets: list[dict]) -> None:
-    for i, sheet in enumerate(sheets):
-        cols = sheet.get("columns")
-        if isinstance(cols, list):
-            for j, col in enumerate(cols):
-                if isinstance(col, str):
-                    name = sheet.get("name", i)
-                    raise TypeError(
-                        f"sheet '{name}': columns[{j}] is a str ('{col}'). "
-                        "The 'columns' key takes columnar DATA (a list of column arrays), "
-                        "not header names. To write a header row, pass it as the first "
-                        "entry of 'rows', e.g. rows=[['Region','Profit'], ...]."
-                    )
 
 
 def write_excel_turbo(
@@ -1646,6 +1588,22 @@ def write_excel_turbo_bytes(
         recalculate=recalculate,
         vba_archive_path=vba_archive_path,
     )
+
+
+import sys
+
+if "pandas" in sys.modules:
+    # Register the pandas engine plugin (kyrax.pandas.register() injects the
+    # reader into pandas.io.excel._base.ExcelFile._engines and the writer into
+    # pandas.io.excel._util._writers). This runs only when pandas is already
+    # loaded so importing kyrax never eagerly imports pandas. Placed after the
+    # public function definitions so kyrax.pandas can import them during its
+    # own module initialization (a circular partial-import would otherwise
+    # swallow the registration).
+    try:
+        from . import pandas as _pandas
+    except Exception:
+        pass
 
 
 __all__ = (

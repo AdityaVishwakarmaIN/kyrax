@@ -393,9 +393,16 @@ fn read_workbook_turbo_filtered(
     // Shared strings (optional part)
     let shared = read_entry(&zip, "xl/sharedStrings.xml")?.map(|sx| parse_shared_strings(&sx));
 
-    // Styles: STYLES needs full table; COND_FORMAT needs dxfs (same parse is fine)
+    // Styles: STYLES needs full table; COND_FORMAT needs dxfs (same parse is fine).
+    // When the workbook omits xl/styles.xml but styles are requested, expose a valid
+    // default StyleTable (parse_style_table on empty input builds the implicit
+    // default font/fill/border/xf) so the implicit Excel style index 0 still resolves.
+    // When styles are not requested, keep the part unread and style_table None.
+    let want_styles =
+        features.contains(Features::STYLES) || features.contains(Features::COND_FORMAT);
     let style_table = match read_entry(&zip, "xl/styles.xml")? {
         Some(sx) => Some(parse_style_table(&sx)),
+        None if want_styles => Some(parse_style_table(&[])),
         None => None,
     };
 
