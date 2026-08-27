@@ -67,11 +67,11 @@ libdeflater = "1.24"
 # so it cannot resume after an output window fills. We keep libdeflate for the
 # eager path (unchanged) and use `zip`'s streaming ZipFile reader for the new
 # streaming path.
-zip = { version = "7.0", default-features = false, features = ["deflate"] }
+zip = { version = "8.0", default-features = false, features = ["deflate"] }
 # Streaming inflate for the bounded-memory read path (see src/turbo/stream.rs
 # for why libdeflate cannot stream). Already compiled into every build as
 # zip→flate2's inflater; promoted to a direct dep unchanged.
-miniz_oxide = "0.8"
+miniz_oxide = "0.9"
 memchr = "2.7"
 rayon = "1.10"
 fast-float2 = "0.2"
@@ -81,10 +81,10 @@ ryu = "1.0"
 ahash = "0.8"
 # ECMA-376 encrypted-workbook key derivation (src/turbo/crypto/) — optional.
 # Only these RustCrypto crates are permitted for the encryption feature.
-aes = { version = "0.8", optional = true }
-cbc = { version = "0.1", optional = true }
-sha2 = { version = "0.10", optional = true }
-hmac = { version = "0.12", optional = true }
+aes = { version = "0.9", optional = true }
+cbc = { version = "0.2", optional = true }
+sha2 = { version = "0.11", optional = true }
+hmac = { version = "0.13", optional = true }
 
 # Windows heap fragmentation on repeated large write alloc/free cycles.
 # Windows-only: avoids breaking the Linux aarch64 manylinux2014 cross-build,
