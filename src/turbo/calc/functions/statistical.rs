@@ -48,7 +48,9 @@
 //     and report standard errors from the diagonal of (X'X)^{-1} = (R'R)^{-1}.
 //     TREND/GROWTH reuse the same fit; GROWTH fits ln(y).
 use super::{FuncArg, FuncCtx, FuncSpec, Registry};
-use crate::turbo::calc::coerce::{coerce_number, coerce_text, compare, compare_eq};
+use crate::turbo::calc::coerce::{
+    coerce_number, coerce_text, compare, criteria_eq, criteria_ne, criteria_same_kind,
+};
 use crate::turbo::calc::value::{ArrayValue, CalcError, CalcValue};
 use std::cmp::Ordering;
 
@@ -492,8 +494,9 @@ fn criteria_match(v: &CalcValue, crit: &Criterion) -> Result<bool, CalcError> {
     }
     let wildcards = matches!(&crit.operand, CalcValue::Text(_));
     match crit.op {
-        Op::Eq => compare_eq(v, &crit.operand, wildcards),
-        Op::Ne => compare_eq(v, &crit.operand, wildcards).map(|eq| !eq),
+        Op::Eq => criteria_eq(v, &crit.operand, wildcards),
+        Op::Ne => criteria_ne(v, &crit.operand, wildcards),
+        _ if !criteria_same_kind(v, &crit.operand) => Ok(false),
         Op::Lt => compare(v, &crit.operand).map(|o| o == Ordering::Less),
         Op::Le => compare(v, &crit.operand).map(|o| o != Ordering::Greater),
         Op::Gt => compare(v, &crit.operand).map(|o| o == Ordering::Greater),
