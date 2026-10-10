@@ -55,6 +55,10 @@ pub struct SheetOverlay {
     /// Charts / images queued by `add_chart` / `add_image` (overlay_drawings).
     pub new_charts: Vec<crate::turbo::write::charts::Chart>,
     pub new_images: Vec<crate::turbo::write::model::Image>,
+    /// `ws.append` cursor: (next row, `modified_cells.len()`, `ops.len()`) as
+    /// left by the last append. Valid only while both lengths are unchanged,
+    /// which makes repeated appends O(row) instead of O(sheet).
+    pub append_hint: Option<(u32, usize, usize)>,
 }
 
 impl SheetOverlay {

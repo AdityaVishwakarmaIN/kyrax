@@ -4973,8 +4973,24 @@ impl PyEditableSheet {
     }
 
     fn append(&self, iterable: &Bound<'_, PyAny>) -> PyResult<()> {
-        let (min_r, max_r, _, _) = self.compute_bounds_raw()?;
-        let append_row = if min_r == u32::MAX { 1 } else { max_r + 1 };
+        let hint = {
+            let ov = self
+                .overlay
+                .lock()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            ov.sheet_overlays.get(&self.sheet_name).and_then(|so| {
+                so.append_hint
+                    .filter(|&(_, n, k)| n == so.modified_cells.len() && k == so.ops.len())
+                    .map(|h| h.0)
+            })
+        };
+        let append_row = match hint {
+            Some(r) => r,
+            None => {
+                let (min_r, max_r, _, _) = self.compute_bounds_raw()?;
+                if min_r == u32::MAX { 1 } else { max_r + 1 }
+            }
+        };
         let items: Vec<Bound<'_, PyAny>> = if let Ok(it) = iterable.try_iter() {
             let mut list = Vec::new();
             for elem in it {
@@ -4989,14 +5005,21 @@ impl PyEditableSheet {
             .overlay
             .lock()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut wrote_value = false;
         for (i, item) in items.iter().enumerate() {
             let col = (i + 1) as u32;
             let val = py_to_cell_value_flagged(item, false, Some(&mut style_work))?;
             let wrap_style = extract_wrapper_style(item)?;
+            wrote_value |= !matches!(val, CellValue::Empty);
             ov.set_cell(&self.sheet_name, append_row, col, val);
             if let Some(desc) = wrap_style {
                 ov.set_cell_style(&self.sheet_name, append_row, col, *desc);
             }
+        }
+        // Same next-row rule as `compute_bounds_raw`: an all-empty row does not advance.
+        if let Some(so) = ov.sheet_overlays.get_mut(&self.sheet_name) {
+            let next = if wrote_value { append_row + 1 } else { append_row };
+            so.append_hint = Some((next, so.modified_cells.len(), so.ops.len()));
         }
         Ok(())
     }
