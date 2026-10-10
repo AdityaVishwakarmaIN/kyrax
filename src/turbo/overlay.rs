@@ -52,6 +52,9 @@ pub struct SheetOverlay {
     pub print_options: Option<PrintOptions>,
     pub data_validations: Vec<crate::turbo::write::DataValidation>,
     pub is_dirty: bool,
+    /// Charts / images queued by `add_chart` / `add_image` (overlay_drawings).
+    pub new_charts: Vec<crate::turbo::write::charts::Chart>,
+    pub new_images: Vec<crate::turbo::write::model::Image>,
 }
 
 impl SheetOverlay {
@@ -1721,6 +1724,8 @@ impl WorkbookOverlay {
                 }
             }
         }
+
+        crate::turbo::overlay_drawings::apply_drawings(self, &mut rendered, &mut rewritten_parts)?;
 
         let content_changed = !rendered.is_empty()
             || !table_edit.is_empty()

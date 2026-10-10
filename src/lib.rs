@@ -137,6 +137,10 @@ fn _kyrax(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(py_coordinate_to_tuple, m)?)?;
         m.add_function(wrap_pyfunction!(py_range_boundaries, m)?)?;
         m.add_function(wrap_pyfunction!(py_quote_sheetname, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            crate::turbo::overlay_drawings::py::py_image_size,
+            m
+        )?)?;
         m.add_class::<PyEditableWorkbook>()?;
         m.add_class::<PyEditableSheet>()?;
         m.add_class::<PyCell>()?;

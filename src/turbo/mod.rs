@@ -21,6 +21,8 @@ mod zipmin;
 pub mod calc;
 pub mod mutate;
 pub mod overlay;
+/// Charts + images authored through the editable overlay (familiar API).
+pub mod overlay_drawings;
 
 /// Dependent-feature fixups for row/column insert and delete (T1-1d).
 ///
