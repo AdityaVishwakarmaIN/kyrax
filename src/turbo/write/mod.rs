@@ -7,7 +7,7 @@
 //! (tables/comments/drawings/charts) → libdeflater → ZIP.
 
 mod cf_dv;
-mod charts;
+pub(crate) mod charts;
 pub(crate) mod media;
 pub(crate) mod model;
 pub(crate) mod pivot;

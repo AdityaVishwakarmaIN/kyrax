@@ -5363,6 +5363,18 @@ impl PyEditableSheet {
         Ok(())
     }
 
+    /// openpyxl `ws.add_chart(chart, "F2")` (kyrax.chart objects).
+    #[pyo3(signature = (chart, anchor = None))]
+    fn add_chart(&self, chart: &Bound<'_, PyAny>, anchor: Option<&str>) -> PyResult<()> {
+        crate::turbo::overlay_drawings::py::add_chart(&self.overlay, &self.sheet_name, chart, anchor)
+    }
+
+    /// openpyxl `ws.add_image(img, "E5")` (kyrax.drawing.image.Image).
+    #[pyo3(signature = (img, anchor = None))]
+    fn add_image(&self, img: &Bound<'_, PyAny>, anchor: Option<&str>) -> PyResult<()> {
+        crate::turbo::overlay_drawings::py::add_image(&self.overlay, &self.sheet_name, img, anchor)
+    }
+
     #[getter]
     fn data_validations<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
