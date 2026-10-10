@@ -21,6 +21,8 @@ mod zipmin;
 pub mod calc;
 pub mod mutate;
 pub mod overlay;
+/// Column width / row height / merge / freeze / autoFilter layout for the overlay.
+pub mod overlay_layout;
 
 /// Dependent-feature fixups for row/column insert and delete (T1-1d).
 ///
