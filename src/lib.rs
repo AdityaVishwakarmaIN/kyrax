@@ -132,6 +132,10 @@ fn _kyrax(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(py_write_excel_turbo_stream, m)?)?;
         m.add_function(wrap_pyfunction!(py_write_excel_turbo_bytes, m)?)?;
         m.add_function(wrap_pyfunction!(py_edit_excel, m)?)?;
+        m.add_function(wrap_pyfunction!(crate::turbo::write::python::py_edit_excel_bytes, m)?)?;
+        m.add_class::<crate::turbo::overlay_workbook::py::PyDefinedNameDict>()?;
+        m.add_class::<crate::turbo::overlay_workbook::py::PyWbDefinedName>()?;
+        m.add_class::<crate::turbo::overlay_workbook::py::PyDocumentProperties>()?;
         m.add_function(wrap_pyfunction!(py_get_column_letter, m)?)?;
         m.add_function(wrap_pyfunction!(py_column_index_from_string, m)?)?;
         m.add_function(wrap_pyfunction!(py_coordinate_to_tuple, m)?)?;

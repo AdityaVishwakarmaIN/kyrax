@@ -340,6 +340,8 @@ pub struct WorkbookOverlay {
     pub page_setup_cache: AHashMap<String, Option<crate::turbo::write::model::PageSetup>>,
     pub data_validations_cache: AHashMap<String, Vec<crate::turbo::write::DataValidation>>,
     pub protection_cache: AHashMap<String, Option<crate::turbo::write::model::SheetProtection>>,
+    /// Workbook-level state (defined names, sheet states); lazily loaded.
+    pub wb_level: Option<crate::turbo::overlay_workbook::WorkbookLevel>,
 }
 
 impl WorkbookOverlay {
@@ -358,6 +360,7 @@ impl WorkbookOverlay {
             page_setup_cache: AHashMap::default(),
             data_validations_cache: AHashMap::default(),
             protection_cache: AHashMap::default(),
+            wb_level: None,
         }
     }
 
@@ -817,6 +820,7 @@ impl WorkbookOverlay {
         if let Some(h) = self.hydrated.remove(old_name) {
             self.hydrated.insert(new_name.to_string(), h);
         }
+        self.wb_level_on_rename(old_name, new_name);
         Ok(())
     }
 
@@ -1253,6 +1257,7 @@ impl WorkbookOverlay {
         let mut pivot_cache_map: Option<std::collections::HashMap<u32, String>> = None;
         let mut workbook_bytes: Option<Vec<u8>> = rewritten_parts.remove("xl/workbook.xml");
         let mut workbook_modified = workbook_bytes.is_some();
+        self.apply_wb_level(workbook_modified, &mut workbook_bytes, &mut workbook_modified)?;
 
         let formula_affected = self
             .sheet_overlays
