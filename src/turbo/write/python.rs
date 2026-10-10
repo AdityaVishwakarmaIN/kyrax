@@ -25,6 +25,7 @@ use crate::turbo::error::{TurboError, TurboResult};
 use crate::turbo::meta::{AutoFilterMeta, FilterColumnMeta};
 use crate::turbo::overlay::{WorkbookOverlay, hydrate_sheet_from_xml};
 use crate::turbo::overlay_layout::py as layout_py;
+use super::readback;
 use crate::turbo::scan::{MAX_GRID_COLS, MAX_GRID_ROWS, parse_ref_range_strict};
 use crate::turbo::structural::parse_range;
 use crate::turbo::zipmin::{ArchiveMap, read_entry};
@@ -832,6 +833,25 @@ impl PyComment {
 
     fn __repr__(&self) -> String {
         format!("Comment(text={:?}, author={:?})", self.text, self.author)
+    }
+
+    fn __str__(&self) -> String {
+        self.text.clone()
+    }
+
+    /// Equal to its text (back-compat: the getter used to return a str) or to
+    /// a Comment with the same text and author.
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(s) = other.extract::<String>() {
+            return s == self.text;
+        }
+        other
+            .cast::<PyComment>()
+            .map(|c| {
+                let c = c.borrow();
+                c.text == self.text && c.author == self.author
+            })
+            .unwrap_or(false)
     }
 }
 
@@ -4388,6 +4408,98 @@ fn is_covered_merged_cell(ov: &mut WorkbookOverlay, sheet_name: &str, row: u32, 
         .unwrap_or(false)
 }
 
+/// Editable-doorway write of one Python value (openpyxl semantics): a str
+/// starting with "=" is a formula, dates use the workbook epoch and get a
+/// default date format when the cell has no explicit one.
+fn write_editable(
+    ov: &mut WorkbookOverlay,
+    sheet: &str,
+    row: u32,
+    col: u32,
+    obj: &Bound<'_, PyAny>,
+    style_work: Option<&mut bool>,
+) -> PyResult<()> {
+    let date1904 = readback::date1904(ov);
+    let val = match py_to_cell_value_flagged(obj, date1904, style_work)? {
+        CellValue::Str(s) if s.len() > 1 && s.starts_with('=') => CellValue::Formula {
+            text: s,
+            kind: FormulaKind::Normal,
+            cached: None,
+        },
+        v => readback::rebase_epoch(v, date1904),
+    };
+    let fmt = default_date_format(obj, &val);
+    ov.set_cell(sheet, row, col, val);
+    if let Some(desc) = extract_wrapper_style(obj)? {
+        ov.set_cell_style(sheet, row, col, *desc);
+    }
+    if let Some(f) = fmt {
+        readback::apply_default_format(ov, sheet, row, col, f);
+    }
+    Ok(())
+}
+
+/// openpyxl's TIME_FORMATS for the Python type behind a date-like value.
+fn default_date_format(obj: &Bound<'_, PyAny>, v: &CellValue) -> Option<&'static str> {
+    match v {
+        CellValue::DateSerial(_) => {
+            let inner = match obj.cast::<PyDict>() {
+                Ok(d) => d.get_item("value").ok().flatten()?,
+                Err(_) => obj.clone(),
+            };
+            Some(if inner.hasattr("hour").unwrap_or(false) {
+                "yyyy-mm-dd h:mm:ss"
+            } else {
+                "yyyy-mm-dd"
+            })
+        }
+        CellValue::Time(_) => Some("h:mm:ss"),
+        CellValue::Duration(_) => Some("[hh]:mm:ss"),
+        _ => None,
+    }
+}
+
+/// Value of (row, col) as Python: in-session edit first, else the source
+/// cell; a number in a date/time-formatted cell reads as date/time.
+fn read_cell_py<'py>(
+    py: Python<'py>,
+    ov: &mut WorkbookOverlay,
+    sheet: &str,
+    hydrated: Option<&Sheet>,
+    row: u32,
+    col: u32,
+) -> PyResult<Bound<'py, PyAny>> {
+    let data_only = ov.data_only;
+    let src = hydrated.and_then(|s| {
+        let r = &s.rows[s.rows.binary_search_by(|r| r.row.cmp(&row)).ok()?];
+        r.cells.binary_search_by(|c| c.col.cmp(&col)).ok().map(|i| &r.cells[i])
+    });
+    let modified = ov
+        .sheet_overlays
+        .get(sheet)
+        .and_then(|so| so.modified_cells.get(&(row, col)))
+        .cloned();
+    let v = modified
+        .as_ref()
+        .or(src.map(|c| &c.value))
+        .unwrap_or(&CellValue::Empty);
+    let serial = match v {
+        CellValue::Number(n) | CellValue::DateSerial(n) => Some(*n),
+        CellValue::Formula { cached: Some(CachedValue::Number(n)), .. } if data_only => Some(*n),
+        _ => None,
+    };
+    if let Some(n) = serial {
+        let kind = readback::num_kind(ov, sheet, row, col, src.and_then(|c| c.style));
+        if kind != readback::NumKind::Plain {
+            let date1904 = readback::date1904(ov);
+            if let Some(obj) = readback::serial_to_py(py, n, kind, date1904)? {
+                return Ok(obj);
+            }
+        }
+    }
+    cell_value_to_py(py, v, data_only)
+}
+
 #[pyclass(name = "Cell")]
 pub struct PyCell {
     pub sheet_name: String,
@@ -4423,26 +4535,10 @@ impl PyCell {
         if is_covered_merged_cell(&mut ov, &self.sheet_name, self.row, self.col) {
             return Ok(py.None().into_bound(py));
         }
-        let data_only = ov.data_only;
-        if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
-            if let Some(v) = so.modified_cells.get(&(self.row, self.col)) {
-                return cell_value_to_py(py, v, data_only);
-            }
-        }
         let hydrated = ov
             .hydrated_sheet(&self.sheet_name)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        drop(ov);
-
-        if let Some(sheet) = hydrated {
-            if let Ok(idx) = sheet.rows.binary_search_by(|r| r.row.cmp(&self.row)) {
-                let r = &sheet.rows[idx];
-                if let Ok(cidx) = r.cells.binary_search_by(|c| c.col.cmp(&self.col)) {
-                    return cell_value_to_py(py, &r.cells[cidx].value, data_only);
-                }
-            }
-        }
-        cell_value_to_py(py, &CellValue::Empty, data_only)
+        read_cell_py(py, &mut ov, &self.sheet_name, hydrated.as_deref(), self.row, self.col)
     }
 
     #[setter]
@@ -4456,9 +4552,7 @@ impl PyCell {
                 "Cell is merged and read-only",
             ));
         }
-        let cell_val = py_to_cell_value_flagged(value, false, None)?;
-        ov.set_cell(&self.sheet_name, self.row, self.col, cell_val);
-        Ok(())
+        write_editable(&mut ov, &self.sheet_name, self.row, self.col, value, None)
     }
 
     #[getter]
@@ -4710,22 +4804,31 @@ impl PyCell {
     }
 
     #[getter]
-    fn hyperlink(&self) -> Option<String> {
-        let Ok(ov) = self.overlay.lock() else { return None; };
+    fn hyperlink(&self) -> Option<readback::PyHyperlink> {
+        let Ok(mut ov) = self.overlay.lock() else { return None; };
         if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
             if let Some(h) = so.hyperlinks.get(&(self.row, self.col)) {
-                return Some(h.clone());
+                return Some(readback::PyHyperlink::from_target(self.coordinate(), h.clone()));
             }
         }
-        None
+        let extras = readback::sheet_extras(&mut ov, &self.sheet_name)?;
+        let l = extras.hyperlinks.get(&(self.row, self.col))?;
+        Some(readback::PyHyperlink::from_existing(self.coordinate(), l))
     }
 
     #[setter]
-    fn set_hyperlink(&self, link: Option<&str>) -> PyResult<()> {
+    fn set_hyperlink(&self, link: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let link = match link {
+            Some(l) => match l.cast::<readback::PyHyperlink>() {
+                Ok(h) => Some(h.borrow().text()),
+                Err(_) => Some(l.extract::<String>()?),
+            },
+            None => None,
+        };
         let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
         let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
         if let Some(l) = link {
-            so.hyperlinks.insert((self.row, self.col), l.to_string());
+            so.hyperlinks.insert((self.row, self.col), l);
         } else {
             so.hyperlinks.remove(&(self.row, self.col));
         }
@@ -4734,14 +4837,16 @@ impl PyCell {
     }
 
     #[getter]
-    fn comment(&self) -> Option<String> {
-        let Ok(ov) = self.overlay.lock() else { return None; };
+    fn comment(&self) -> Option<PyComment> {
+        let Ok(mut ov) = self.overlay.lock() else { return None; };
         if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
-            if let Some((text, _)) = so.comments.get(&(self.row, self.col)) {
-                return Some(text.clone());
+            if let Some((text, author)) = so.comments.get(&(self.row, self.col)) {
+                return Some(PyComment { text: text.clone(), author: author.clone() });
             }
         }
-        None
+        let extras = readback::sheet_extras(&mut ov, &self.sheet_name)?;
+        let (text, author) = extras.comments.get(&(self.row, self.col))?;
+        Some(PyComment { text: text.clone(), author: author.clone() })
     }
 
     #[setter]
@@ -4798,7 +4903,6 @@ impl PySheetRowIter {
         let mut ov = self.overlay.lock().map_err(|e| {
             PyValueError::new_err(format!("lock error: {e}"))
         })?;
-        let data_only = ov.data_only;
         let hydrated = ov.hydrated_sheet(&self.sheet_name).map_err(|e| {
             PyValueError::new_err(format!("hydration error: {e}"))
         })?;
@@ -4808,23 +4912,7 @@ impl PySheetRowIter {
             let mut items = Vec::with_capacity((self.c2.saturating_sub(self.c1) + 1) as usize);
             for col in self.c1..=self.c2 {
                 if self.values_only {
-                    let mut val = CellValue::Empty;
-                    if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
-                        if let Some(v) = so.modified_cells.get(&(row, col)) {
-                            val = v.clone();
-                        }
-                    }
-                    if matches!(val, CellValue::Empty) {
-                        if let Some(sheet) = &hydrated {
-                            if let Ok(idx) = sheet.rows.binary_search_by(|r| r.row.cmp(&row)) {
-                                let r = &sheet.rows[idx];
-                                if let Ok(cidx) = r.cells.binary_search_by(|c| c.col.cmp(&col)) {
-                                    val = r.cells[cidx].value.clone();
-                                }
-                            }
-                        }
-                    }
-                    items.push(cell_value_to_py(py, &val, data_only)?);
+                    items.push(read_cell_py(py, &mut ov, &self.sheet_name, hydrated.as_deref(), row, col)?);
                 } else {
                     let cell = PyCell {
                         sheet_name: self.sheet_name.clone(),
@@ -4843,23 +4931,7 @@ impl PySheetRowIter {
             let mut items = Vec::with_capacity((self.r2.saturating_sub(self.r1) + 1) as usize);
             for row in self.r1..=self.r2 {
                 if self.values_only {
-                    let mut val = CellValue::Empty;
-                    if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
-                        if let Some(v) = so.modified_cells.get(&(row, col)) {
-                            val = v.clone();
-                        }
-                    }
-                    if matches!(val, CellValue::Empty) {
-                        if let Some(sheet) = &hydrated {
-                            if let Ok(idx) = sheet.rows.binary_search_by(|r| r.row.cmp(&row)) {
-                                let r = &sheet.rows[idx];
-                                if let Ok(cidx) = r.cells.binary_search_by(|c| c.col.cmp(&col)) {
-                                    val = r.cells[cidx].value.clone();
-                                }
-                            }
-                        }
-                    }
-                    items.push(cell_value_to_py(py, &val, data_only)?);
+                    items.push(read_cell_py(py, &mut ov, &self.sheet_name, hydrated.as_deref(), row, col)?);
                 } else {
                     let cell = PyCell {
                         sheet_name: self.sheet_name.clone(),
@@ -5015,13 +5087,12 @@ impl PyEditableSheet {
         let mut wrote_value = false;
         for (i, item) in items.iter().enumerate() {
             let col = (i + 1) as u32;
-            let val = py_to_cell_value_flagged(item, false, Some(&mut style_work))?;
-            let wrap_style = extract_wrapper_style(item)?;
-            wrote_value |= !matches!(val, CellValue::Empty);
-            ov.set_cell(&self.sheet_name, append_row, col, val);
-            if let Some(desc) = wrap_style {
-                ov.set_cell_style(&self.sheet_name, append_row, col, *desc);
-            }
+            write_editable(&mut ov, &self.sheet_name, append_row, col, item, Some(&mut style_work))?;
+            wrote_value |= ov
+                .sheet_overlays
+                .get(&self.sheet_name)
+                .and_then(|so| so.modified_cells.get(&(append_row, col)))
+                .is_some_and(|v| !matches!(v, CellValue::Empty));
         }
         // Same next-row rule as `compute_bounds_raw`: an all-empty row does not advance.
         if let Some(so) = ov.sheet_overlays.get_mut(&self.sheet_name) {
@@ -5040,16 +5111,11 @@ impl PyEditableSheet {
         }
         if let Some(v) = value {
             let mut style_work = false;
-            let cell_val = py_to_cell_value_flagged(v, false, Some(&mut style_work))?;
-            let wrap_style = extract_wrapper_style(v)?;
             let mut ov = self
                 .overlay
                 .lock()
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            ov.set_cell(&self.sheet_name, row, column, cell_val);
-            if let Some(desc) = wrap_style {
-                ov.set_cell_style(&self.sheet_name, row, column, *desc);
-            }
+            write_editable(&mut ov, &self.sheet_name, row, column, v, Some(&mut style_work))?;
         }
         Ok(PyCell {
             sheet_name: self.sheet_name.clone(),

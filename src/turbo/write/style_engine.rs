@@ -1115,6 +1115,10 @@ impl StyleEngine {
     pub fn custom_num_fmt_count(&self) -> usize {
         self.number_formats.len()
     }
+    /// Custom number-format codes in id order (id = index + 164).
+    pub fn custom_num_fmts(&self) -> &[String] {
+        &self.number_formats.items
+    }
     pub fn dxf_count(&self) -> usize {
         self.dxfs.len()
     }
