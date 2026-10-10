@@ -1604,6 +1604,42 @@ if "pandas" in sys.modules:
         from . import pandas as _pandas
     except Exception:
         pass
+else:
+    # pandas not imported yet: register the engines right after pandas
+    # finishes importing (one-shot import hook), so
+    # `import kyrax; import pandas` works the same as the reverse order.
+    import importlib as _il
+    import importlib.abc as _iabc
+    import importlib.util as _iutil
+
+    class _PandasEngineHook(_iabc.MetaPathFinder):
+        _busy = False
+        _done = False
+
+        def find_spec(self, name, path=None, target=None):
+            if name != "pandas" or self._busy or self._done:
+                return None
+            self._busy = True
+            try:
+                spec = _iutil.find_spec(name)
+            finally:
+                self._busy = False
+            if spec is None or spec.loader is None or not hasattr(spec.loader, "exec_module"):
+                return spec
+            self._done = True
+            run = spec.loader.exec_module
+
+            def exec_module(module):
+                run(module)
+                try:
+                    _il.import_module(f"{__name__}.pandas")
+                except Exception:
+                    pass
+
+            spec.loader.exec_module = exec_module
+            return spec
+
+    sys.meta_path.insert(0, _PandasEngineHook())
 
 
 __all__ = (

@@ -11,6 +11,7 @@ mod charts;
 pub(crate) mod media;
 pub(crate) mod model;
 pub(crate) mod pivot;
+pub(crate) mod readback;
 mod rich_text;
 mod structural;
 pub(crate) mod style_engine;

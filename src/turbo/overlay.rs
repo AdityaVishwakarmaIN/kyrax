@@ -340,6 +340,8 @@ pub struct WorkbookOverlay {
     pub page_setup_cache: AHashMap<String, Option<crate::turbo::write::model::PageSetup>>,
     pub data_validations_cache: AHashMap<String, Vec<crate::turbo::write::DataValidation>>,
     pub protection_cache: AHashMap<String, Option<crate::turbo::write::model::SheetProtection>>,
+    /// Lazily parsed source facts for read-back (dates, comments, links).
+    pub readback: crate::turbo::write::readback::ReadbackCache,
 }
 
 impl WorkbookOverlay {
@@ -358,6 +360,7 @@ impl WorkbookOverlay {
             page_setup_cache: AHashMap::default(),
             data_validations_cache: AHashMap::default(),
             protection_cache: AHashMap::default(),
+            readback: Default::default(),
         }
     }
 
@@ -1821,6 +1824,12 @@ impl WorkbookOverlay {
                 });
 
             if let Some(orig_xml) = original_styles {
+                // Merge custom numFmts first so new xfs never reference an
+                // undeclared (or the source's unrelated) id >= 164.
+                let (orig_xml, fmt_map) = crate::turbo::write::readback::splice_num_fmts(
+                    &orig_xml,
+                    style_engine.custom_num_fmts(),
+                );
                 // Parse existing pool counts from the original XML.
                 let orig_font_count = parse_pool_count(&orig_xml, b"fonts");
                 let orig_fill_count = parse_pool_count(&orig_xml, b"fills");
@@ -1863,9 +1872,16 @@ impl WorkbookOverlay {
                 }
                 let mut new_xf_xml = Vec::new();
                 for st in style_engine.cell_xfs().iter().skip(boot_xfs as usize) {
+                    let mut st = *st;
+                    if let Some(&id) = usize::try_from(st.num_fmt_id - 164)
+                        .ok()
+                        .and_then(|i| fmt_map.get(i))
+                    {
+                        st.num_fmt_id = id;
+                    }
                     emit_xf_with_offsets(
                         &mut new_xf_xml,
-                        st,
+                        &st,
                         font_offset,
                         fill_offset,
                         border_offset,
