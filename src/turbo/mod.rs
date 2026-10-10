@@ -23,6 +23,8 @@ pub mod mutate;
 pub mod overlay;
 /// Charts + images authored through the editable overlay (familiar API).
 pub mod overlay_drawings;
+/// Workbook-level overlay state: defined names, print areas/titles, sheet visibility.
+pub mod overlay_workbook;
 
 /// Dependent-feature fixups for row/column insert and delete (T1-1d).
 ///

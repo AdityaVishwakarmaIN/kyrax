@@ -4898,6 +4898,48 @@ impl PyEditableSheet {
         Ok(())
     }
 
+    // ---- workbook-level sheet settings (logic: turbo/overlay_workbook.rs) ----
+    #[getter]
+    fn print_area(&self) -> PyResult<Option<String>> {
+        crate::turbo::overlay_workbook::py::with(&self.overlay, |ov| ov.print_area(&self.sheet_name))
+    }
+    #[setter]
+    fn set_print_area(&self, val: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let refs = crate::turbo::overlay_workbook::py::refs_arg(val)?;
+        crate::turbo::overlay_workbook::py::with(&self.overlay, |ov| {
+            ov.set_print_area(&self.sheet_name, refs.as_deref())
+        })
+    }
+    #[getter]
+    fn print_title_rows(&self) -> PyResult<Option<String>> {
+        crate::turbo::overlay_workbook::py::with(&self.overlay, |ov| Ok(ov.print_titles(&self.sheet_name)?.0))
+    }
+    #[setter]
+    fn set_print_title_rows(&self, val: Option<String>) -> PyResult<()> {
+        crate::turbo::overlay_workbook::py::with(&self.overlay, |ov| {
+            ov.set_print_titles(&self.sheet_name, true, val.as_deref())
+        })
+    }
+    #[getter]
+    fn print_title_cols(&self) -> PyResult<Option<String>> {
+        crate::turbo::overlay_workbook::py::with(&self.overlay, |ov| Ok(ov.print_titles(&self.sheet_name)?.1))
+    }
+    #[setter]
+    fn set_print_title_cols(&self, val: Option<String>) -> PyResult<()> {
+        crate::turbo::overlay_workbook::py::with(&self.overlay, |ov| {
+            ov.set_print_titles(&self.sheet_name, false, val.as_deref())
+        })
+    }
+    #[getter]
+    fn sheet_state(&self) -> PyResult<String> {
+        crate::turbo::overlay_workbook::py::with(&self.overlay, |ov| ov.sheet_state(&self.sheet_name))
+    }
+    #[setter]
+    fn set_sheet_state(&self, val: &str) -> PyResult<()> {
+        crate::turbo::overlay_workbook::py::with(&self.overlay, |ov| ov.set_sheet_state(&self.sheet_name, val))
+    }
+    // ---- end workbook-level sheet settings ----
+
     #[getter]
     fn min_row(&self) -> PyResult<u32> {
         let (min_r, _, _, _) = self.compute_bounds()?;
@@ -6028,6 +6070,47 @@ impl PyEditableWorkbook {
         })
     }
 
+    // ---- workbook-level conveniences (logic: turbo/overlay_workbook.rs) ----
+    #[getter]
+    fn defined_names(&self) -> crate::turbo::overlay_workbook::py::PyDefinedNameDict {
+        crate::turbo::overlay_workbook::py::PyDefinedNameDict { overlay: Arc::clone(&self.overlay) }
+    }
+    #[getter]
+    fn properties(&self, py: Python<'_>) -> PyResult<crate::turbo::overlay_workbook::py::PyDocumentProperties> {
+        crate::turbo::overlay_workbook::py::document_properties(py, &self.overlay)
+    }
+    fn get_sheet_by_name(&self, name: &str) -> PyResult<PyEditableSheet> {
+        self.__getitem__(name)
+    }
+    fn index(&self, worksheet: &Bound<'_, PyAny>) -> PyResult<usize> {
+        let name = match worksheet.cast::<PyEditableSheet>() {
+            Ok(ws) => ws.borrow().sheet_name.clone(),
+            Err(_) => worksheet.extract::<String>()?,
+        };
+        self.sheetnames()?
+            .iter()
+            .position(|n| *n == name)
+            .ok_or_else(|| PyValueError::new_err(format!("sheet '{name}' is not in workbook")))
+    }
+    fn close(&self) {}
+    fn __len__(&self) -> PyResult<usize> {
+        Ok(self.sheetnames()?.len())
+    }
+    fn __contains__(&self, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let name = match key.cast::<PyEditableSheet>() {
+            Ok(ws) => ws.borrow().sheet_name.clone(),
+            Err(_) => match key.extract::<String>() {
+                Ok(s) => s,
+                Err(_) => return Ok(false),
+            },
+        };
+        Ok(self.sheetnames()?.contains(&name))
+    }
+    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        Ok(PyList::new(py, self.worksheets()?)?.try_iter()?.into_any())
+    }
+    // ---- end workbook-level conveniences ----
+
     fn save(&self, py: Python<'_>, target: &Bound<'_, PyAny>) -> PyResult<()> {
         let is_path = if let Ok(path) = target.extract::<String>() {
             Some(path)
@@ -6074,6 +6157,20 @@ impl PyEditableWorkbook {
 pub fn py_edit_excel(py: Python<'_>, path: &str, data_only: bool) -> PyResult<PyEditableWorkbook> {
     let zip_bytes = py.detach(|| std::fs::read(path)).map_err(write_err_to_py)?;
     let archive_map = ArchiveMap::parse(Arc::new(zip_bytes)).map_err(turbo_err_to_py)?;
+    let mut overlay = WorkbookOverlay::new(archive_map);
+    overlay.data_only = data_only;
+    Ok(PyEditableWorkbook {
+        overlay: Arc::new(std::sync::Mutex::new(overlay)),
+        active_idx: std::sync::atomic::AtomicUsize::new(0),
+    })
+}
+
+/// `edit_excel` over in-memory xlsx bytes (`load_workbook(BytesIO)`).
+#[pyfunction(name = "edit_excel_bytes")]
+#[pyo3(signature = (data, data_only=false))]
+pub fn py_edit_excel_bytes(data: &Bound<'_, PyBytes>, data_only: bool) -> PyResult<PyEditableWorkbook> {
+    let archive_map =
+        ArchiveMap::parse(Arc::new(data.as_bytes().to_vec())).map_err(turbo_err_to_py)?;
     let mut overlay = WorkbookOverlay::new(archive_map);
     overlay.data_only = data_only;
     Ok(PyEditableWorkbook {

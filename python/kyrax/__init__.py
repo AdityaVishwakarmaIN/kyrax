@@ -69,9 +69,11 @@ try:
         Protection,
         SheetStream,
         Side,
+        WorkbookDefinedName,
         column_index_from_string,
         coordinate_to_tuple,
         edit_excel,
+        edit_excel_bytes,
         get_column_letter,
         quote_sheetname,
         range_boundaries,
@@ -83,6 +85,7 @@ try:
     Workbook = EditableWorkbook
 except ImportError:
     edit_excel = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    edit_excel_bytes = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     EditableWorkbook = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
     Workbook = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
     EditableSheet = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
@@ -95,6 +98,7 @@ except ImportError:
     Protection = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
     Comment = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
     SheetStream = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
+    WorkbookDefinedName = None  # type: ignore[misc, assignment]  # ty: ignore[invalid-assignment]
     read_excel_turbo_cell = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     read_excel_turbo_iter = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     read_excel_turbo_iter_rows = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
@@ -162,6 +166,15 @@ def load_workbook(
         filename = expanduser(str(filename))
     elif isinstance(filename, str):
         filename = expanduser(filename)
+    elif not read_only and edit_mode is not False and not kwargs:
+        # In-memory workbook: bytes / bytearray / file-like (BytesIO, open(..., "rb")).
+        data = filename if isinstance(filename, (bytes, bytearray, memoryview)) else None
+        if data is None and hasattr(filename, "read"):
+            data = filename.read()
+        if data is not None:
+            if edit_excel_bytes is None:
+                raise NotImplementedError("edit_excel is not available in this build")
+            return edit_excel_bytes(bytes(data), data_only=data_only)
 
     if read_only:
         reader = read_excel_turbo(filename)
@@ -1628,6 +1641,8 @@ __all__ = (
     # editable round-trip API
     "load_workbook",
     "edit_excel",
+    "edit_excel_bytes",
+    "WorkbookDefinedName",
     "EditableWorkbook",
     "EditableSheet",
     "Workbook",
