@@ -1696,7 +1696,7 @@ fn fill_implied_formulas(sqref: &str, rules: &mut [CfRule]) -> PyResult<()> {
     Ok(())
 }
 
-fn parse_conditional_formatting(obj: &Bound<'_, PyAny>) -> PyResult<Vec<ConditionalFormatting>> {
+pub(crate) fn parse_conditional_formatting(obj: &Bound<'_, PyAny>) -> PyResult<Vec<ConditionalFormatting>> {
     let list = obj
         .cast::<PyList>()
         .map_err(|_| PyValueError::new_err("conditional_formatting must be a list"))?;
@@ -1723,7 +1723,7 @@ fn parse_conditional_formatting(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Conditio
     Ok(out)
 }
 
-fn parse_data_validations(obj: &Bound<'_, PyAny>) -> PyResult<Vec<DataValidation>> {
+pub(crate) fn parse_data_validations(obj: &Bound<'_, PyAny>) -> PyResult<Vec<DataValidation>> {
     let list = obj
         .cast::<PyList>()
         .map_err(|_| PyValueError::new_err("data_validations must be a list"))?;
@@ -3205,7 +3205,7 @@ fn parse_pivots(obj: &Bound<'_, PyAny>, sheet: &Sheet) -> PyResult<Vec<PivotTabl
     Ok(out)
 }
 
-fn parse_tables(obj: &Bound<'_, PyAny>) -> PyResult<Vec<TableDef>> {
+pub(crate) fn parse_tables(obj: &Bound<'_, PyAny>) -> PyResult<Vec<TableDef>> {
     let list = obj
         .cast::<PyList>()
         .map_err(|_| PyValueError::new_err("tables must be a list"))?;
@@ -3239,12 +3239,18 @@ fn parse_tables(obj: &Bound<'_, PyAny>) -> PyResult<Vec<TableDef>> {
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or(true);
+        let flag = |key: &str| -> PyResult<bool> {
+            Ok(d.get_item(key)?.map(|v| v.extract()).transpose()?.unwrap_or(false))
+        };
         out.push(TableDef {
             display_name,
             ref_,
             columns,
             style_name,
             show_row_stripes,
+            show_first_column: flag("show_first_column")?,
+            show_last_column: flag("show_last_column")?,
+            show_column_stripes: flag("show_column_stripes")?,
         });
     }
     Ok(out)
@@ -5547,6 +5553,70 @@ impl PyEditableSheet {
         so.data_validations = dvs;
         so.is_dirty = true;
         Ok(())
+    }
+
+    // --- CF / DV / tables authoring (logic: turbo::overlay_cf_tables) ---
+    #[getter]
+    fn conditional_formatting(
+        &self,
+    ) -> crate::turbo::overlay_cf_tables::py::PyConditionalFormattingList {
+        crate::turbo::overlay_cf_tables::py::PyConditionalFormattingList {
+            sheet_name: self.sheet_name.clone(),
+            overlay: Arc::clone(&self.overlay),
+        }
+    }
+
+    /// openpyxl `ws.add_data_validation(dv)`; returns the slot index that
+    /// `_kx_set_data_validation` updates when `dv.add(range)` runs later.
+    fn add_data_validation(slf: &Bound<'_, Self>, dv: &Bound<'_, PyAny>) -> PyResult<usize> {
+        let spec = crate::turbo::overlay_cf_tables::py::spec_of(dv)?;
+        let parsed = parse_data_validations(PyList::new(dv.py(), [spec])?.as_any())?;
+        let mut idx = 0;
+        {
+            let this = slf.borrow();
+            let mut ov = this.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+            for v in parsed {
+                idx = ov.add_data_validation(&this.sheet_name, v).map_err(turbo_err_to_py)?;
+            }
+        }
+        if dv.hasattr("_kx_bound")? {
+            dv.getattr("_kx_bound")?
+                .call_method1("append", ((slf.clone(), idx),))?;
+        }
+        Ok(idx)
+    }
+
+    fn _kx_set_data_validation(&self, idx: usize, dv: &Bound<'_, PyAny>) -> PyResult<()> {
+        let spec = crate::turbo::overlay_cf_tables::py::spec_of(dv)?;
+        let parsed = parse_data_validations(PyList::new(dv.py(), [spec])?.as_any())?;
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        for v in parsed {
+            ov.set_data_validation(&self.sheet_name, idx, v);
+        }
+        Ok(())
+    }
+
+    /// openpyxl `ws.add_table(table)`.
+    fn add_table(&self, table: &Bound<'_, PyAny>) -> PyResult<()> {
+        let spec = crate::turbo::overlay_cf_tables::py::spec_of(table)?;
+        let parsed = parse_tables(PyList::new(table.py(), [spec])?.as_any())?;
+        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        for t in parsed {
+            ov.add_table(&self.sheet_name, t).map_err(turbo_err_to_py)?;
+        }
+        Ok(())
+    }
+
+    /// `{displayName: ref}` for existing and added tables (openpyxl
+    /// `ws.tables` is dict-like keyed by name).
+    #[getter]
+    fn tables<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let d = PyDict::new(py);
+        for (name, r) in ov.sheet_tables(&self.sheet_name).map_err(turbo_err_to_py)? {
+            d.set_item(name, r)?;
+        }
+        Ok(d)
     }
 
     fn __getitem__<'py>(&self, py: Python<'py>, key: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {

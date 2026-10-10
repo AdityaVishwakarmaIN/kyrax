@@ -228,9 +228,19 @@ pub fn write_table(t: &TableDef, id: usize) -> String {
     s.push_str("</tableColumns>");
     if let Some(style) = &t.style_name {
         let stripes = if t.show_row_stripes { "1" } else { "0" };
+        let flag = |on: bool, attr: &str| {
+            if on {
+                format!(r#" {attr}="1""#)
+            } else {
+                String::new()
+            }
+        };
         s.push_str(&format!(
-            r#"<tableStyleInfo name="{}" showRowStripes="{stripes}"/>"#,
-            escape_attr(style)
+            r#"<tableStyleInfo name="{}"{}{} showRowStripes="{stripes}"{}/>"#,
+            escape_attr(style),
+            flag(t.show_first_column, "showFirstColumn"),
+            flag(t.show_last_column, "showLastColumn"),
+            flag(t.show_column_stripes, "showColumnStripes"),
         ));
     }
     s.push_str("</table>");
