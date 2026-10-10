@@ -163,6 +163,41 @@ pub fn compare_eq(l: &CalcValue, r: &CalcValue, wildcards: bool) -> Result<bool,
     Ok(compare(l, r)? == Ordering::Equal)
 }
 
+/// Equality for a COUNTIF/SUMIF-family criterion (`=x` or bare `x`), as
+/// measured in Excel: a numeric criterion also matches numeric text
+/// (`COUNTIF(r, 7)` counts a text "7"), and a blank cell never equals a
+/// non-empty criterion (`COUNTIF(r, 0)` skips blanks).
+pub fn criteria_eq(v: &CalcValue, operand: &CalcValue, wildcards: bool) -> Result<bool, CalcError> {
+    if v.is_blank() {
+        return Ok(false);
+    }
+    if let (CalcValue::Text(t), CalcValue::Number(n)) = (v, operand) {
+        return Ok(t.trim().parse::<f64>().is_ok_and(|x| x == *n));
+    }
+    compare_eq(v, operand, wildcards)
+}
+
+/// `<>x` criterion. Not simply `!criteria_eq`: Excel counts blanks as
+/// different from any non-empty criterion, but compares numeric text by type,
+/// so `COUNTIF(r, "<>7")` counts a text "7" (measured).
+pub fn criteria_ne(v: &CalcValue, operand: &CalcValue, wildcards: bool) -> Result<bool, CalcError> {
+    if v.is_blank() {
+        return Ok(true);
+    }
+    compare_eq(v, operand, wildcards).map(|eq| !eq)
+}
+
+/// Relational criteria (`<`, `>=`, ...) only match a cell of the operand's own
+/// type in Excel: `COUNTIF(r, "<5")` skips blanks, text, and booleans.
+pub fn criteria_same_kind(v: &CalcValue, operand: &CalcValue) -> bool {
+    matches!(
+        (v, operand),
+        (CalcValue::Number(_), CalcValue::Number(_))
+            | (CalcValue::Text(_), CalcValue::Text(_))
+            | (CalcValue::Bool(_), CalcValue::Bool(_))
+    )
+}
+
 /// Match `text` against `pattern`, where `*` matches any run (including empty),
 /// `?` matches exactly one char, and `~` escapes the next character. Matching
 /// is case-insensitive via ASCII lowercase. No regex dependency.

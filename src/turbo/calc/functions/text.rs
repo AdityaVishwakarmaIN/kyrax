@@ -921,7 +921,304 @@ fn text_format(n: f64, format: &str) -> Result<String, CalcError> {
 fn text(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
     let n = coerce_number(&args[0].value(ctx)?)?;
     let format = coerce_text(&args[1].value(ctx)?)?;
-    Ok(CalcValue::text(text_format(n, &format)?))
+    Ok(CalcValue::text(text_format_sections(
+        n,
+        &format,
+        ctx.date1904,
+    )?))
+}
+
+/// Split a format code on `;` outside quotes and `\` escapes.
+fn split_sections(f: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut start, mut quoted, mut escaped) = (0, false, false);
+    for (i, ch) in f.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' && !quoted {
+            escaped = true;
+        } else if ch == '"' {
+            quoted = !quoted;
+        } else if ch == ';' && !quoted {
+            out.push(&f[start..i]);
+            start = i + 1;
+        }
+    }
+    out.push(&f[start..]);
+    out
+}
+
+/// Which unquoted format characters a section uses: (digit placeholders,
+/// date/time codes).
+fn section_kinds(sec: &str) -> (bool, bool) {
+    let (mut digits, mut date) = (false, false);
+    let (mut quoted, mut escaped) = (false, false);
+    for ch in sec.chars() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' && !quoted {
+            escaped = true;
+        } else if ch == '"' {
+            quoted = !quoted;
+        } else if !quoted {
+            match ch.to_ascii_lowercase() {
+                '0' | '#' => digits = true,
+                'y' | 'm' | 'd' | 'h' | 's' => date = true,
+                _ => {}
+            }
+        }
+    }
+    (digits, date)
+}
+
+/// TEXT with Excel's `pos;neg;zero` sections and date/time codes. A second
+/// section formats negatives without an automatic minus (`TEXT(-5,"0;(0)")`
+/// is `(5)`); a third formats zero. Numeric sections go through
+/// `text_format`; date/time sections through `text_format_date`.
+fn text_format_sections(n: f64, format: &str, date1904: bool) -> Result<String, CalcError> {
+    if !n.is_finite() {
+        return Err(CalcError::Num);
+    }
+    let sections = split_sections(format);
+    if sections.len() > 4 {
+        return Err(CalcError::Value);
+    }
+    let (sec, v) = if sections.len() == 1 {
+        (sections[0], n)
+    } else if n < 0.0 {
+        (sections[1], -n)
+    } else if n == 0.0 && sections.len() >= 3 {
+        (sections[2], n)
+    } else {
+        (sections[0], n)
+    };
+    // A leading colour code only affects display colour: TEXT drops it
+    // (measured TEXT(-5,"0.00;[Red]-0.00") = "-5.00"). Conditions stay refused.
+    let sec = strip_color(sec);
+    if sections.len() > 1 && sec.trim().is_empty() {
+        return Ok(String::new());
+    }
+    match section_kinds(sec) {
+        // Excel rejects mixing digit placeholders with date codes: measured
+        // TEXT(5, "0 days") = #VALUE!.
+        (true, true) => Err(CalcError::Value),
+        (false, true) => text_format_date(v, sec, date1904),
+        // A literal-only section of a multi-section code prints as written
+        // (TEXT(0,"0;-0;""zero""") = "zero").
+        (false, false) if sections.len() > 1 => Ok(parse_text_format(sec)?
+            .into_iter()
+            .map(|s| match s {
+                TextSeg::Lit(l) => l,
+                TextSeg::Num(_) => String::new(),
+            })
+            .collect()),
+        _ => text_format(v, sec),
+    }
+}
+
+/// Drop a leading `[Red]`-style colour code from a format section.
+fn strip_color(sec: &str) -> &str {
+    const COLORS: [&str; 8] = [
+        "black", "blue", "cyan", "green", "magenta", "red", "white", "yellow",
+    ];
+    if let Some(rest) = sec.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            let name = rest[..end].to_ascii_lowercase();
+            let is_color = COLORS.contains(&name.as_str())
+                || name
+                    .strip_prefix("color")
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+            if is_color {
+                return &rest[end + 1..];
+            }
+        }
+    }
+    sec
+}
+
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+const WEEKDAYS: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+
+#[derive(Clone, Copy, PartialEq)]
+enum DateTok {
+    Year,
+    Month,
+    Minute,
+    Day,
+    Hour,
+    Second,
+}
+
+/// Render a date/time format code (y, m, d, h, s runs, AM/PM, A/P, literal
+/// separators, quoted text, `\x` escapes). Elapsed `[h]`, fractional seconds
+/// and anything else unrecognised is `#VALUE!` rather than a guess. The
+/// serial is rounded to whole seconds first, as Excel displays it.
+fn text_format_date(v: f64, sec: &str, date1904: bool) -> Result<String, CalcError> {
+    if !(0.0..2_958_466.0).contains(&v) {
+        return Err(CalcError::Value);
+    }
+    enum Part {
+        Lit(String),
+        Tok(DateTok, usize),
+        AmPm(bool, bool), // (two-letter AM/PM form, lowercase a/p)
+    }
+    let chars: Vec<char> = sec.chars().collect();
+    let mut parts: Vec<Part> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        let lower = ch.to_ascii_lowercase();
+        let rest: String = chars[i..]
+            .iter()
+            .take(5)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if rest.starts_with("am/pm") {
+            parts.push(Part::AmPm(true, false));
+            i += 5;
+        } else if rest.starts_with("a/p") {
+            parts.push(Part::AmPm(false, ch == 'a'));
+            i += 3;
+        } else if matches!(lower, 'y' | 'm' | 'd' | 'h' | 's') {
+            let mut len = 0;
+            while i < chars.len() && chars[i].to_ascii_lowercase() == lower {
+                len += 1;
+                i += 1;
+            }
+            let tok = match lower {
+                'y' => DateTok::Year,
+                'm' => DateTok::Month,
+                'd' => DateTok::Day,
+                'h' => DateTok::Hour,
+                _ => DateTok::Second,
+            };
+            parts.push(Part::Tok(tok, len));
+        } else if ch == '"' {
+            let mut lit = String::new();
+            i += 1;
+            while i < chars.len() && chars[i] != '"' {
+                lit.push(chars[i]);
+                i += 1;
+            }
+            if i >= chars.len() {
+                return Err(CalcError::Value);
+            }
+            i += 1;
+            parts.push(Part::Lit(lit));
+        } else if ch == '\\' {
+            if i + 1 >= chars.len() {
+                return Err(CalcError::Value);
+            }
+            parts.push(Part::Lit(chars[i + 1].to_string()));
+            i += 2;
+        } else if " -/:,.()+$!^&'~{}<>=".contains(ch) {
+            parts.push(Part::Lit(ch.to_string()));
+            i += 1;
+        } else {
+            return Err(CalcError::Value);
+        }
+    }
+    // `m`/`mm` right after an hour or right before a second is minutes.
+    let toks: Vec<usize> = (0..parts.len())
+        .filter(|&k| matches!(parts[k], Part::Tok(..)))
+        .collect();
+    for (j, &k) in toks.iter().enumerate() {
+        if let Part::Tok(DateTok::Month, len) = parts[k] {
+            let prev_hour = j > 0 && matches!(parts[toks[j - 1]], Part::Tok(DateTok::Hour, _));
+            let next_sec = matches!(toks.get(j + 1), Some(&n) if matches!(parts[n], Part::Tok(DateTok::Second, _)));
+            if len <= 2 && (prev_hour || next_sec) {
+                parts[k] = Part::Tok(DateTok::Minute, len);
+            }
+        }
+    }
+    let twelve_hour = parts.iter().any(|p| matches!(p, Part::AmPm(..)));
+
+    let total = (v * 86400.0).round() as i64;
+    let day = total.div_euclid(86400);
+    let secs = total.rem_euclid(86400);
+    let (hour, minute, second) = (secs / 3600, secs / 60 % 60, secs % 60);
+    let (y, m, d) = super::datetime::serial_to_civil(day as f64, date1904);
+    // Weekday from the serial, as WEEKDAY does (serial 1 = Sunday in 1900).
+    let dow = (if date1904 { day + 5 } else { day - 1 }).rem_euclid(7) as usize;
+    let month_name = MONTHS[(m.clamp(1, 12) - 1) as usize];
+
+    let mut out = String::new();
+    for p in &parts {
+        match *p {
+            Part::Lit(ref s) => out.push_str(s),
+            Part::AmPm(two, lower) => {
+                let s = match (two, hour < 12) {
+                    (true, true) => "AM",
+                    (true, false) => "PM",
+                    (false, true) => "A",
+                    (false, false) => "P",
+                };
+                if lower {
+                    out.push_str(&s.to_ascii_lowercase());
+                } else {
+                    out.push_str(s);
+                }
+            }
+            Part::Tok(tok, len) => {
+                let s = match tok {
+                    DateTok::Year if len <= 2 => format!("{:02}", y % 100),
+                    DateTok::Year => format!("{y:04}"),
+                    DateTok::Month => match len {
+                        1 => m.to_string(),
+                        2 => format!("{m:02}"),
+                        3 => month_name[..3].to_string(),
+                        5 => month_name[..1].to_string(),
+                        _ => month_name.to_string(),
+                    },
+                    DateTok::Day => match len {
+                        1 => d.to_string(),
+                        2 => format!("{d:02}"),
+                        3 => WEEKDAYS[dow][..3].to_string(),
+                        _ => WEEKDAYS[dow].to_string(),
+                    },
+                    DateTok::Hour => {
+                        let h = if twelve_hour {
+                            (hour + 11) % 12 + 1
+                        } else {
+                            hour
+                        };
+                        if len == 1 {
+                            h.to_string()
+                        } else {
+                            format!("{h:02}")
+                        }
+                    }
+                    DateTok::Minute if len == 1 => minute.to_string(),
+                    DateTok::Minute => format!("{minute:02}"),
+                    DateTok::Second if len == 1 => second.to_string(),
+                    DateTok::Second => format!("{second:02}"),
+                };
+                out.push_str(&s);
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn concat(ctx: &FuncCtx, args: &[FuncArg]) -> Result<CalcValue, CalcError> {
@@ -2635,8 +2932,14 @@ mod tests {
             call(&TEXT, vec![num(5.0), txt("0/4")]),
             Err(CalcError::Value)
         );
+        // `;` sections are supported now (Excel: TEXT(5,"0;0") = "5").
         assert_eq!(
             call(&TEXT, vec![num(5.0), txt("0;0")]),
+            Ok(CalcValue::text("5"))
+        );
+        // Digit placeholders mixed with date codes: Excel gives #VALUE!.
+        assert_eq!(
+            call(&TEXT, vec![num(5.0), txt("0 days")]),
             Err(CalcError::Value)
         );
         assert_eq!(

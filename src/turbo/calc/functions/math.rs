@@ -6,7 +6,9 @@
 // `math::register(&mut r)` call site in `build()` are already final.
 // See functions/mod.rs for the worked ABS template.
 use super::{FuncArg, FuncCtx, FuncSpec, Registry};
-use crate::turbo::calc::coerce::{coerce_number, coerce_text, compare, compare_eq};
+use crate::turbo::calc::coerce::{
+    coerce_number, coerce_text, compare, criteria_eq, criteria_ne, criteria_same_kind,
+};
 use crate::turbo::calc::value::{ArrayValue, CalcError, CalcValue};
 use std::cmp::Ordering;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -268,6 +270,14 @@ enum RoundMode {
 }
 
 fn apply_mode(scaled: f64, mode: RoundMode) -> f64 {
+    // Excel works to 15 significant digits: 1.005*100 is 100.49999999999999
+    // in binary but Excel sees 100.5, so ROUND(1.005,2) = 1.01 and
+    // ROUNDDOWN(4.35,2) = 4.35. Snap the scaled value to 15 digits first.
+    let scaled = if scaled.is_finite() && scaled != 0.0 {
+        format!("{scaled:.14e}").parse::<f64>().unwrap_or(scaled)
+    } else {
+        scaled
+    };
     match mode {
         RoundMode::HalfAway => scaled.round(),
         RoundMode::AwayFromZero => {
@@ -380,8 +390,9 @@ fn criteria_match(v: &CalcValue, crit: &Criterion) -> Result<bool, CalcError> {
     }
     let wildcards = matches!(&crit.operand, CalcValue::Text(_));
     match crit.op {
-        Op::Eq => compare_eq(v, &crit.operand, wildcards),
-        Op::Ne => compare_eq(v, &crit.operand, wildcards).map(|eq| !eq),
+        Op::Eq => criteria_eq(v, &crit.operand, wildcards),
+        Op::Ne => criteria_ne(v, &crit.operand, wildcards),
+        _ if !criteria_same_kind(v, &crit.operand) => Ok(false),
         Op::Lt => compare(v, &crit.operand).map(|o| o == Ordering::Less),
         Op::Le => compare(v, &crit.operand).map(|o| o != Ordering::Greater),
         Op::Gt => compare(v, &crit.operand).map(|o| o == Ordering::Greater),
@@ -396,13 +407,11 @@ fn range_array(ctx: &FuncCtx, arg: &FuncArg) -> Result<ArrayValue, CalcError> {
     }
 }
 
+/// A SUMIF/AVERAGEIF(S) sum-range cell: only real numbers count. Text —
+/// even numeric text like "7" — and booleans are skipped, as in Excel.
 fn addable_number(v: &CalcValue) -> Result<Option<f64>, CalcError> {
     match v {
         CalcValue::Number(n) => Ok(Some(*n)),
-        CalcValue::Text(t) => match t.trim().parse::<f64>() {
-            Ok(n) if n.is_finite() => Ok(Some(n)),
-            _ => Ok(None),
-        },
         CalcValue::Error(e) => Err(*e),
         _ => Ok(None),
     }

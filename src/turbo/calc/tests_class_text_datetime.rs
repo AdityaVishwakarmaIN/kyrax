@@ -335,13 +335,19 @@ mod text_formatting {
 
     #[test]
     fn refuses_format_codes_it_cannot_reproduce_exactly() {
-        // A date code is an approximation, not an exact reproduction; refusal is the feature.
-        assert_eq!(error("=TEXT(45352,\"yyyy-mm-dd\")"), CalcError::Value);
-        assert_eq!(error("=TEXT(45352,\"mm/dd/yyyy\")"), CalcError::Value);
-        assert_eq!(error("=TEXT(45352,\"dd/mm/yyyy hh:mm\")"), CalcError::Value);
+        // Date codes and `;` sections are reproduced (Excel 16 measured).
+        assert_eq!(text("=TEXT(45352,\"yyyy-mm-dd\")"), "2024-03-01");
+        assert_eq!(text("=TEXT(45352,\"mm/dd/yyyy\")"), "03/01/2024");
+        assert_eq!(
+            text("=TEXT(45352,\"dd/mm/yyyy hh:mm\")"),
+            "01/03/2024 00:00"
+        );
+        assert_eq!(text("=TEXT(5,\"0.00;[Red]-0.00\")"), "5.00");
+        assert_eq!(text("=TEXT(-5,\"0.00;[Red]-0.00\")"), "-5.00");
+        // Still refused: scientific, text `@`, and `[..]` condition codes.
         assert_eq!(error("=TEXT(123,\"0.00E+00\")"), CalcError::Value);
         assert_eq!(error("=TEXT(5,\"@\")"), CalcError::Value);
-        assert_eq!(error("=TEXT(5,\"0.00;[Red]-0.00\")"), CalcError::Value);
+        assert_eq!(error("=TEXT(5,\"[<10]0.0;0\")"), CalcError::Value);
         // quoted literals are now reproduced exactly, as Excel does
         assert_eq!(text("=TEXT(5,\"0 \"\"units\"\"\")"), "5 units");
     }
@@ -357,7 +363,8 @@ mod text_formatting {
         assert_eq!(error("=TEXT(1)"), CalcError::Value);
         assert_eq!(error("=TEXT(1,\"0\",0)"), CalcError::Value);
         assert_eq!(error("=TEXT(1/0,\"0\")"), CalcError::Div0);
-        assert_eq!(error("=TEXT(1,\"yyyy\")"), CalcError::Value);
+        assert_eq!(text("=TEXT(1,\"yyyy\")"), "1900");
+        assert_eq!(error("=TEXT(-1,\"yyyy\")"), CalcError::Value);
     }
 }
 

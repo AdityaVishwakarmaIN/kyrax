@@ -76,7 +76,7 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 
 /// Civil date for a date-part serial in the given date system. The 1900
 /// system maps the phantom serial 60 to the non-existent 1900-02-29.
-fn serial_to_civil(serial: f64, date1904: bool) -> (i64, i64, i64) {
+pub(super) fn serial_to_civil(serial: f64, date1904: bool) -> (i64, i64, i64) {
     let s = clamp_serial(serial);
     if date1904 {
         civil_from_days(s + DAYS_1899_TO_1904 - DAYS_1899_TO_1970)
