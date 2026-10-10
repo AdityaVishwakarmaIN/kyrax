@@ -59,6 +59,8 @@ pub struct SheetOverlay {
     /// left by the last append. Valid only while both lengths are unchanged,
     /// which makes repeated appends O(row) instead of O(sheet).
     pub append_hint: Option<(u32, usize, usize)>,
+    /// Column width / row height overrides (see `overlay_layout`).
+    pub layout: crate::turbo::overlay_layout::SheetLayout,
 }
 
 impl SheetOverlay {
@@ -1418,6 +1420,8 @@ impl WorkbookOverlay {
             if let Some(xml) = sheet_xml {
                 if let Some(spliced) = splice_sheet_xml(&xml, overlay, resolved) {
                     let final_xml = splice_sheet_controls(spliced, overlay);
+                    let final_xml =
+                        crate::turbo::overlay_layout::apply_layout(final_xml, &overlay.layout);
                     rendered.insert(entry_name.clone(), final_xml);
                     continue;
                 }
@@ -1455,6 +1459,9 @@ impl WorkbookOverlay {
 
             let mut sst = SstBuilder::new();
             let xml = write_worksheet(&sheet, false, false, &mut sst);
+            // Sheet-level controls + layout apply to brand-new sheets too.
+            let xml = splice_sheet_controls(xml, overlay);
+            let xml = crate::turbo::overlay_layout::apply_layout(xml, &overlay.layout);
             rendered.insert(entry_name, xml);
         }
 

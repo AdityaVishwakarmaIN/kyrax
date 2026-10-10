@@ -25,6 +25,8 @@ pub mod overlay;
 pub mod overlay_drawings;
 /// Workbook-level overlay state: defined names, print areas/titles, sheet visibility.
 pub mod overlay_workbook;
+/// Column width / row height / merge / freeze / autoFilter layout for the overlay.
+pub mod overlay_layout;
 
 /// Dependent-feature fixups for row/column insert and delete (T1-1d).
 ///

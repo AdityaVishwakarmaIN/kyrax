@@ -24,6 +24,7 @@ use crate::error::{KyraxError, KyraxErrorKind};
 use crate::turbo::error::{TurboError, TurboResult};
 use crate::turbo::meta::{AutoFilterMeta, FilterColumnMeta};
 use crate::turbo::overlay::{WorkbookOverlay, hydrate_sheet_from_xml};
+use crate::turbo::overlay_layout::py as layout_py;
 use crate::turbo::scan::{MAX_GRID_COLS, MAX_GRID_ROWS, parse_ref_range_strict};
 use crate::turbo::structural::parse_range;
 use crate::turbo::zipmin::{ArchiveMap, read_entry};
@@ -5271,7 +5272,40 @@ impl PyEditableSheet {
     #[getter]
     fn freeze_panes(&self) -> Option<String> {
         let Ok(ov) = self.overlay.lock() else { return None; };
-        ov.sheet_overlays.get(&self.sheet_name).and_then(|so| so.freeze_panes.clone())
+        crate::turbo::overlay_layout::freeze_panes(&ov, &self.sheet_name)
+    }
+
+    #[getter]
+    fn column_dimensions(&self) -> layout_py::PyDimensionHolder {
+        layout_py::PyDimensionHolder {
+            sheet_name: self.sheet_name.clone(),
+            overlay: Arc::clone(&self.overlay),
+            rows: false,
+        }
+    }
+
+    #[getter]
+    fn row_dimensions(&self) -> layout_py::PyDimensionHolder {
+        layout_py::PyDimensionHolder {
+            sheet_name: self.sheet_name.clone(),
+            overlay: Arc::clone(&self.overlay),
+            rows: true,
+        }
+    }
+
+    #[getter]
+    fn merged_cells(&self) -> PyResult<layout_py::PyMergedCells> {
+        layout_py::PyMergedCells::load(&self.sheet_name, &self.overlay)
+    }
+
+    #[getter]
+    fn rows(&self) -> PyResult<PySheetRowIter> {
+        self.iter_rows(None, None, None, None, false)
+    }
+
+    #[getter]
+    fn columns(&self) -> PyResult<PySheetRowIter> {
+        self.iter_cols(None, None, None, None, false)
     }
 
     #[setter]
@@ -5298,10 +5332,13 @@ impl PyEditableSheet {
         Ok(())
     }
 
+    /// openpyxl-style `AutoFilter` (`.ref`); compares equal to its ref string.
     #[getter]
-    fn auto_filter(&self) -> Option<String> {
-        let Ok(ov) = self.overlay.lock() else { return None; };
-        ov.sheet_overlays.get(&self.sheet_name).and_then(|so| so.auto_filter.clone())
+    fn auto_filter(&self) -> layout_py::PyAutoFilter {
+        layout_py::PyAutoFilter {
+            sheet_name: self.sheet_name.clone(),
+            overlay: Arc::clone(&self.overlay),
+        }
     }
 
     #[setter]
@@ -6038,6 +6075,8 @@ impl PyEditableWorkbook {
             }
         }
         dest_overlay.is_dirty = true;
+        crate::turbo::overlay_layout::copy_layout(&mut ov, &src_name, &copy_title)
+            .map_err(turbo_err_to_py)?;
 
         Ok(PyEditableSheet {
             sheet_name: copy_title,
