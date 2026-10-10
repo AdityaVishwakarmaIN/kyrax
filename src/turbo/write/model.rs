@@ -330,6 +330,10 @@ pub struct TableDef {
     pub columns: Vec<String>,
     pub style_name: Option<String>,
     pub show_row_stripes: bool,
+    /// `tableStyleInfo` flags; emitted only when true (absent == false).
+    pub show_first_column: bool,
+    pub show_last_column: bool,
+    pub show_column_stripes: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -1088,6 +1088,9 @@ impl StyleEngine {
     pub fn cell_xfs(&self) -> &[StyleArray] {
         &self.cell_styles.items
     }
+    pub fn dxfs(&self) -> &[DxfDesc] {
+        &self.dxfs.items
+    }
 
     /// Register CF differential style → dxfId (rule 19).
     pub fn register_dxf(&mut self, dxf: DxfDesc) -> Option<u32> {

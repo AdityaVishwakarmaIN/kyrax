@@ -52,6 +52,11 @@ pub struct SheetOverlay {
     pub print_options: Option<PrintOptions>,
     pub data_validations: Vec<crate::turbo::write::DataValidation>,
     pub is_dirty: bool,
+    /// Conditional-formatting ranges added through the editable API (appended
+    /// after the sheet's existing ones at save; see `overlay_cf_tables`).
+    pub cf_new: Vec<crate::turbo::write::ConditionalFormatting>,
+    /// Tables added through the editable API (new `xl/tables/tableN.xml` parts).
+    pub tables_new: Vec<crate::turbo::write::TableDef>,
 }
 
 impl SheetOverlay {
@@ -1189,6 +1194,7 @@ impl WorkbookOverlay {
     }
 
     pub fn save(&mut self) -> TurboResult<Vec<u8>> {
+        crate::turbo::overlay_cf_tables::prepare_tables(self)?;
         let mut rewritten_parts: AHashMap<String, Vec<u8>> = AHashMap::default();
         let mut deleted_entry_paths: AHashSet<String> = AHashSet::default();
         let mut assigned_new_parts: AHashMap<String, String> = AHashMap::default();
@@ -1443,7 +1449,8 @@ impl WorkbookOverlay {
 
             let mut sst = SstBuilder::new();
             let xml = write_worksheet(&sheet, false, false, &mut sst);
-            rendered.insert(entry_name, xml);
+            // Sheet-level controls (DV, merges, panes, ...) apply here too.
+            rendered.insert(entry_name, splice_sheet_controls(xml, overlay));
         }
 
         for new_sheet in &self.new_sheets {
@@ -1722,6 +1729,16 @@ impl WorkbookOverlay {
             }
         }
 
+        // CF blocks + tables (after every other sheet splice; see overlay_cf_tables).
+        let dxf_add = crate::turbo::overlay_cf_tables::apply_cf_tables(
+            self,
+            &mut rendered,
+            &mut rewritten_parts,
+        )?;
+        if dxf_add.is_some() {
+            modified_entry_paths.insert("xl/styles.xml".to_string());
+        }
+
         let content_changed = !rendered.is_empty()
             || !table_edit.is_empty()
             || !pivot_table_edit.is_empty()
@@ -1892,12 +1909,24 @@ impl WorkbookOverlay {
                     new_xf_count,
                     orig_xf_count,
                 );
+                let spliced =
+                    crate::turbo::overlay_cf_tables::patch_styles_dxfs(spliced, dxf_add.as_ref());
                 zip.add("xl/styles.xml", &spliced);
             } else {
                 // No existing styles.xml (shouldn't happen for valid xlsx).
                 // Fallback: emit fresh styles.xml from engine.
                 let styles_xml = style_engine.emit_styles_xml();
+                let styles_xml = crate::turbo::overlay_cf_tables::patch_styles_dxfs(
+                    styles_xml,
+                    dxf_add.as_ref(),
+                );
                 zip.add("xl/styles.xml", &styles_xml);
+            }
+        } else if dxf_add.is_some() {
+            if let Some(orig) = inflate_entry(&self.archive_map, "xl/styles.xml")? {
+                let patched =
+                    crate::turbo::overlay_cf_tables::patch_styles_dxfs(orig, dxf_add.as_ref());
+                zip.add("xl/styles.xml", &patched);
             }
         }
 
@@ -2133,7 +2162,7 @@ fn strip_formula_cached_values(xml: &[u8]) -> Option<Vec<u8>> {
 
 /// Resolve the ZIP entry paths of every table part owned by `sheet_entry`,
 /// following the sheet's `tableParts` rids through its rels part.
-fn sheet_table_parts(map: &ArchiveMap, sheet_entry: &str, sheet_xml: &[u8]) -> Vec<String> {
+pub(crate) fn sheet_table_parts(map: &ArchiveMap, sheet_entry: &str, sheet_xml: &[u8]) -> Vec<String> {
     let tail = match memchr::memmem::find(sheet_xml, b"</sheetData>") {
         Some(p) => &sheet_xml[p + b"</sheetData>".len()..],
         None => sheet_xml,

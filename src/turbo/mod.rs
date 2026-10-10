@@ -21,6 +21,8 @@ mod zipmin;
 pub mod calc;
 pub mod mutate;
 pub mod overlay;
+/// Editable-path CF / data-validation / table authoring (save hooks).
+pub mod overlay_cf_tables;
 
 /// Dependent-feature fixups for row/column insert and delete (T1-1d).
 ///
