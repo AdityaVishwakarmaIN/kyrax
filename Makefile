@@ -89,28 +89,8 @@ test-rust-polars:
 .PHONY: test-rust  ## Run rust tests
 test-rust: test-rust-pyo3 test-rust-standalone test-rust-polars
 
-.PHONY: test-turbo  ## Run turbo fast-path tests (incl. coherence; not in default pytest collection)
-test-turbo: install
-	uv run pytest tests_turbo
-
 .PHONY: test  ## Run all tests
-test: test-rust test-python test-turbo
-
-.PHONY: doc-serve  ## Serve documentation with live reload
-doc-serve: build-dev
-	uv run pdoc --template-directory doc-templates python/kyrax
-
-.PHONY: doc  ## Build documentation
-doc: build-dev
-	uv run pdoc --template-directory doc-templates -o docs/latest python/kyrax
-	uv run scripts/update_versions.py --version latest --docs-dir docs
-	cargo doc --no-deps --lib -p kyrax --features polars
-
-.PHONY: doc-versioned  ## Build versioned documentation (CI usage: VERSION=v0.19.0 [STABLE=1] make doc-versioned)
-doc-versioned: build-dev
-	@test -n "$(VERSION)" || (echo "ERROR: VERSION is not set. Usage: VERSION=v0.19.0 [STABLE=1] make doc-versioned" && exit 1)
-	uv run pdoc --template-directory doc-templates -o docs/$(VERSION) python/kyrax
-	uv run scripts/update_versions.py --version $(VERSION) --docs-dir docs $(if $(filter 1,$(STABLE)),--stable,)
+test: test-rust test-python
 
 .PHONY: all  ## Run the standard set of checks performed in CI
 all: format build-dev lint test

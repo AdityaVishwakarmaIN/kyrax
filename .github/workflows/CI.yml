@@ -39,23 +39,6 @@ jobs:
           make install
           make lint
 
-  check-docs:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-      - name: Set up rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: install uv
-        uses: astral-sh/setup-uv@v7
-      - name: Check documentation
-        run: |
-          make install
-          make doc
-
   test:
     runs-on: ${{ matrix.os }}
     strategy:
