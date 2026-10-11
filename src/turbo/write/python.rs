@@ -18,7 +18,8 @@ use super::style_engine::{
     ProtDesc, SideDesc, StyleDesc,
 };
 use super::writer::{
-    date_to_serial, datetime_to_serial, save_workbook, save_workbook_stream, write_workbook_bytes,
+    date_to_serial, datetime_to_serial, save_workbook_owned, save_workbook_stream_owned,
+    write_workbook_bytes_owned,
 };
 use crate::error::{KyraxError, KyraxErrorKind};
 use crate::turbo::error::{TurboError, TurboResult};
@@ -4136,7 +4137,7 @@ pub fn py_write_excel_turbo(
         recalculate,
         vba_archive_path,
     )?;
-    py.detach(|| save_workbook(&wb, path))
+    py.detach(|| save_workbook_owned(wb, path))
         .map_err(write_err_to_py)
 }
 
@@ -4206,7 +4207,7 @@ pub fn py_write_excel_turbo_stream(
     )?;
     py.detach(|| {
         let file = std::fs::File::create(path)?;
-        save_workbook_stream(&wb, file)?;
+        save_workbook_stream_owned(wb, file)?;
         Ok::<(), std::io::Error>(())
     })
     .map_err(write_err_to_py)
@@ -4275,7 +4276,7 @@ pub fn py_write_excel_turbo_bytes<'py>(
         vba_archive_path,
     )?;
     let bytes = py
-        .detach(|| write_workbook_bytes(&wb))
+        .detach(|| write_workbook_bytes_owned(wb))
         .map_err(write_err_to_py)?;
     Ok(pyo3::types::PyBytes::new(py, &bytes))
 }
