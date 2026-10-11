@@ -7,6 +7,117 @@ use super::structural::CellRange;
 use super::styles::StyleTable;
 use arrow_array::Array;
 
+/// Leftmost occurrence of `needle` in `hay` — same result as
+/// `memchr::memmem::find`, without its per-call `Finder` construction.
+///
+/// `memmem::find` builds a fresh searcher (rare-byte ranking, SIMD pair setup)
+/// on EVERY call. The scanners call it several times per cell on haystacks of
+/// a few dozen bytes, where that setup cost dominated the profile (~45% of
+/// stream-read instructions). Here the first needle byte is located with a
+/// plain `memchr` and the rest compared directly, which is the cheap shape for
+/// the short hay/needle pairs of OOXML cell markup.
+#[inline]
+pub(crate) fn find_lit(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    let n = needle.len();
+    if n == 0 {
+        return Some(0);
+    }
+    if hay.len() < n {
+        return None;
+    }
+    let first = needle[0];
+    let last_start = hay.len() - n;
+    // Cell markup puts nearly every hit within a few bytes of the start
+    // (`<v>` at 0, `</v>` after a short number), where a plain loop beats the
+    // call into memchr. Match candidates starting in this prefix are compared
+    // in full, so a needle straddling the prefix edge is still found.
+    let probe = (last_start + 1).min(16);
+    let mut k = 0usize;
+    while k < probe {
+        if hay[k] == first && &hay[k..k + n] == needle {
+            return Some(k);
+        }
+        k += 1;
+    }
+    let mut i = probe;
+    while i <= last_start {
+        let p = i + memchr::memchr(first, &hay[i..=last_start])?;
+        if &hay[p..p + n] == needle {
+            return Some(p);
+        }
+        i = p + 1;
+    }
+    None
+}
+
+/// Parsed `<c ...>` open tag: `(gt, self_closing, col, t)` where `gt` is the
+/// index of the closing `>`, `col` the 0-based column from `@r` (`None` when
+/// absent/unparseable) and `t` the first `t="..."` value.
+pub(crate) type CellTag<'a> = (usize, bool, Option<usize>, Option<&'a [u8]>);
+
+/// Single-pass parse of the canonical cell tag Excel and XlsxWriter write:
+/// `<c r="B12"` then optionally `s="n"` / `t="x"` in any order, then `>` or
+/// `/>`. Anything else (other attributes, single quotes, unusual spacing)
+/// returns `None` and the caller uses the general path, so results are the same
+/// as `tag_end` + `cell_col` + `attr_value(.., b"t")` on every input.
+#[inline]
+pub(crate) fn fast_cell_tag(r: &[u8], s: usize) -> Option<CellTag<'_>> {
+    // r[s..s + 3] == b"<c " has been checked by the caller.
+    let mut i = s + 3;
+    if r.get(i..i + 3)? != b"r=\"" {
+        return None;
+    }
+    i += 3;
+    let ls = i;
+    while i < r.len() && r[i].is_ascii_alphabetic() {
+        i += 1;
+    }
+    let col1 = formula::letters_to_index(&r[ls..i])?;
+    let ds = i;
+    while i < r.len() && r[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == ds || *r.get(i)? != b'"' {
+        return None;
+    }
+    i += 1;
+    let col = Some((col1 - 1) as usize);
+    let mut ty: Option<&[u8]> = None;
+    let mut seen_s = false;
+    loop {
+        match *r.get(i)? {
+            b'>' => return Some((i, false, col, ty)),
+            b'/' => {
+                return if *r.get(i + 1)? == b'>' {
+                    Some((i + 1, true, col, ty))
+                } else {
+                    None
+                };
+            }
+            b' ' => {
+                let name = *r.get(i + 1)?;
+                if *r.get(i + 2)? != b'=' || *r.get(i + 3)? != b'"' {
+                    return None;
+                }
+                let vs = i + 4;
+                let ve = vs + r.get(vs..)?.iter().position(|&b| b == b'"')?;
+                match name {
+                    b't' if ty.is_none() => ty = Some(&r[vs..ve]),
+                    b's' if !seen_s => seen_s = true,
+                    _ => return None,
+                }
+                i = ve + 1;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// `memmem::Finder` for `</row>`, built once. Used where the haystack is a
+/// whole row (hundreds of bytes) and the SIMD searcher pays for itself.
+pub(crate) static ROW_CLOSE: std::sync::LazyLock<memchr::memmem::Finder<'static>> =
+    std::sync::LazyLock::new(|| memchr::memmem::Finder::new(b"</row>"));
+
 // ----------------------------------------------------------------------------
 // BitVec / Dict / StringArena / Column (from struct_proto)
 // ----------------------------------------------------------------------------
@@ -53,14 +164,14 @@ impl BitVec {
 
 #[derive(Clone)]
 pub(crate) struct Dict {
-    map: std::collections::HashMap<Box<[u8]>, u32>,
+    map: ahash::AHashMap<Box<[u8]>, u32>,
     offsets: Vec<usize>,
     bytes: Vec<u8>,
 }
 impl Dict {
     fn new() -> Self {
         Dict {
-            map: std::collections::HashMap::new(),
+            map: ahash::AHashMap::new(),
             offsets: vec![0],
             bytes: Vec::new(),
         }
@@ -125,9 +236,9 @@ pub(crate) fn parse_shared_strings(xml: &[u8]) -> StringArena {
     let mut offsets = vec![0usize];
     let mut bytes: Vec<u8> = Vec::new();
     let mut scratch: Vec<u8> = Vec::new();
-    let mut i = memchr::memmem::find(xml, b"<sst").unwrap_or(0);
+    let mut i = find_lit(xml, b"<sst").unwrap_or(0);
     let end = xml.len();
-    while let Some(so) = memchr::memmem::find(&xml[i..end], b"<si") {
+    while let Some(so) = find_lit(&xml[i..end], b"<si") {
         let si_start = i + so;
         let after = xml.get(si_start + 3).copied().unwrap_or(b'>');
         if !(after == b' ' || after == b'>' || after == b'/') {
@@ -144,9 +255,9 @@ pub(crate) fn parse_shared_strings(xml: &[u8]) -> StringArena {
             continue;
         }
         let si_close = si_tag_end
-            + memchr::memmem::find(&xml[si_tag_end..end], b"</si>").unwrap_or(end - si_tag_end);
+            + find_lit(&xml[si_tag_end..end], b"</si>").unwrap_or(end - si_tag_end);
         let mut p = si_tag_end;
-        while let Some(to) = memchr::memmem::find(&xml[p..si_close], b"<t") {
+        while let Some(to) = find_lit(&xml[p..si_close], b"<t") {
             let topen = p + to;
             let after = xml.get(topen + 2).copied().unwrap_or(b'>');
             if !(after == b' ' || after == b'>' || after == b'/') {
@@ -160,7 +271,7 @@ pub(crate) fn parse_shared_strings(xml: &[u8]) -> StringArena {
                 continue;
             }
             let tclose = topen_end
-                + memchr::memmem::find(&xml[topen_end..si_close], b"</t>")
+                + find_lit(&xml[topen_end..si_close], b"</t>")
                     .unwrap_or(si_close - topen_end);
             if topen_end + 1 > tclose || tclose > xml.len() {
                 break;
@@ -1601,18 +1712,32 @@ fn col_from_ref_bytes(bytes: &[u8]) -> Option<usize> {
     Some((col1 - 1) as usize)
 }
 
+/// Map a cell's `t` attribute value (if any) to its [`CellType`].
+#[inline]
+fn cell_type_from_t(t: Option<&[u8]>) -> CellType {
+    match t {
+        Some(b"inlineStr") => CellType::Inline,
+        Some(b"s") => CellType::Shared,
+        Some(b"str") => CellType::StrVal,
+        Some(b"b") => CellType::Bool,
+        Some(b"e") => CellType::Err,
+        Some(b"d") => CellType::IsoDate,
+        _ => CellType::Num,
+    }
+}
+
 /// Parse `r="A1"` (or ` r="A1"`) from a `<c ...>` attribute blob â†’ 0-based col.
 /// Fast path: when refs are contiguous the caller still just uses this col, which
 /// equals the sequential counter â€” no extra gap logic.
 #[inline]
 fn parse_cell_col_from_r(tag: &[u8]) -> Option<usize> {
     // Prefer ` r="` (normal OOXML); also accept leading `r="` at start of tag.
-    let vs = if let Some(o) = memchr::memmem::find(tag, b" r=\"") {
+    let vs = if let Some(o) = find_lit(tag, b" r=\"") {
         o + 4
     } else if tag.starts_with(b"r=\"") {
         3
     } else {
-        let o = memchr::memmem::find(tag, b"r=\"")?;
+        let o = find_lit(tag, b"r=\"")?;
         // Guard: attribute name must be exactly `r`, not `xr` / `pr` etc.
         if o > 0 {
             let p = tag[o - 1];
@@ -1625,15 +1750,53 @@ fn parse_cell_col_from_r(tag: &[u8]) -> Option<usize> {
     col_from_ref_bytes(&tag[vs..])
 }
 
+/// True when a `<row>` tag (bytes after `<row`, before `>`) carries ONLY the
+/// attributes `r`, `spans` and `x14ac:dyDescent`, each in strict
+/// ` name="value"` form. `parse_row_dim` returns `None` for such a tag (it only
+/// reports height/hidden/outline/collapsed/style attributes), so the caller
+/// can skip its eight attribute searches on the overwhelmingly common plain
+/// row. Anything unusual (single quotes, extra attributes, odd spacing) is
+/// NOT plain and takes the full `parse_row_dim` path, so results are unchanged.
+#[inline]
+fn row_tag_is_plain(tag: &[u8]) -> bool {
+    let mut i = 0usize;
+    let n = tag.len();
+    while i < n {
+        if tag[i] == b'/' && i + 1 == n {
+            return true;
+        }
+        if tag[i] != b' ' {
+            return false;
+        }
+        i += 1;
+        let ns = i;
+        while i < n && tag[i] != b'=' && tag[i] != b' ' && tag[i] != b'"' {
+            i += 1;
+        }
+        if !matches!(&tag[ns..i], b"r" | b"spans" | b"x14ac:dyDescent") {
+            return false;
+        }
+        if i + 1 >= n || tag[i] != b'=' || tag[i + 1] != b'"' {
+            return false;
+        }
+        i += 2;
+        match memchr::memchr(b'"', &tag[i..]) {
+            Some(o) => i += o + 1,
+            None => return false,
+        }
+    }
+    true
+}
+
 /// Parse `r="12"` from a `<row ...>` open tag â†’ 1-based sheet row number.
 #[inline]
 fn parse_row_r_attr(row_tag: &[u8]) -> Option<u32> {
-    let vs = if let Some(o) = memchr::memmem::find(row_tag, b" r=\"") {
+    let vs = if let Some(o) = find_lit(row_tag, b" r=\"") {
         o + 4
     } else if row_tag.starts_with(b"r=\"") {
         3
     } else {
-        let o = memchr::memmem::find(row_tag, b"r=\"")?;
+        let o = find_lit(row_tag, b"r=\"")?;
         if o > 0 {
             let p = row_tag[o - 1];
             if p.is_ascii_alphanumeric() || p == b'_' {
@@ -1815,7 +1978,7 @@ pub(crate) fn parse_region(
     }
 
     while i < hi {
-        let roff = match memchr::memmem::find(&x[i..hi], b"<row") {
+        let roff = match find_lit(&x[i..hi], b"<row") {
             Some(o) => i + o,
             None => break,
         };
@@ -1836,7 +1999,7 @@ pub(crate) fn parse_region(
         first_row = false;
 
         // Stream A: capture interesting row attrs once per `<row>` (no per-cell alloc).
-        if feat.row_meta {
+        if feat.row_meta && !row_tag_is_plain(row_tag) {
             if let Some(rd) = super::meta::parse_row_dim(row_tag, sheet_row) {
                 row_dims.push(rd);
             }
@@ -1872,7 +2035,7 @@ pub(crate) fn parse_region(
         }
 
         let row_close_rel =
-            memchr::memmem::find(&x[rtag_end..hi], b"</row>").unwrap_or(hi - rtag_end);
+            ROW_CLOSE.find(&x[rtag_end..hi]).unwrap_or(hi - rtag_end);
         let cells_end = rtag_end + row_close_rel;
 
         // For data rows, align local dr to sheet @r before reading cells.
@@ -1896,49 +2059,61 @@ pub(crate) fn parse_region(
         // Sequential column cursor; overridden by cell @r when present.
         let mut next_col = 0usize;
         while ci < cells_end {
-            let coff = match memchr::memmem::find(&x[ci..cells_end], b"<c") {
-                Some(o) => ci + o,
-                None => break,
+            // Cells are back to back, so the next `<c` is normally at `ci`.
+            let coff = if x[ci..cells_end].starts_with(b"<c") {
+                ci
+            } else {
+                match find_lit(&x[ci..cells_end], b"<c") {
+                    Some(o) => ci + o,
+                    None => break,
+                }
             };
             let after = x.get(coff + 2).copied().unwrap_or(0);
             if !(after == b' ' || after == b'>' || after == b'/') {
                 ci = coff + 2;
                 continue;
             }
-            let ctag_end = coff + memchr::memchr(b'>', &x[coff..hi]).unwrap_or(hi - coff);
-            if ctag_end <= coff + 1 || ctag_end > x.len() {
-                break; // truncated cell open tag
+            // Canonical `<c r=".." [s=".."] [t=".."]>` tags are parsed in one
+            // pass (only when styles are off: the style index is read from the
+            // general path). Anything else takes the original code below.
+            let fast_tag = if !feat.styles && after == b' ' {
+                fast_cell_tag(&x[..hi], coff)
+            } else {
+                None
+            };
+            let (ctag_end, self_closing, col, ctype);
+            if let Some((gt, sc, fcol, fty)) = fast_tag {
+                ctag_end = gt;
+                self_closing = sc;
+                col = fcol.unwrap_or(next_col);
+                ctype = cell_type_from_t(fty);
+            } else {
+                ctag_end = coff + memchr::memchr(b'>', &x[coff..hi]).unwrap_or(hi - coff);
+                if ctag_end <= coff + 1 || ctag_end > x.len() {
+                    break; // truncated cell open tag
+                }
+                self_closing = x.get(ctag_end.saturating_sub(1)) == Some(&b'/');
+                let tag = &x[coff + 2..ctag_end];
+                // Honor @r when present (sparse rows); else sequential XML order.
+                col = if let Some(c) = parse_cell_col_from_r(tag) {
+                    c
+                } else {
+                    next_col
+                };
+                ctype = cell_type_from_t(match find_lit(tag, b" t=\"") {
+                    Some(o) => {
+                        let vs = o + 4;
+                        let ve = vs + memchr::memchr(b'"', &tag[vs..]).unwrap_or(tag.len() - vs);
+                        Some(&tag[vs..ve])
+                    }
+                    None => None,
+                });
             }
-            let self_closing = x.get(ctag_end.saturating_sub(1)) == Some(&b'/');
+            next_col = col + 1;
             let tag = &x[coff + 2..ctag_end];
 
-            // Honor @r when present (sparse rows); else sequential XML order.
-            let col = if let Some(c) = parse_cell_col_from_r(tag) {
-                c
-            } else {
-                next_col
-            };
-            next_col = col + 1;
-
-            let ctype = match memchr::memmem::find(tag, b" t=\"") {
-                Some(o) => {
-                    let vs = o + 4;
-                    let ve = vs + memchr::memchr(b'"', &tag[vs..]).unwrap_or(tag.len() - vs);
-                    match &tag[vs..ve] {
-                        b"inlineStr" => CellType::Inline,
-                        b"s" => CellType::Shared,
-                        b"str" => CellType::StrVal,
-                        b"b" => CellType::Bool,
-                        b"e" => CellType::Err,
-                        b"d" => CellType::IsoDate,
-                        _ => CellType::Num,
-                    }
-                }
-                None => CellType::Num,
-            };
-
             let sidx: u32 = if feat.styles {
-                match memchr::memmem::find(tag, b" s=\"") {
+                match find_lit(tag, b" s=\"") {
                     Some(o) => {
                         let vs = o + 4;
                         let ve = vs + memchr::memchr(b'"', &tag[vs..]).unwrap_or(tag.len() - vs);
@@ -1988,8 +2163,24 @@ pub(crate) fn parse_region(
                 continue;
             }
 
-            let cclose_rel = if ctag_end < hi {
-                memchr::memmem::find(&x[ctag_end..hi], b"</c>").unwrap_or(hi - ctag_end)
+            // Canonical body `<v>text</v></c>`: `text` is XML-escaped, so the
+            // first `<` after `<v>` is `</v>` and `</c>` follows it. That is
+            // also the leftmost `</c>`, so this is the same close position the
+            // general search below finds, without searching.
+            let canon_close = if ctag_end < hi && x[ctag_end + 1..hi].starts_with(b"<v>") {
+                x[ctag_end + 4..hi]
+                    .iter()
+                    .position(|&b| b == b'<')
+                    .map(|o| ctag_end + 4 + o)
+                    .filter(|&p| x[p..hi].starts_with(b"</v></c>"))
+                    .map(|p| p + 4)
+            } else {
+                None
+            };
+            let cclose_rel = if let Some(c) = canon_close {
+                c - ctag_end
+            } else if ctag_end < hi {
+                find_lit(&x[ctag_end..hi], b"</c>").unwrap_or(hi - ctag_end)
             } else {
                 0
             };
@@ -2001,7 +2192,7 @@ pub(crate) fn parse_region(
             let content = &x[ctag_end + 1..cend];
 
             if feat.formulas && !is_header {
-                if let Some(fo) = memchr::memmem::find(content, b"<f") {
+                if let Some(fo) = find_lit(content, b"<f") {
                     let fafter = content.get(fo + 2).copied().unwrap_or(b'>');
                     if fafter == b' ' || fafter == b'>' || fafter == b'/' {
                         let ftag_end =
@@ -2017,7 +2208,7 @@ pub(crate) fn parse_region(
                                 pat.push(b' ');
                                 pat.extend_from_slice(name);
                                 pat.extend_from_slice(b"=\"");
-                                let p = memchr::memmem::find(ftag, &pat)?;
+                                let p = find_lit(ftag, &pat)?;
                                 let vs = p + pat.len();
                                 let ve = vs + memchr::memchr(b'"', &ftag[vs..])?;
                                 Some(&ftag[vs..ve])
@@ -2026,7 +2217,7 @@ pub(crate) fn parse_region(
                             let ftext: &[u8] = if f_self_closing {
                                 b""
                             } else {
-                                let te = memchr::memmem::find(&content[ftag_end..], b"</f>")
+                                let te = find_lit(&content[ftag_end..], b"</f>")
                                     .map(|o| ftag_end + o)
                                     .unwrap_or(content.len());
                                 &content[ftag_end + 1..te]
@@ -2100,9 +2291,9 @@ pub(crate) fn parse_region(
 
             match ctype {
                 CellType::Shared => {
-                    let idx = if let Some(vo) = memchr::memmem::find(content, b"<v>") {
+                    let idx = if let Some(vo) = find_lit(content, b"<v>") {
                         let vs = vo + 3;
-                        let ve = memchr::memmem::find(&content[vs..], b"</v>")
+                        let ve = find_lit(&content[vs..], b"</v>")
                             .map(|o| vs + o)
                             .unwrap_or(content.len());
                         atoi(&content[vs..ve])
@@ -2132,7 +2323,7 @@ pub(crate) fn parse_region(
                 CellType::Inline => {
                     let mut decoded_buf = Vec::new();
                     let mut p = 0;
-                    while let Some(to) = memchr::memmem::find(&content[p..], b"<t") {
+                    while let Some(to) = find_lit(&content[p..], b"<t") {
                         let topen = p + to;
                         let after = content.get(topen + 2).copied().unwrap_or(b'>');
                         if !(after == b' ' || after == b'>' || after == b'/') {
@@ -2150,7 +2341,7 @@ pub(crate) fn parse_region(
                             continue;
                         }
                         let tclose = topen_end
-                            + memchr::memmem::find(&content[topen_end..], b"</t>")
+                            + find_lit(&content[topen_end..], b"</t>")
                                 .unwrap_or(content.len() - topen_end);
                         if topen_end + 1 <= tclose && tclose <= content.len() {
                             let raw = &content[topen_end + 1..tclose];
@@ -2172,9 +2363,9 @@ pub(crate) fn parse_region(
                     }
                 }
                 CellType::StrVal | CellType::Err => {
-                    let text: &[u8] = if let Some(vo) = memchr::memmem::find(content, b"<v>") {
+                    let text: &[u8] = if let Some(vo) = find_lit(content, b"<v>") {
                         let vs = vo + 3;
-                        let ve = memchr::memmem::find(&content[vs..], b"</v>")
+                        let ve = find_lit(&content[vs..], b"</v>")
                             .map(|o| vs + o)
                             .unwrap_or(content.len());
                         &content[vs..ve]
@@ -2203,9 +2394,9 @@ pub(crate) fn parse_region(
                     }
                 }
                 CellType::IsoDate => {
-                    let text: &[u8] = if let Some(vo) = memchr::memmem::find(content, b"<v>") {
+                    let text: &[u8] = if let Some(vo) = find_lit(content, b"<v>") {
                         let vs = vo + 3;
-                        let ve = memchr::memmem::find(&content[vs..], b"</v>")
+                        let ve = find_lit(&content[vs..], b"</v>")
                             .map(|o| vs + o)
                             .unwrap_or(content.len());
                         &content[vs..ve]
@@ -2230,9 +2421,9 @@ pub(crate) fn parse_region(
                     }
                 }
                 CellType::Bool => {
-                    let raw = if let Some(vo) = memchr::memmem::find(content, b"<v>") {
+                    let raw = if let Some(vo) = find_lit(content, b"<v>") {
                         let vs = vo + 3;
-                        let ve = memchr::memmem::find(&content[vs..], b"</v>")
+                        let ve = find_lit(&content[vs..], b"</v>")
                             .map(|o| vs + o)
                             .unwrap_or(content.len());
                         &content[vs..ve]
@@ -2252,9 +2443,9 @@ pub(crate) fn parse_region(
                     }
                 }
                 CellType::Num => {
-                    let raw = if let Some(vo) = memchr::memmem::find(content, b"<v>") {
+                    let raw = if let Some(vo) = find_lit(content, b"<v>") {
                         let vs = vo + 3;
-                        let ve = memchr::memmem::find(&content[vs..], b"</v>")
+                        let ve = find_lit(&content[vs..], b"</v>")
                             .map(|o| vs + o)
                             .unwrap_or(content.len());
                         &content[vs..ve]
@@ -2441,7 +2632,7 @@ fn parse_ref_component(s: &[u8]) -> Option<(u32, u32)> {
 }
 
 pub(crate) fn sheet_data_region(x: &[u8]) -> TurboResult<(usize, usize)> {
-    let sd = memchr::memmem::find(x, b"<sheetData")
+    let sd = find_lit(x, b"<sheetData")
         .ok_or_else(|| TurboError::Format("missing <sheetData> in worksheet".into()))?;
     let gt = memchr::memchr(b'>', &x[sd..])
         .ok_or_else(|| TurboError::Format("unclosed <sheetData".into()))?;
@@ -2450,7 +2641,7 @@ pub(crate) fn sheet_data_region(x: &[u8]) -> TurboResult<(usize, usize)> {
     if x[sd + gt - 1] == b'/' {
         return Ok((start, start));
     }
-    let end = memchr::memmem::find(&x[start..], b"</sheetData>")
+    let end = find_lit(&x[start..], b"</sheetData>")
         .map(|o| start + o)
         .unwrap_or(x.len());
     Ok((start, end))
@@ -2469,7 +2660,7 @@ pub(crate) fn parse_parallel(
     if nchunks > 1 {
         for k in 1..nchunks {
             let target = s + (e - s) * k / nchunks;
-            if let Some(o) = memchr::memmem::find(&xml[target..e], b"<row") {
+            if let Some(o) = find_lit(&xml[target..e], b"<row") {
                 let b = target + o;
                 if b > *bounds.last().unwrap() && b < e {
                     bounds.push(b);
@@ -3483,5 +3674,112 @@ mod tests {
         assert_eq!(d.value(0), -25509); // 1900-02-28 (serial 59, shifted)
         assert_eq!(d.value(1), -25508); // 1900-03-01 (serial 61)
         assert_eq!(d.value(2), -25509); // 1900-02-28 (serial 60, no shift)
+    }
+
+    // ---- A3: fast-path helpers must equal the general code on any input ----
+
+    fn lcg_bytes(seed: u64, alphabet: &[u8], len: usize) -> Vec<u8> {
+        let mut st = seed;
+        (0..len)
+            .map(|_| {
+                st = st.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                alphabet[((st >> 33) as usize) % alphabet.len()]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn find_lit_equals_memmem_find() {
+        let needles: [&[u8]; 6] = [b"<c", b"</c>", b"<v>", b"</v>", b"</row>", b" r=\""];
+        let alphabet = b"<>/cvrow \"=a1";
+        for seed in 0..400u64 {
+            let len = (seed as usize * 7) % 90;
+            let hay = lcg_bytes(seed, alphabet, len);
+            for n in needles {
+                assert_eq!(
+                    find_lit(&hay, n),
+                    memchr::memmem::find(&hay, n),
+                    "hay={:?} needle={:?}",
+                    String::from_utf8_lossy(&hay),
+                    String::from_utf8_lossy(n)
+                );
+            }
+        }
+        // Needle straddling the 16-byte probe edge, and at the very end.
+        for pos in 10..40usize {
+            let mut hay = vec![b'x'; 64];
+            hay[pos..pos + 4].copy_from_slice(b"</c>");
+            assert_eq!(find_lit(&hay, b"</c>"), Some(pos));
+        }
+        assert_eq!(find_lit(b"", b"<c"), None);
+        assert_eq!(find_lit(b"<", b"<c"), None);
+        assert_eq!(find_lit(b"abc", b""), Some(0));
+    }
+
+    #[test]
+    fn fast_cell_tag_equals_general_parse() {
+        // (tag text after `<c`, must the fast path accept it)
+        let cases: [(&str, bool); 14] = [
+            (" r=\"A1\">", true),
+            (" r=\"AB12\" t=\"s\">", true),
+            (" r=\"B2\" s=\"1\">", true),
+            (" r=\"B2\" s=\"1\" t=\"str\">", true),
+            (" r=\"B2\" t=\"b\" s=\"4\"/>", true),
+            (" r=\"C3\"/>", true),
+            (" t=\"s\" r=\"A1\">", false),
+            (" r=\"A1\" t=\"s\" t=\"str\">", false),
+            (" r='A1'>", false),
+            (" r=\"A1\" cm=\"1\">", false),
+            (" r=\"ABCD1\">", false),
+            (" r=\"A\">", false),
+            (" r=\"A1\" foo=\"a>b\">", false),
+            (" r=\"A1\"", false),
+        ];
+        for (tag, accepts) in cases {
+            let xml = format!("<c{tag}<v>1</v></c>");
+            let b = xml.as_bytes();
+            let fast = fast_cell_tag(b, 0);
+            assert_eq!(fast.is_some(), accepts, "{tag}");
+            if let Some((gt, sc, col, ty)) = fast {
+                let g = memchr::memchr(b'>', b).unwrap();
+                assert_eq!(gt, g, "{tag}");
+                assert_eq!(sc, b[g - 1] == b'/', "{tag}");
+                let t = &b[2..g];
+                assert_eq!(col, parse_cell_col_from_r(t), "{tag}");
+                let want_ty = find_lit(t, b" t=\"").map(|o| {
+                    let vs = o + 4;
+                    &t[vs..vs + memchr::memchr(b'"', &t[vs..]).unwrap()]
+                });
+                assert_eq!(ty, want_ty, "{tag}");
+            }
+        }
+    }
+
+    #[test]
+    fn plain_row_tags_have_no_row_dim() {
+        let plain = [
+            " r=\"1\"",
+            " r=\"12\" spans=\"1:8\"",
+            " r=\"12\" spans=\"1:8\" x14ac:dyDescent=\"0.25\"",
+            "",
+            "/",
+            " r=\"5\"/",
+        ];
+        for t in plain {
+            assert!(row_tag_is_plain(t.as_bytes()), "{t}");
+            assert!(super::super::meta::parse_row_dim(t.as_bytes(), Some(1)).is_none(), "{t}");
+        }
+        let not_plain = [
+            " r=\"1\" ht=\"20\"",
+            " r=\"1\" hidden=\"1\"",
+            " r='1'",
+            " r=\"1\"  spans=\"1:2\"",
+            " r=\"1\" s=\"2\"",
+            " r=\"1\" spans=\"1:2",
+            " foo=\"1\"",
+        ];
+        for t in not_plain {
+            assert!(!row_tag_is_plain(t.as_bytes()), "{t}");
+        }
     }
 }
