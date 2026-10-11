@@ -64,6 +64,24 @@ def test_explicit_format_is_kept_and_plain_numbers_stay_numbers(tmp_path):
     assert ws["B1"].value == 45293.5
 
 
+def test_new_style_on_file_with_several_existing_styles(tmp_path):
+    # Regression: new xf indices must be shifted past the source's cellXfs.
+    from kyrax.styles import Font
+
+    p0, p1 = str(tmp_path / "s0.xlsx"), str(tmp_path / "s1.xlsx")
+    wb = kyrax.Workbook()
+    wb.active["A1"] = "x"
+    wb.active["B1"] = D
+    wb.save(p0)
+    wb = kyrax.load_workbook(p0)
+    wb.active["A1"].font = Font(bold=True)
+    wb.save(p1)
+    ws = kyrax.load_workbook(p1).active
+    assert ws["A1"].font.bold is True
+    assert ws["A1"].number_format == "General"
+    assert ws["B1"].value == dt.datetime(2024, 1, 2)
+
+
 def test_existing_comment_and_hyperlink_read_back(tmp_path):
     def build(ws):
         ws["A2"].comment = kyrax.Comment("hi", "me")

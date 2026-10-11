@@ -1266,6 +1266,16 @@ impl WorkbookOverlay {
 
         if styles_modified {
             modified_entry_paths.insert("xl/styles.xml".to_string());
+            // New xfs are appended after the source's cellXfs, so shift the
+            // resolved indices before any sheet XML is rendered with them.
+            if let Ok(Some(orig_xml)) = inflate_entry(&self.archive_map, "xl/styles.xml") {
+                let xf_offset = parse_pool_count(&orig_xml, b"cellXfs").saturating_sub(1);
+                for resolved in sheet_resolved_styles.values_mut() {
+                    for xf_idx in resolved.values_mut() {
+                        *xf_idx += xf_offset;
+                    }
+                }
+            }
         }
 
         let mut rendered: AHashMap<String, Vec<u8>> = AHashMap::default();
@@ -1884,14 +1894,7 @@ impl WorkbookOverlay {
                 let font_offset = orig_font_count.saturating_sub(boot_fonts);
                 let fill_offset = orig_fill_count.saturating_sub(boot_fills);
                 let border_offset = orig_border_count.saturating_sub(boot_borders);
-                let xf_offset = orig_xf_count.saturating_sub(boot_xfs);
-
-                // Rewrite resolved xf indices with offset applied.
-                for resolved in sheet_resolved_styles.values_mut() {
-                    for xf_idx in resolved.values_mut() {
-                        *xf_idx += xf_offset;
-                    }
-                }
+                // (xf indices were already shifted before sheet rendering.)
 
                 // Emit new records (skip bootstrap items).
                 let mut new_font_xml = Vec::new();
