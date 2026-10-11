@@ -100,16 +100,22 @@ impl Types {
         })
     }
 
-    /// True for a non-None cell of an accepted exact type.
+    /// True for a non-None cell of an accepted exact type whose conversion
+    /// cannot fail or warn mid-stream: ints must fit i64 (bigger ones take the
+    /// model path's f64 fallback, which can raise), strings must be within
+    /// Excel's 32767-char limit (longer ones warn, and warnings may be errors).
+    /// So a mid-write error on the fast path can only be an I/O error.
     #[inline]
     fn accepts(&self, o: &Bound<'_, PyAny>) -> bool {
         let t = o.get_type_ptr();
-        t == self.str_
-            || t == self.int_
-            || t == self.float_
-            || t == self.bool_
-            || t == self.datetime
-            || t == self.date
+        if t == self.str_ {
+            // len() is the code-point count, O(1) on str.
+            return o.len().is_ok_and(|n| n <= 32767);
+        }
+        if t == self.int_ {
+            return o.extract::<i64>().is_ok();
+        }
+        t == self.float_ || t == self.bool_ || t == self.datetime || t == self.date
     }
 }
 

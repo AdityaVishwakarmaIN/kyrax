@@ -268,3 +268,32 @@ def test_fast_path_is_taken(entry, tmp_path):
     slow = order(_write(entry, tmp_path, _model(sheets)))
     assert fast.index("xl/styles.xml") > fast.index("xl/worksheets/sheet1.xml")
     assert slow.index("xl/styles.xml") < slow.index("xl/worksheets/sheet1.xml")
+
+
+def _took_fast_path(data: bytes) -> bool:
+    """The fast path writes styles.xml after the worksheets; the model path before."""
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        names = zf.namelist()
+    return names.index("xl/styles.xml") > names.index("xl/worksheets/sheet1.xml")
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_fast_path_taken_and_identical_without_unsafe_cells(entry, tmp_path):
+    rows = ROWS_ALL[1:]  # drop the >i64 ints row
+    sheets = [{"name": "S", "rows": rows}]
+    assert _took_fast_path(_write(entry, tmp_path, sheets))
+    _assert_identical(entry, tmp_path, sheets)
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+@pytest.mark.parametrize("cell", [2**63, -(2**63) - 1, BIG, LONG])
+def test_cells_that_can_fail_midstream_use_model_path(entry, cell, tmp_path):
+    """Master condition 3: ints outside i64 and > 32767-char strings are
+    ineligible, so fast-path mid-write errors can only be I/O errors."""
+    sheets = [{"name": "S", "rows": [[1, "a"], [cell]]}]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        data = _write(entry, tmp_path, sheets)
+    assert not _took_fast_path(data)
+    ok = [{"name": "S", "rows": [[1, "a"], [2**63 - 1, "x" * 32767]]}]
+    assert _took_fast_path(_write(entry, tmp_path, ok))
