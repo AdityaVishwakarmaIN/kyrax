@@ -1,0 +1,1902 @@
+{
+ "meta": {
+  "date_utc": "2026-10-11 08:52 UTC",
+  "git": "ea9b33a",
+  "python": "3.13.16",
+  "platform": "Linux-6.18.44-fc-v114-x86_64-with-glibc2.39",
+  "cpus": 4,
+  "mode": "full",
+  "harness_runtime_s": 828.5,
+  "versions": {
+   "openpyxl": "3.1.5",
+   "XlsxWriter": "3.2.9",
+   "python-calamine": "0.8.3",
+   "pandas": "3.0.6",
+   "pyarrow": "23.0.0",
+   "numpy": "2.5.4",
+   "kyrax": "/home/user/kyrax/python/kyrax"
+  }
+ },
+ "rows": [
+  {
+   "task": "import",
+   "size": "small",
+   "rows": 1000,
+   "lib": "kyrax",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.029500000000000002,
+    "min": 0.028474999999999993,
+    "max": 0.032641,
+    "n": 5,
+    "noise_pct": 14.122033898305117
+   },
+   "cpu_total_s": {
+    "median": 0.068634,
+    "min": 0.06435099999999999,
+    "max": 0.070143,
+    "n": 5,
+    "noise_pct": 8.438966110091217
+   },
+   "rss_mb": {
+    "median": 20.06640625,
+    "min": 20.0078125,
+    "max": 20.14453125,
+    "n": 5,
+    "noise_pct": 0.6813315164492895
+   },
+   "wall_task_s": {
+    "median": 0.0302630839998983,
+    "min": 0.028629343000147855,
+    "max": 0.03443563699988772,
+    "n": 5,
+    "noise_pct": 19.1860618030845
+   },
+   "shape": [
+    0,
+    0
+   ],
+   "verify": "n/a",
+   "vs_best_cpu": {
+    "lib": "calamine",
+    "ratio": 29.41176470588234
+   },
+   "vs_best_rss": {
+    "lib": "calamine",
+    "ratio": 1.6053125
+   }
+  },
+  {
+   "task": "import",
+   "size": "small",
+   "rows": 1000,
+   "lib": "calamine",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.0010030000000000004,
+    "min": 0.0009530000000000025,
+    "max": 0.0011480000000000032,
+    "n": 5,
+    "noise_pct": 19.44167497507484
+   },
+   "cpu_total_s": {
+    "median": 0.031194,
+    "min": 0.028901,
+    "max": 0.031853,
+    "n": 5,
+    "noise_pct": 9.46335833814195
+   },
+   "rss_mb": {
+    "median": 12.5,
+    "min": 12.39453125,
+    "max": 12.55859375,
+    "n": 5,
+    "noise_pct": 1.3125
+   },
+   "wall_task_s": {
+    "median": 0.0010017810000135796,
+    "min": 0.0009528049999971699,
+    "max": 0.0016601119998540526,
+    "n": 5,
+    "noise_pct": 70.60495256421261
+   },
+   "shape": [
+    0,
+    0
+   ],
+   "verify": "n/a"
+  },
+  {
+   "task": "import",
+   "size": "small",
+   "rows": 1000,
+   "lib": "openpyxl",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.43853,
+    "min": 0.425932,
+    "max": 0.47217699999999996,
+    "n": 5,
+    "noise_pct": 10.545458691537632
+   },
+   "cpu_total_s": {
+    "median": 0.49943799999999994,
+    "min": 0.480798,
+    "max": 0.5322889999999999,
+    "n": 5,
+    "noise_pct": 10.30978820193896
+   },
+   "rss_mb": {
+    "median": 39.6796875,
+    "min": 39.640625,
+    "max": 39.734375,
+    "n": 5,
+    "noise_pct": 0.23626698168930893
+   },
+   "wall_task_s": {
+    "median": 0.16630283800009238,
+    "min": 0.1448977790000754,
+    "max": 0.19582750999984455,
+    "n": 5,
+    "noise_pct": 30.624691443774925
+   },
+   "shape": [
+    0,
+    0
+   ],
+   "verify": "n/a"
+  },
+  {
+   "task": "import",
+   "size": "small",
+   "rows": 1000,
+   "lib": "xlsxwriter",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.03893699999999999,
+    "min": 0.037976,
+    "max": 0.04270500000000001,
+    "n": 5,
+    "noise_pct": 12.14526029226701
+   },
+   "cpu_total_s": {
+    "median": 0.07309299999999999,
+    "min": 0.072307,
+    "max": 0.078767,
+    "n": 5,
+    "noise_pct": 8.838055627761904
+   },
+   "rss_mb": {
+    "median": 19.7265625,
+    "min": 19.65234375,
+    "max": 19.80078125,
+    "n": 5,
+    "noise_pct": 0.7524752475247525
+   },
+   "wall_task_s": {
+    "median": 0.039257328000076086,
+    "min": 0.038058902000102535,
+    "max": 0.04573763600001257,
+    "n": 5,
+    "noise_pct": 19.560001638153146
+   },
+   "shape": [
+    0,
+    0
+   ],
+   "verify": "n/a"
+  },
+  {
+   "task": "import",
+   "size": "small",
+   "rows": 1000,
+   "lib": "pandas",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.6343219999999999,
+    "min": 0.62257,
+    "max": 0.661032,
+    "n": 5,
+    "noise_pct": 6.0634819539602915
+   },
+   "cpu_total_s": {
+    "median": 0.775863,
+    "min": 0.735675,
+    "max": 0.7990249999999999,
+    "n": 5,
+    "noise_pct": 8.165101312989524
+   },
+   "rss_mb": {
+    "median": 100.05078125,
+    "min": 99.859375,
+    "max": 100.16015625,
+    "n": 5,
+    "noise_pct": 0.3006285870456409
+   },
+   "wall_task_s": {
+    "median": 0.35646349200010263,
+    "min": 0.3460224620000645,
+    "max": 0.39128653399984614,
+    "n": 5,
+    "noise_pct": 12.69809476022544
+   },
+   "shape": [
+    0,
+    0
+   ],
+   "verify": "n/a"
+  },
+  {
+   "task": "read_values",
+   "size": "small",
+   "rows": 1000,
+   "lib": "kyrax",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.36002900000000004,
+    "min": 0.326269,
+    "max": 0.40711600000000003,
+    "n": 5,
+    "noise_pct": 22.455691069330538
+   },
+   "cpu_total_s": {
+    "median": 0.4810269999999999,
+    "min": 0.449441,
+    "max": 0.5003070000000001,
+    "n": 5,
+    "noise_pct": 10.57445839838514
+   },
+   "rss_mb": {
+    "median": 67.0,
+    "min": 66.94921875,
+    "max": 67.01171875,
+    "n": 5,
+    "noise_pct": 0.09328358208955224
+   },
+   "wall_task_s": {
+    "median": 0.13892780499986657,
+    "min": 0.13494802800005345,
+    "max": 0.15746676300000217,
+    "n": 5,
+    "noise_pct": 16.208947517719974
+   },
+   "shape": [
+    1001,
+    8
+   ],
+   "verify": "n/a",
+   "vs_best_cpu": {
+    "lib": "calamine",
+    "ratio": 48.724996616592236
+   },
+   "vs_best_rss": {
+    "lib": "calamine",
+    "ratio": 4.970153578672848
+   }
+  },
+  {
+   "task": "read_values",
+   "size": "small",
+   "rows": 1000,
+   "lib": "calamine",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.007389,
+    "min": 0.0069619999999999994,
+    "max": 0.010339000000000001,
+    "n": 5,
+    "noise_pct": 45.703072134253645
+   },
+   "cpu_total_s": {
+    "median": 0.040715999999999995,
+    "min": 0.036571,
+    "max": 0.042373999999999995,
+    "n": 5,
+    "noise_pct": 14.252382355830623
+   },
+   "rss_mb": {
+    "median": 13.48046875,
+    "min": 13.3671875,
+    "max": 13.62890625,
+    "n": 5,
+    "noise_pct": 1.9414662416690813
+   },
+   "wall_task_s": {
+    "median": 0.007393668000077014,
+    "min": 0.006966671999862228,
+    "max": 0.01034338900012699,
+    "n": 5,
+    "noise_pct": 45.67038985561144
+   },
+   "shape": [
+    1001,
+    8
+   ],
+   "verify": "n/a"
+  },
+  {
+   "task": "read_values",
+   "size": "small",
+   "rows": 1000,
+   "lib": "openpyxl-ro",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.489046,
+    "min": 0.48064899999999994,
+    "max": 0.5094409999999999,
+    "n": 5,
+    "noise_pct": 5.887380737190363
+   },
+   "cpu_total_s": {
+    "median": 0.55131,
+    "min": 0.5391239999999999,
+    "max": 0.595899,
+    "n": 5,
+    "noise_pct": 10.298198835500902
+   },
+   "rss_mb": {
+    "median": 40.97265625,
+    "min": 40.96484375,
+    "max": 41.02734375,
+    "n": 5,
+    "noise_pct": 0.15254075698350653
+   },
+   "wall_task_s": {
+    "median": 0.20882832999996026,
+    "min": 0.20059113299998899,
+    "max": 0.23381010299999616,
+    "n": 5,
+    "noise_pct": 15.907310085759676
+   },
+   "shape": [
+    1001,
+    8
+   ],
+   "verify": "n/a"
+  },
+  {
+   "task": "read_values",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "kyrax",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 1.915615,
+    "min": 1.8966640000000001,
+    "max": 1.9592930000000002,
+    "n": 3,
+    "noise_pct": 3.269393902219394
+   },
+   "cpu_total_s": {
+    "median": 1.974404,
+    "min": 1.957068,
+    "max": 2.024171,
+    "n": 3,
+    "noise_pct": 3.3986458698422366
+   },
+   "rss_mb": {
+    "median": 125.1953125,
+    "min": 125.01953125,
+    "max": 125.30859375,
+    "n": 3,
+    "noise_pct": 0.23088923556942278
+   },
+   "wall_task_s": {
+    "median": 1.6411290229998485,
+    "min": 1.6239767900001425,
+    "max": 1.6899295400000938,
+    "n": 3,
+    "noise_pct": 4.0187425288107494
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "verify": "n/a",
+   "vs_best_cpu": {
+    "lib": "calamine",
+    "ratio": 3.014044241090183
+   },
+   "vs_best_rss": {
+    "lib": "openpyxl-ro",
+    "ratio": 1.492711098691258
+   }
+  },
+  {
+   "task": "read_values",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "calamine",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.635563,
+    "min": 0.6275350000000001,
+    "max": 0.642005,
+    "n": 3,
+    "noise_pct": 2.276721583855571
+   },
+   "cpu_total_s": {
+    "median": 0.6711469999999999,
+    "min": 0.6590139999999999,
+    "max": 0.682527,
+    "n": 3,
+    "noise_pct": 3.503405364249579
+   },
+   "rss_mb": {
+    "median": 84.20703125,
+    "min": 84.15234375,
+    "max": 84.296875,
+    "n": 3,
+    "noise_pct": 0.17163798302175629
+   },
+   "wall_task_s": {
+    "median": 0.6438449009999658,
+    "min": 0.6425793769999473,
+    "max": 0.65299618500012,
+    "n": 3,
+    "noise_pct": 1.6179064218718264
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "verify": "n/a"
+  },
+  {
+   "task": "read_values",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "openpyxl-ro",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 4.576995,
+    "min": 4.575494,
+    "max": 4.659953,
+    "n": 3,
+    "noise_pct": 1.84529369160333
+   },
+   "cpu_total_s": {
+    "median": 4.65865,
+    "min": 4.6540349999999995,
+    "max": 4.743879,
+    "n": 3,
+    "noise_pct": 1.9285415302716509
+   },
+   "rss_mb": {
+    "median": 83.87109375,
+    "min": 82.69140625,
+    "max": 83.953125,
+    "n": 3,
+    "noise_pct": 1.5043547110055424
+   },
+   "wall_task_s": {
+    "median": 4.337501082000017,
+    "min": 4.328777897000009,
+    "max": 4.411985093999874,
+    "n": 3,
+    "noise_pct": 1.9183210661355816
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "verify": "n/a"
+  },
+  {
+   "task": "read_values",
+   "size": "large",
+   "rows": 1000000,
+   "lib": "kyrax",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 16.07139,
+    "min": 15.589415999999998,
+    "max": 16.130595999999997,
+    "n": 3,
+    "noise_pct": 3.367350303862944
+   },
+   "cpu_total_s": {
+    "median": 16.140796,
+    "min": 15.654395000000001,
+    "max": 16.192109000000002,
+    "n": 3,
+    "noise_pct": 3.3313970389068857
+   },
+   "rss_mb": {
+    "median": 520.18359375,
+    "min": 520.109375,
+    "max": 520.5,
+    "n": 3,
+    "noise_pct": 0.07509367936500785
+   },
+   "wall_task_s": {
+    "median": 15.937590036000074,
+    "min": 15.384087693999845,
+    "max": 16.01228320400014,
+    "n": 3,
+    "noise_pct": 3.9415966189450122
+   },
+   "shape": [
+    1000001,
+    8
+   ],
+   "verify": "n/a",
+   "vs_best_cpu": {
+    "lib": "calamine",
+    "ratio": 2.4537578410019996
+   },
+   "vs_best_rss": {
+    "lib": "calamine",
+    "ratio": 0.7147450003757099
+   }
+  },
+  {
+   "task": "read_values",
+   "size": "large",
+   "rows": 1000000,
+   "lib": "calamine",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 6.549704999999999,
+    "min": 6.309253999999999,
+    "max": 6.602045,
+    "n": 3,
+    "noise_pct": 4.470292936857479
+   },
+   "cpu_total_s": {
+    "median": 6.587841,
+    "min": 6.349231,
+    "max": 6.6409,
+    "n": 3,
+    "noise_pct": 4.42738372100967
+   },
+   "rss_mb": {
+    "median": 727.7890625,
+    "min": 727.7421875,
+    "max": 727.84375,
+    "n": 3,
+    "noise_pct": 0.013954936290348552
+   },
+   "wall_task_s": {
+    "median": 6.592206622000049,
+    "min": 6.37041784500002,
+    "max": 6.660897852999824,
+    "n": 3,
+    "noise_pct": 4.406415403157881
+   },
+   "shape": [
+    1000001,
+    8
+   ],
+   "verify": "n/a"
+  },
+  {
+   "task": "read_df",
+   "size": "small",
+   "rows": 1000,
+   "lib": "kyrax",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.656425,
+    "min": 0.639223,
+    "max": 0.6928139999999999,
+    "n": 5,
+    "noise_pct": 8.16407053357199
+   },
+   "cpu_total_s": {
+    "median": 0.7910739999999999,
+    "min": 0.767212,
+    "max": 0.843467,
+    "n": 5,
+    "noise_pct": 9.639426905700347
+   },
+   "rss_mb": {
+    "median": 111.92578125,
+    "min": 111.83984375,
+    "max": 112.078125,
+    "n": 5,
+    "noise_pct": 0.21289219278958574
+   },
+   "wall_task_s": {
+    "median": 0.37468171599994093,
+    "min": 0.35394012000006114,
+    "max": 0.42133807999994133,
+    "n": 5,
+    "noise_pct": 17.98805682844978
+   },
+   "shape": [
+    1001,
+    8
+   ],
+   "verify": "n/a",
+   "vs_best_cpu": {
+    "lib": "pandas-calamine",
+    "ratio": 0.993376230701481
+   },
+   "vs_best_rss": {
+    "lib": "pandas-calamine",
+    "ratio": 1.0550482362471463
+   }
+  },
+  {
+   "task": "read_df",
+   "size": "small",
+   "rows": 1000,
+   "lib": "pandas-calamine",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.660802,
+    "min": 0.653992,
+    "max": 0.715881,
+    "n": 5,
+    "noise_pct": 9.365740418461199
+   },
+   "cpu_total_s": {
+    "median": 0.8210029999999999,
+    "min": 0.7874969999999999,
+    "max": 0.845017,
+    "n": 5,
+    "noise_pct": 7.006064533259944
+   },
+   "rss_mb": {
+    "median": 106.0859375,
+    "min": 105.9296875,
+    "max": 106.14453125,
+    "n": 5,
+    "noise_pct": 0.2025185948891671
+   },
+   "wall_task_s": {
+    "median": 0.37906496799996603,
+    "min": 0.36855178299992986,
+    "max": 0.4376674899999671,
+    "n": 5,
+    "noise_pct": 18.23320877281475
+   },
+   "shape": [
+    1001,
+    8
+   ],
+   "verify": "n/a"
+  },
+  {
+   "task": "read_df",
+   "size": "small",
+   "rows": 1000,
+   "lib": "pandas-openpyxl",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.7794279999999999,
+    "min": 0.755906,
+    "max": 0.82134,
+    "n": 5,
+    "noise_pct": 8.395130788219053
+   },
+   "cpu_total_s": {
+    "median": 0.937568,
+    "min": 0.901656,
+    "max": 0.9824229999999999,
+    "n": 5,
+    "noise_pct": 8.614521826683497
+   },
+   "rss_mb": {
+    "median": 110.7421875,
+    "min": 110.56640625,
+    "max": 110.78125,
+    "n": 5,
+    "noise_pct": 0.19400352733686066
+   },
+   "wall_task_s": {
+    "median": 0.5109722100000909,
+    "min": 0.47224512799994045,
+    "max": 0.5446286400001554,
+    "n": 5,
+    "noise_pct": 14.165841230426622
+   },
+   "shape": [
+    1001,
+    8
+   ],
+   "verify": "n/a"
+  },
+  {
+   "task": "read_df",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "kyrax",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 1.16508,
+    "min": 1.1285020000000001,
+    "max": 1.165422,
+    "n": 3,
+    "noise_pct": 3.1688811068767677
+   },
+   "cpu_total_s": {
+    "median": 1.2976860000000001,
+    "min": 1.256309,
+    "max": 1.317779,
+    "n": 3,
+    "noise_pct": 4.736893208372451
+   },
+   "rss_mb": {
+    "median": 153.7578125,
+    "min": 153.6015625,
+    "max": 153.8515625,
+    "n": 3,
+    "noise_pct": 0.1625933641583253
+   },
+   "wall_task_s": {
+    "median": 0.887785163999979,
+    "min": 0.8548215749999599,
+    "max": 0.891166468999927,
+    "n": 3,
+    "noise_pct": 4.093883911757728
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "verify": "n/a",
+   "vs_best_cpu": {
+    "lib": "pandas-calamine",
+    "ratio": 0.6854839184159526
+   },
+   "vs_best_rss": {
+    "lib": "pandas-openpyxl",
+    "ratio": 0.8858133045278603
+   }
+  },
+  {
+   "task": "read_df",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "pandas-calamine",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 1.6996459999999998,
+    "min": 1.6686869999999998,
+    "max": 1.7829190000000001,
+    "n": 3,
+    "noise_pct": 6.72092894638062
+   },
+   "cpu_total_s": {
+    "median": 1.9127449999999997,
+    "min": 1.9011419999999999,
+    "max": 1.9876189999999998,
+    "n": 3,
+    "noise_pct": 4.521094029784416
+   },
+   "rss_mb": {
+    "median": 227.140625,
+    "min": 226.94921875,
+    "max": 227.16796875,
+    "n": 3,
+    "noise_pct": 0.0963059778496251
+   },
+   "wall_task_s": {
+    "median": 1.4261032009999326,
+    "min": 1.4054164929998478,
+    "max": 1.5191715550001845,
+    "n": 3,
+    "noise_pct": 7.976636047137101
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "verify": "n/a"
+  },
+  {
+   "task": "read_df",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "pandas-openpyxl",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 5.985598,
+    "min": 5.7057459999999995,
+    "max": 6.049583999999999,
+    "n": 3,
+    "noise_pct": 5.744421860606072
+   },
+   "cpu_total_s": {
+    "median": 6.2512300000000005,
+    "min": 5.988196,
+    "max": 6.343611,
+    "n": 3,
+    "noise_pct": 5.685521089449593
+   },
+   "rss_mb": {
+    "median": 173.578125,
+    "min": 173.39453125,
+    "max": 173.625,
+    "n": 3,
+    "noise_pct": 0.1327752272931857
+   },
+   "wall_task_s": {
+    "median": 5.7529916270000285,
+    "min": 5.454358026000136,
+    "max": 5.851932150000039,
+    "n": 3,
+    "noise_pct": 6.910737052597147
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "verify": "n/a"
+  },
+  {
+   "task": "read_df",
+   "size": "large",
+   "rows": 1000000,
+   "lib": "kyrax",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 5.620989000000001,
+    "min": 5.602773999999999,
+    "max": 5.661194999999999,
+    "n": 3,
+    "noise_pct": 1.0393366718917267
+   },
+   "cpu_total_s": {
+    "median": 5.782288,
+    "min": 5.726637,
+    "max": 5.783548000000001,
+    "n": 3,
+    "noise_pct": 0.9842297720210473
+   },
+   "rss_mb": {
+    "median": 618.7578125,
+    "min": 618.66796875,
+    "max": 618.76171875,
+    "n": 3,
+    "noise_pct": 0.015151323846921125
+   },
+   "wall_task_s": {
+    "median": 5.3740780690000065,
+    "min": 5.334413798000014,
+    "max": 5.410985056999834,
+    "n": 3,
+    "noise_pct": 1.424825951850535
+   },
+   "shape": [
+    1000001,
+    8
+   ],
+   "verify": "n/a",
+   "vs_best_cpu": {
+    "lib": "pandas-calamine",
+    "ratio": 0.42465976345777834
+   },
+   "vs_best_rss": {
+    "lib": "pandas-calamine",
+    "ratio": 0.469255835999526
+   }
+  },
+  {
+   "task": "read_df",
+   "size": "large",
+   "rows": 1000000,
+   "lib": "pandas-calamine",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 13.236453000000001,
+    "min": 13.002428,
+    "max": 13.505624,
+    "n": 3,
+    "noise_pct": 3.8015924658970124
+   },
+   "cpu_total_s": {
+    "median": 13.945069,
+    "min": 13.714521000000001,
+    "max": 14.260313,
+    "n": 3,
+    "noise_pct": 3.9138709173830457
+   },
+   "rss_mb": {
+    "median": 1318.59375,
+    "min": 1318.5859375,
+    "max": 1318.65234375,
+    "n": 3,
+    "noise_pct": 0.005036141722952956
+   },
+   "wall_task_s": {
+    "median": 13.060876534000045,
+    "min": 12.80985921599995,
+    "max": 13.356732998000098,
+    "n": 3,
+    "noise_pct": 4.187113939684885
+   },
+   "shape": [
+    1000001,
+    8
+   ],
+   "verify": "n/a"
+  },
+  {
+   "task": "edit",
+   "size": "large",
+   "rows": 1000000,
+   "lib": "kyrax",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 6.701811,
+    "min": 6.6888499999999995,
+    "max": 7.088796,
+    "n": 3,
+    "noise_pct": 5.967730215012043
+   },
+   "cpu_total_s": {
+    "median": 6.76826,
+    "min": 6.759638,
+    "max": 7.156134,
+    "n": 3,
+    "noise_pct": 5.858167387186661
+   },
+   "rss_mb": {
+    "median": 958.9765625,
+    "min": 958.96875,
+    "max": 959.07421875,
+    "n": 3,
+    "noise_pct": 0.010998052937294805
+   },
+   "wall_task_s": {
+    "median": 6.781767995999871,
+    "min": 6.736186656999962,
+    "max": 7.1623202439998295,
+    "n": 3,
+    "noise_pct": 6.283517620349388
+   },
+   "shape": [
+    1000001,
+    9
+   ],
+   "verify": "ok (all values lossless)"
+  },
+  {
+   "task": "write",
+   "size": "small",
+   "rows": 1000,
+   "lib": "(data only)",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 9.000000000002062e-06,
+    "min": 8.999999999995123e-06,
+    "max": 1.1000000000000593e-05,
+    "n": 5,
+    "noise_pct": 22.222222222277903
+   },
+   "cpu_total_s": {
+    "median": 0.034585,
+    "min": 0.0331,
+    "max": 0.037344999999999996,
+    "n": 5,
+    "noise_pct": 12.2741072719387
+   },
+   "rss_mb": {
+    "median": 11.74609375,
+    "min": 11.6875,
+    "max": 11.83984375,
+    "n": 5,
+    "noise_pct": 1.2969737279680744
+   },
+   "wall_task_s": {
+    "median": 4.20999981542991e-06,
+    "min": 3.828999979305081e-06,
+    "max": 4.459000138012925e-06,
+    "n": 5,
+    "noise_pct": 14.964374972152124
+   },
+   "shape": [
+    1001,
+    8
+   ],
+   "verify": "n/a"
+  },
+  {
+   "task": "write",
+   "size": "small",
+   "rows": 1000,
+   "lib": "kyrax",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.040572,
+    "min": 0.039804,
+    "max": 0.057573000000000006,
+    "n": 5,
+    "noise_pct": 43.79621413782907
+   },
+   "cpu_total_s": {
+    "median": 0.08207899999999999,
+    "min": 0.079662,
+    "max": 0.11540399999999999,
+    "n": 5,
+    "noise_pct": 43.545852166814896
+   },
+   "rss_mb": {
+    "median": 27.2265625,
+    "min": 27.14453125,
+    "max": 27.2421875,
+    "n": 5,
+    "noise_pct": 0.3586800573888092
+   },
+   "wall_task_s": {
+    "median": 0.04084230499984187,
+    "min": 0.03983982099998684,
+    "max": 0.0580462919999718,
+    "n": 5,
+    "noise_pct": 44.577481608972484
+   },
+   "shape": [
+    1001,
+    8
+   ],
+   "verify": "ok (reopens, all values)",
+   "vs_best_cpu": {
+    "lib": "xlsxwriter",
+    "ratio": 0.44082750228171586
+   },
+   "vs_best_rss": {
+    "lib": "xlsxwriter-cm",
+    "ratio": 1.3047547734930738
+   }
+  },
+  {
+   "task": "write",
+   "size": "small",
+   "rows": 1000,
+   "lib": "kyrax-stream",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.04486899999999999,
+    "min": 0.038458999999999986,
+    "max": 0.05914699999999999,
+    "n": 5,
+    "noise_pct": 46.1075575564421
+   },
+   "cpu_total_s": {
+    "median": 0.089255,
+    "min": 0.07937499999999999,
+    "max": 0.11630599999999999,
+    "n": 5,
+    "noise_pct": 41.376953672063195
+   },
+   "rss_mb": {
+    "median": 27.1640625,
+    "min": 27.125,
+    "max": 27.2421875,
+    "n": 5,
+    "noise_pct": 0.4314063848144953
+   },
+   "wall_task_s": {
+    "median": 0.04563379999990502,
+    "min": 0.0383974199999102,
+    "max": 0.05958080400000654,
+    "n": 5,
+    "noise_pct": 46.42038138428189
+   },
+   "shape": [
+    1001,
+    8
+   ],
+   "verify": "ok (reopens, all values)",
+   "vs_best_cpu": {
+    "lib": "xlsxwriter",
+    "ratio": 0.4875157547046807
+   },
+   "vs_best_rss": {
+    "lib": "xlsxwriter-cm",
+    "ratio": 1.301759640584051
+   }
+  },
+  {
+   "task": "write",
+   "size": "small",
+   "rows": 1000,
+   "lib": "xlsxwriter",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.09203599999999999,
+    "min": 0.087031,
+    "max": 0.100687,
+    "n": 5,
+    "noise_pct": 14.837672215220135
+   },
+   "cpu_total_s": {
+    "median": 0.139673,
+    "min": 0.127235,
+    "max": 0.156581,
+    "n": 5,
+    "noise_pct": 21.010503103677884
+   },
+   "rss_mb": {
+    "median": 21.87109375,
+    "min": 21.828125,
+    "max": 21.95703125,
+    "n": 5,
+    "noise_pct": 0.5893909626719057
+   },
+   "wall_task_s": {
+    "median": 0.09711880500003645,
+    "min": 0.09069654600011745,
+    "max": 0.1084820309999941,
+    "n": 5,
+    "noise_pct": 18.31312174801777
+   },
+   "shape": [
+    1001,
+    8
+   ],
+   "verify": "ok (reopens, all values)"
+  },
+  {
+   "task": "write",
+   "size": "small",
+   "rows": 1000,
+   "lib": "xlsxwriter-cm",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.09712799999999999,
+    "min": 0.090564,
+    "max": 0.10306299999999999,
+    "n": 5,
+    "noise_pct": 12.86858578370808
+   },
+   "cpu_total_s": {
+    "median": 0.140228,
+    "min": 0.13272899999999999,
+    "max": 0.146948,
+    "n": 5,
+    "noise_pct": 10.139914995578636
+   },
+   "rss_mb": {
+    "median": 20.8671875,
+    "min": 20.8515625,
+    "max": 21.0,
+    "n": 5,
+    "noise_pct": 0.711344065892924
+   },
+   "wall_task_s": {
+    "median": 0.10026015700009339,
+    "min": 0.0934677489999558,
+    "max": 0.11287104699999873,
+    "n": 5,
+    "noise_pct": 19.352949946033746
+   },
+   "shape": [
+    1001,
+    8
+   ],
+   "verify": "ok (reopens, all values)"
+  },
+  {
+   "task": "write",
+   "size": "small",
+   "rows": 1000,
+   "lib": "openpyxl",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.5382669999999999,
+    "min": 0.530675,
+    "max": 0.569094,
+    "n": 5,
+    "noise_pct": 7.137535832588656
+   },
+   "cpu_total_s": {
+    "median": 0.613466,
+    "min": 0.596144,
+    "max": 0.6407149999999999,
+    "n": 5,
+    "noise_pct": 7.265439323450675
+   },
+   "rss_mb": {
+    "median": 43.609375,
+    "min": 43.5,
+    "max": 43.6875,
+    "n": 5,
+    "noise_pct": 0.4299534217126478
+   },
+   "wall_task_s": {
+    "median": 0.256889855000054,
+    "min": 0.24532408899995062,
+    "max": 0.28692749900005765,
+    "n": 5,
+    "noise_pct": 16.195038141968777
+   },
+   "shape": [
+    1001,
+    8
+   ],
+   "verify": "ok (reopens, all values)"
+  },
+  {
+   "task": "write",
+   "size": "small",
+   "rows": 1000,
+   "lib": "openpyxl-wo",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.552541,
+    "min": 0.5397829999999999,
+    "max": 0.644931,
+    "n": 5,
+    "noise_pct": 19.0299000436167
+   },
+   "cpu_total_s": {
+    "median": 0.620448,
+    "min": 0.598181,
+    "max": 0.72243,
+    "n": 5,
+    "noise_pct": 20.025691113517983
+   },
+   "rss_mb": {
+    "median": 41.23046875,
+    "min": 41.19921875,
+    "max": 41.25,
+    "n": 5,
+    "noise_pct": 0.1231643770724775
+   },
+   "wall_task_s": {
+    "median": 0.2728927380001096,
+    "min": 0.2588386550000905,
+    "max": 0.3770579730000918,
+    "n": 5,
+    "noise_pct": 43.32080027719675
+   },
+   "shape": [
+    1001,
+    8
+   ],
+   "verify": "ok (reopens, all values)"
+  },
+  {
+   "task": "write",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "(data only)",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 1.8000000000018e-05,
+    "min": 1.6000000000016e-05,
+    "max": 2.0999999999993246e-05,
+    "n": 3,
+    "noise_pct": 27.77777777762358
+   },
+   "cpu_total_s": {
+    "median": 0.441694,
+    "min": 0.393606,
+    "max": 0.44231899999999996,
+    "n": 3,
+    "noise_pct": 11.028675961185789
+   },
+   "rss_mb": {
+    "median": 46.7109375,
+    "min": 46.6640625,
+    "max": 46.734375,
+    "n": 3,
+    "noise_pct": 0.15052684395383845
+   },
+   "wall_task_s": {
+    "median": 1.1144999916723464e-05,
+    "min": 8.849000096233794e-06,
+    "max": 1.2097000080757425e-05,
+    "n": 3,
+    "noise_pct": 29.14311358270979
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "verify": "n/a"
+  },
+  {
+   "task": "write",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "kyrax",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 1.076229,
+    "min": 1.034548,
+    "max": 1.097941,
+    "n": 3,
+    "noise_pct": 5.890289148499067
+   },
+   "cpu_total_s": {
+    "median": 1.528128,
+    "min": 1.474059,
+    "max": 1.551025,
+    "n": 3,
+    "noise_pct": 5.0366199690078375
+   },
+   "rss_mb": {
+    "median": 404.1484375,
+    "min": 404.1015625,
+    "max": 404.25,
+    "n": 3,
+    "noise_pct": 0.036728460690881676
+   },
+   "wall_task_s": {
+    "median": 1.0887910779999856,
+    "min": 1.0394974060000095,
+    "max": 1.1046530090000033,
+    "n": 3,
+    "noise_pct": 5.984215366613672
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "verify": "ok (reopens, all values)",
+   "vs_best_cpu": {
+    "lib": "xlsxwriter",
+    "ratio": 0.2191767347375174
+   },
+   "vs_best_rss": {
+    "lib": "xlsxwriter-cm",
+    "ratio": 7.251331651247547
+   }
+  },
+  {
+   "task": "write",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "kyrax-stream",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 1.060009,
+    "min": 1.04718,
+    "max": 1.09335,
+    "n": 3,
+    "noise_pct": 4.355623395650419
+   },
+   "cpu_total_s": {
+    "median": 1.510402,
+    "min": 1.4703220000000001,
+    "max": 1.530171,
+    "n": 3,
+    "noise_pct": 3.962455028528817
+   },
+   "rss_mb": {
+    "median": 399.55078125,
+    "min": 399.44140625,
+    "max": 399.55859375,
+    "n": 3,
+    "noise_pct": 0.02932981375568265
+   },
+   "wall_task_s": {
+    "median": 1.060955568000054,
+    "min": 1.0508166419999725,
+    "max": 1.1055035910001152,
+    "n": 3,
+    "noise_pct": 5.154499457807636
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "verify": "ok (reopens, all values)",
+   "vs_best_cpu": {
+    "lib": "xlsxwriter",
+    "ratio": 0.21587349106220055
+   },
+   "vs_best_rss": {
+    "lib": "xlsxwriter-cm",
+    "ratio": 7.168839360807401
+   }
+  },
+  {
+   "task": "write",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "xlsxwriter",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 4.910325,
+    "min": 4.889411,
+    "max": 4.955907,
+    "n": 3,
+    "noise_pct": 1.3542077153752528
+   },
+   "cpu_total_s": {
+    "median": 5.579216000000001,
+    "min": 5.5072090000000005,
+    "max": 5.630614,
+    "n": 3,
+    "noise_pct": 2.211869911471416
+   },
+   "rss_mb": {
+    "median": 157.01953125,
+    "min": 156.91796875,
+    "max": 157.10546875,
+    "n": 3,
+    "noise_pct": 0.11941189641017987
+   },
+   "wall_task_s": {
+    "median": 4.997867887999973,
+    "min": 4.990103587000021,
+    "max": 5.050940843000035,
+    "n": 3,
+    "noise_pct": 1.217264188717062
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "verify": "ok (reopens, all values)"
+  },
+  {
+   "task": "write",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "xlsxwriter-cm",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 5.369712,
+    "min": 5.352492999999999,
+    "max": 5.467477,
+    "n": 3,
+    "noise_pct": 2.141343893303787
+   },
+   "cpu_total_s": {
+    "median": 5.785513,
+    "min": 5.778658,
+    "max": 5.875922999999999,
+    "n": 3,
+    "noise_pct": 1.6811819453175418
+   },
+   "rss_mb": {
+    "median": 55.734375,
+    "min": 55.69140625,
+    "max": 55.76953125,
+    "n": 3,
+    "noise_pct": 0.14017381553125877
+   },
+   "wall_task_s": {
+    "median": 5.485573486000021,
+    "min": 5.473409249000042,
+    "max": 5.600235074000011,
+    "n": 3,
+    "noise_pct": 2.3119884424782
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "verify": "ok (reopens, all values)"
+  },
+  {
+   "task": "write",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "openpyxl",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 11.567114,
+    "min": 11.264816,
+    "max": 11.646926,
+    "n": 3,
+    "noise_pct": 3.3034169110808524
+   },
+   "cpu_total_s": {
+    "median": 12.41426,
+    "min": 12.104372,
+    "max": 12.451929999999999,
+    "n": 3,
+    "noise_pct": 2.7996674791731393
+   },
+   "rss_mb": {
+    "median": 343.390625,
+    "min": 343.37890625,
+    "max": 343.40625,
+    "n": 3,
+    "noise_pct": 0.007962870273467716
+   },
+   "wall_task_s": {
+    "median": 11.421761458999981,
+    "min": 11.148631094999928,
+    "max": 11.507060156999842,
+    "n": 3,
+    "noise_pct": 3.1381242139099585
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "verify": "ok (reopens, all values)"
+  },
+  {
+   "task": "write",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "openpyxl-wo",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 11.083659,
+    "min": 10.976890000000001,
+    "max": 11.615086,
+    "n": 3,
+    "noise_pct": 5.757990208829042
+   },
+   "cpu_total_s": {
+    "median": 11.539928999999999,
+    "min": 11.443228,
+    "max": 12.042709,
+    "n": 3,
+    "noise_pct": 5.194841320080919
+   },
+   "rss_mb": {
+    "median": 76.1953125,
+    "min": 76.09765625,
+    "max": 76.26953125,
+    "n": 3,
+    "noise_pct": 0.22557161898902903
+   },
+   "wall_task_s": {
+    "median": 10.948044198999924,
+    "min": 10.881858988999966,
+    "max": 11.552717298000061,
+    "n": 3,
+    "noise_pct": 6.127654371923132
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "verify": "ok (reopens, all values)"
+  },
+  {
+   "task": "write",
+   "size": "large",
+   "rows": 1000000,
+   "lib": "(data only)",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 2.0000000000131024e-05,
+    "min": 1.8999999999991246e-05,
+    "max": 2.3000000000550358e-05,
+    "n": 3,
+    "noise_pct": 20.000000002664535
+   },
+   "cpu_total_s": {
+    "median": 4.340769,
+    "min": 4.2926,
+    "max": 4.38197,
+    "n": 3,
+    "noise_pct": 2.058851784096314
+   },
+   "rss_mb": {
+    "median": 363.59375,
+    "min": 363.5859375,
+    "max": 363.68359375,
+    "n": 3,
+    "noise_pct": 0.026858616244091103
+   },
+   "wall_task_s": {
+    "median": 8.49200000629935e-06,
+    "min": 8.115000127872918e-06,
+    "max": 9.342000112155802e-06,
+    "n": 3,
+    "noise_pct": 14.448892880036476
+   },
+   "shape": [
+    1000001,
+    8
+   ],
+   "verify": "n/a"
+  },
+  {
+   "task": "write",
+   "size": "large",
+   "rows": 1000000,
+   "lib": "kyrax",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 26.089771,
+    "min": 25.510367000000002,
+    "max": 26.916012000000002,
+    "n": 3,
+    "noise_pct": 5.387724560710018
+   },
+   "cpu_total_s": {
+    "median": 30.4917,
+    "min": 30.06408,
+    "max": 31.381541,
+    "n": 3,
+    "noise_pct": 4.320720064804513
+   },
+   "rss_mb": {
+    "median": 3807.12109375,
+    "min": 3807.10546875,
+    "max": 3807.23046875,
+    "n": 3,
+    "noise_pct": 0.0032833208327732876
+   },
+   "wall_task_s": {
+    "median": 26.368393005999906,
+    "min": 25.688385763000042,
+    "max": 27.21427642499998,
+    "n": 3,
+    "noise_pct": 5.786817048929506
+   },
+   "shape": [
+    1000001,
+    8
+   ],
+   "verify": "ok (reopens, spot rows)",
+   "vs_best_cpu": {
+    "lib": "xlsxwriter-cm",
+    "ratio": 0.48004760038492467
+   },
+   "vs_best_rss": {
+    "lib": "xlsxwriter-cm",
+    "ratio": 10.21542444474724
+   }
+  },
+  {
+   "task": "write",
+   "size": "large",
+   "rows": 1000000,
+   "lib": "kyrax-stream",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 23.87423,
+    "min": 23.340417,
+    "max": 26.939546999999997,
+    "n": 3,
+    "noise_pct": 15.075376252972342
+   },
+   "cpu_total_s": {
+    "median": 28.429163000000003,
+    "min": 28.152085,
+    "max": 31.367134,
+    "n": 3,
+    "noise_pct": 11.308982258816412
+   },
+   "rss_mb": {
+    "median": 3832.67578125,
+    "min": 3832.453125,
+    "max": 3832.7578125,
+    "n": 3,
+    "noise_pct": 0.007949733225298497
+   },
+   "wall_task_s": {
+    "median": 24.09415374299988,
+    "min": 23.584955046999994,
+    "max": 27.191726307999943,
+    "n": 3,
+    "noise_pct": 14.969487202047224
+   },
+   "shape": [
+    1000001,
+    8
+   ],
+   "verify": "ok (reopens, spot rows)",
+   "vs_best_cpu": {
+    "lib": "xlsxwriter-cm",
+    "ratio": 0.4392820014609473
+   },
+   "vs_best_rss": {
+    "lib": "xlsxwriter-cm",
+    "ratio": 10.283993836930204
+   }
+  },
+  {
+   "task": "write",
+   "size": "large",
+   "rows": 1000000,
+   "lib": "xlsxwriter-cm",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 54.348299999999995,
+    "min": 54.295783,
+    "max": 55.083687999999995,
+    "n": 3,
+    "noise_pct": 1.4497325583320821
+   },
+   "cpu_total_s": {
+    "median": 58.864443,
+    "min": 58.665228,
+    "max": 60.29804,
+    "n": 3,
+    "noise_pct": 2.7738511005701714
+   },
+   "rss_mb": {
+    "median": 372.68359375,
+    "min": 372.64453125,
+    "max": 372.75390625,
+    "n": 3,
+    "noise_pct": 0.029347951408177596
+   },
+   "wall_task_s": {
+    "median": 55.398240834000035,
+    "min": 55.3347395159999,
+    "max": 56.20537068999988,
+    "n": 3,
+    "noise_pct": 1.571586319155539
+   },
+   "shape": [
+    1000001,
+    8
+   ],
+   "verify": "ok (reopens, spot rows)"
+  },
+  {
+   "task": "edit",
+   "size": "small",
+   "rows": 1000,
+   "lib": "kyrax",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.044091,
+    "min": 0.038884999999999996,
+    "max": 0.051112,
+    "n": 5,
+    "noise_pct": 27.73128302828242
+   },
+   "cpu_total_s": {
+    "median": 0.083543,
+    "min": 0.075815,
+    "max": 0.09808599999999999,
+    "n": 5,
+    "noise_pct": 26.658128149575667
+   },
+   "rss_mb": {
+    "median": 25.41796875,
+    "min": 25.265625,
+    "max": 25.53125,
+    "n": 5,
+    "noise_pct": 1.045028430920547
+   },
+   "wall_task_s": {
+    "median": 0.04457713500005411,
+    "min": 0.039475419999916994,
+    "max": 0.07653099000003749,
+    "n": 5,
+    "noise_pct": 83.12685415981873
+   },
+   "shape": [
+    1001,
+    9
+   ],
+   "verify": "ok (all values lossless)",
+   "vs_best_cpu": {
+    "lib": "openpyxl",
+    "ratio": 0.07223686732736206
+   },
+   "vs_best_rss": {
+    "lib": "openpyxl",
+    "ratio": 0.5633278504025625
+   }
+  },
+  {
+   "task": "edit",
+   "size": "small",
+   "rows": 1000,
+   "lib": "openpyxl",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.610367,
+    "min": 0.585355,
+    "max": 0.642727,
+    "n": 5,
+    "noise_pct": 9.399590738031396
+   },
+   "cpu_total_s": {
+    "median": 0.6796409999999999,
+    "min": 0.6576209999999999,
+    "max": 0.724078,
+    "n": 5,
+    "noise_pct": 9.778250576407267
+   },
+   "rss_mb": {
+    "median": 45.12109375,
+    "min": 45.0234375,
+    "max": 45.203125,
+    "n": 5,
+    "noise_pct": 0.3982339191411999
+   },
+   "wall_task_s": {
+    "median": 0.33314757499988445,
+    "min": 0.30594091300008586,
+    "max": 0.36970940700007304,
+    "n": 5,
+    "noise_pct": 19.141215120659155
+   },
+   "shape": [
+    1001,
+    9
+   ],
+   "verify": "ok (all values lossless)"
+  },
+  {
+   "task": "edit",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "kyrax",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.726979,
+    "min": 0.679148,
+    "max": 0.7383299999999999,
+    "n": 3,
+    "noise_pct": 8.140812870798186
+   },
+   "cpu_total_s": {
+    "median": 0.7769079999999999,
+    "min": 0.721598,
+    "max": 0.780211,
+    "n": 3,
+    "noise_pct": 7.544393930812919
+   },
+   "rss_mb": {
+    "median": 114.3515625,
+    "min": 114.296875,
+    "max": 114.4296875,
+    "n": 3,
+    "noise_pct": 0.11614401858304298
+   },
+   "wall_task_s": {
+    "median": 0.7347937420001927,
+    "min": 0.694266141000071,
+    "max": 0.743392626000059,
+    "n": 3,
+    "noise_pct": 6.685751686760429
+   },
+   "shape": [
+    100001,
+    9
+   ],
+   "verify": "ok (all values lossless)",
+   "vs_best_cpu": {
+    "lib": "openpyxl",
+    "ratio": 0.041917636787196524
+   },
+   "vs_best_rss": {
+    "lib": "openpyxl",
+    "ratio": 0.25699687467078697
+   }
+  },
+  {
+   "task": "edit",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "openpyxl",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 17.343034,
+    "min": 17.146541,
+    "max": 17.512276,
+    "n": 3,
+    "noise_pct": 2.1088294008995243
+   },
+   "cpu_total_s": {
+    "median": 18.251686,
+    "min": 17.989066,
+    "max": 18.450597000000002,
+    "n": 3,
+    "noise_pct": 2.5287033756771886
+   },
+   "rss_mb": {
+    "median": 444.953125,
+    "min": 444.8828125,
+    "max": 444.97265625,
+    "n": 3,
+    "noise_pct": 0.020191733679811776
+   },
+   "wall_task_s": {
+    "median": 17.247445524000113,
+    "min": 17.03086863999988,
+    "max": 17.4481844070001,
+    "n": 3,
+    "noise_pct": 2.4195801425754113
+   },
+   "shape": [
+    100001,
+    9
+   ],
+   "verify": "ok (all values lossless)"
+  }
+ ]
+}
