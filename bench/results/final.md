@@ -1,13 +1,13 @@
 # kyrax cost-per-task: before / after
 
-- Before: commit `ea9b33a` build, idle machine, 2026-10-11 08:52 UTC (bench/results/baseline.md).
+- Original baseline: commit `ea9b33a` source (= 6db1236 source), 2026-10-11 08:52 UTC (bench/results/baseline.md).
 - After: commit `2067acf`, 2026-10-11 12:28 UTC, Intel(R) Xeon(R) Processor @ 2.80GHz; kyrax rows re-measured; competitor rows reused from the baseline run unless re-measured (see below).
-- Re-measured before-rows: commit `6db1236` build, 2026-10-11 12:25 UTC (same session as After, back-to-back). Rows marked † use it as Before; re-measured competitor rows (if any) replace the baseline competitor in the ratios.
-- Re-measured before-rows: commit `2067acf` build, 2026-10-11 12:28 UTC (same session as After, back-to-back). Rows marked † use it as Before; re-measured competitor rows (if any) replace the baseline competitor in the ratios.
-- Re-measured before-rows: commit `2067acf` build, 2026-10-11 12:29 UTC (same session as After, back-to-back). Rows marked † use it as Before; re-measured competitor rows (if any) replace the baseline competitor in the ratios.
-- Re-measured before-rows: commit `2067acf` build, 2026-10-11 12:29 UTC (same session as After, back-to-back). Rows marked † use it as Before; re-measured competitor rows (if any) replace the baseline competitor in the ratios.
-- Re-measured before-rows: commit `2067acf` build, 2026-10-11 12:30 UTC (same session as After, back-to-back). Rows marked † use it as Before; re-measured competitor rows (if any) replace the baseline competitor in the ratios.
-- Re-measured before-rows: commit `2067acf` build, 2026-10-11 12:32 UTC (same session as After, back-to-back). Rows marked † use it as Before; re-measured competitor rows (if any) replace the baseline competitor in the ratios.
+- Before (re-measured): commit `6db1236` build, 2026-10-11 12:25 UTC, same session as After, back-to-back. Rows marked † use it as Before (original baseline kept below).
+- Competitor re-measure (2026-10-11 12:28 UTC, same session): replaces the baseline competitor median in the ratios (table below).
+- Competitor re-measure (2026-10-11 12:29 UTC, same session): replaces the baseline competitor median in the ratios (table below).
+- Competitor re-measure (2026-10-11 12:29 UTC, same session): replaces the baseline competitor median in the ratios (table below).
+- Competitor re-measure (2026-10-11 12:30 UTC, same session): replaces the baseline competitor median in the ratios (table below).
+- Competitor re-measure (2026-10-11 12:32 UTC, same session): replaces the baseline competitor median in the ratios (table below).
 - CPU-s = user+sys of library import + task (all threads), median; RSS = peak (VmHWM).
   `[min-max]` = noise band over repeats. Ratio = kyrax / best competitor (>1 = kyrax worse).
 - Every number below is MEASURED with bench/run.py on this machine. No estimates in this table.
@@ -74,4 +74,5 @@
 ## Caveats
 
 - read_values: kyrax read_only returns dates as serial floats, booleans as 'TRUE'/'FALSE' strings and ints as floats; calamine/openpyxl return typed values (see baseline.md). Any read_values comparison carries this caveat.
-- Competitor medians come from the idle baseline run; kyrax After rows from the final run.
+- Ratios use the same-session competitor re-measure where listed above (write 1M xlsxwriter-cm: 1 repeat); other competitor medians come from the idle morning baseline.
+- The machine was restarted between the morning baseline and the final run, so Before and After are both taken from the final session.

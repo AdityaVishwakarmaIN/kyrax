@@ -81,3 +81,6 @@ failure also fails the gate.
 For an "after" table without re-measuring the (unchanged) competitors:
 `$BENCH_PYTHON bench/run.py --reuse bench/results/baseline.json --out after`
 (kyrax rows re-measured at all sizes, ~5 min; reused rows are labelled).
+
+Final before/after table: `bench/final.py BASELINE AFTER --rerun PRECHANGE [COMPETITOR...]`
+joins measured result files into `bench/results/final.{json,md}` (no new numbers).

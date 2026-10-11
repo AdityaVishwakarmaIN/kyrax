@@ -151,6 +151,14 @@
    }
   }
  ],
+ "rerun_kinds": [
+  "kyrax",
+  "competitor",
+  "competitor",
+  "competitor",
+  "competitor",
+  "competitor"
+ ],
  "rows": [
   {
    "task": "import",

@@ -73,7 +73,10 @@ def main():
             row["best_rss"] = {"lib": best_rss["lib"], "rss": best_rss["rss_mb"]["median"]}
         out_rows.append(row)
     data = {"baseline_meta": base["meta"], "after_meta": after["meta"],
-            "rerun_meta": [d["meta"] for d in reruns], "rows": out_rows,
+            "rerun_meta": [d["meta"] for d in reruns],
+            "rerun_kinds": ["kyrax" if any(r["lib"].startswith("kyrax") for r in d["rows"]) else "competitor"
+                            for d in reruns],
+            "rows": out_rows,
             "competitor_reruns": [
                 {"task": k[0], "size": k[1], "lib": k[2],
                  "orig_cpu": b_rows[k]["cpu_task_s"]["median"], "cpu": r["cpu_task_s"]["median"],
@@ -92,14 +95,18 @@ def render(d):
     L = [
         "# kyrax cost-per-task: before / after",
         "",
-        f"- Before: commit `{bm['git']}` build, idle machine, {bm['date_utc']} (bench/results/baseline.md).",
+        f"- Original baseline: commit `{bm['git']}` source (= 6db1236 source), {bm['date_utc']} "
+        "(bench/results/baseline.md).",
         f"- After: commit `{am['git']}`, {am['date_utc']}, {am.get('cpu_model', '?')}; kyrax rows "
         "re-measured; competitor rows reused from the baseline run unless re-measured (see below).",
     ]
-    for m in d["rerun_meta"]:
-        L.append(f"- Re-measured before-rows: commit `{m['git']}` build, {m['date_utc']} "
-                 "(same session as After, back-to-back). Rows marked † use it as Before; re-measured "
-                 "competitor rows (if any) replace the baseline competitor in the ratios.")
+    for m, kind in zip(d["rerun_meta"], d.get("rerun_kinds", ["kyrax"] * len(d["rerun_meta"]))):
+        if kind == "kyrax":
+            L.append(f"- Before (re-measured): commit `{m['git']}` build, {m['date_utc']}, same session as "
+                     "After, back-to-back. Rows marked † use it as Before (original baseline kept below).")
+        else:
+            L.append(f"- Competitor re-measure ({m['date_utc']}, same session): replaces the baseline "
+                     "competitor median in the ratios (table below).")
     L += [
         "- CPU-s = user+sys of library import + task (all threads), median; RSS = peak (VmHWM).",
         "  `[min-max]` = noise band over repeats. Ratio = kyrax / best competitor (>1 = kyrax worse).",
@@ -145,7 +152,10 @@ def render(d):
           "- read_values: kyrax read_only returns dates as serial floats, booleans as 'TRUE'/'FALSE' "
           "strings and ints as floats; calamine/openpyxl return typed values (see baseline.md). "
           "Any read_values comparison carries this caveat.",
-          "- Competitor medians come from the idle baseline run; kyrax After rows from the final run.",
+          "- Ratios use the same-session competitor re-measure where listed above (write 1M "
+          "xlsxwriter-cm: 1 repeat); other competitor medians come from the idle morning baseline.",
+          "- The machine was restarted between the morning baseline and the final run, so Before and "
+          "After are both taken from the final session.",
           ""]
     return "\n".join(L)
 
