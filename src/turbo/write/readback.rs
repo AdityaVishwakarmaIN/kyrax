@@ -187,7 +187,7 @@ pub fn sheet_extras(ov: &mut WorkbookOverlay, sheet: &str) -> Option<Arc<SheetEx
     Some(x)
 }
 
-fn load_extras(map: &ArchiveMap, target: &str) -> TurboResult<SheetExtras> {
+pub(crate) fn load_extras(map: &ArchiveMap, target: &str) -> TurboResult<SheetExtras> {
     let mut out = SheetExtras::default();
     let (dir, file) = target.rsplit_once('/').unwrap_or(("", target));
     let rels = match inflate_entry(map, &format!("{dir}/_rels/{file}.rels"))? {

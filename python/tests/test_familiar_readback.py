@@ -64,6 +64,35 @@ def test_explicit_format_is_kept_and_plain_numbers_stay_numbers(tmp_path):
     assert ws["B1"].value == 45293.5
 
 
+def test_links_and_comments_valid_xml_and_kept_on_edit(tmp_path):
+    # Regression: `r:` prefix was undeclared (Excel refused the file),
+    # legacyDrawing sat before pageMargins, and edits dropped old links/notes.
+    import xml.dom.minidom
+
+    from kyrax import Comment
+
+    p0, p1 = str(tmp_path / "h0.xlsx"), str(tmp_path / "h1.xlsx")
+    wb = kyrax.Workbook()
+    ws = wb.active
+    ws["A1"].hyperlink = "https://example.com"
+    ws["B1"].comment = Comment("hello", "me")
+    wb.save(p0)
+    wb = kyrax.load_workbook(p0)
+    wb.active["A2"].hyperlink = "https://example.org"
+    wb.active["B2"].comment = Comment("second", "me")
+    wb.save(p1)
+
+    with zipfile.ZipFile(p1) as z:
+        sheet = z.read("xl/worksheets/sheet1.xml").decode()
+        assert sum("comments" in n and n.endswith(".xml") for n in z.namelist()) == 1
+    xml.dom.minidom.parseString(sheet)  # namespace-well-formed
+    assert sheet.index("<pageMargins") < sheet.index("<legacyDrawing")
+    ws = kyrax.load_workbook(p1).active
+    assert ws["A1"].hyperlink == "https://example.com"
+    assert ws["A2"].hyperlink == "https://example.org"
+    assert (ws["B1"].comment, ws["B2"].comment) == ("hello", "second")
+
+
 def test_new_style_on_file_with_several_existing_styles(tmp_path):
     # Regression: new xf indices must be shifted past the source's cellXfs.
     from kyrax.styles import Font

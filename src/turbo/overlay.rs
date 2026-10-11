@@ -1585,6 +1585,19 @@ impl WorkbookOverlay {
 
                 if let Some(sheet_xml) = rendered.get_mut(&entry_name) {
                     let mut hl_tags = String::from("<hyperlinks>");
+                    // Keep source links on cells this session did not relink.
+                    let new_refs: AHashSet<String> = hl_items
+                        .iter()
+                        .map(|&(&(r, c), _)| {
+                            crate::turbo::range_a1(&crate::turbo::CellRange {
+                                r0: r - 1,
+                                c0: c - 1,
+                                r1: r - 1,
+                                c1: c - 1,
+                            })
+                        })
+                        .collect();
+                    hl_tags.push_str(&kept_hyperlinks(sheet_xml, &new_refs));
                     let mut link_id = max_id;
                     for (k, _) in &hl_items {
                         let (r, c) = *k;
@@ -1621,6 +1634,7 @@ impl WorkbookOverlay {
                         ],
                         b"</sheetData>",
                     );
+                    crate::turbo::overlay_drawings::ensure_r_namespace(sheet_xml);
                 }
             }
         }
@@ -1644,11 +1658,26 @@ impl WorkbookOverlay {
 
         for (sheet_name, overlay) in &self.sheet_overlays {
             if !overlay.comments.is_empty() {
-                comment_counter += 1;
-                let cid = comment_counter;
+                // A sheet that already has comments: rewrite its parts in
+                // place with old + new notes (no second comments rel).
+                let existing = self
+                    .archive_map
+                    .sheet_name_map
+                    .get(sheet_name)
+                    .map(|t| existing_comment_parts(&self.archive_map, t))
+                    .transpose()?
+                    .flatten();
+                let mut merged: AHashMap<(u32, u32), (String, String)> = AHashMap::default();
+                if existing.is_some() {
+                    let target = &self.archive_map.sheet_name_map[sheet_name];
+                    merged = crate::turbo::write::readback::load_extras(&self.archive_map, target)
+                        .map(|x| x.comments)
+                        .unwrap_or_default();
+                }
+                merged.extend(overlay.comments.iter().map(|(k, v)| (*k, v.clone())));
                 let mut comments_vec: Vec<crate::turbo::write::model::Comment> = Vec::new();
                 let mut comm_items: Vec<(&(u32, u32), &(String, String))> =
-                    overlay.comments.iter().collect();
+                    merged.iter().collect();
                 comm_items.sort_by_key(|item| *item.0);
                 for (&(r, c), (text, author)) in comm_items {
                     let ref_str = crate::turbo::range_a1(&crate::turbo::CellRange {
@@ -1670,6 +1699,13 @@ impl WorkbookOverlay {
                     });
                 }
                 let (comments_xml, vml) = crate::turbo::write::write_comments(&comments_vec);
+                if let Some((comments_path, vml_path)) = existing {
+                    rendered.insert(comments_path, comments_xml.into_bytes());
+                    rendered.insert(vml_path, vml.into_bytes());
+                    continue;
+                }
+                comment_counter += 1;
+                let cid = comment_counter;
                 let comments_path = format!("xl/comments/comment{cid}.xml");
                 let vml_path = format!("xl/drawings/commentsDrawing{cid}.vml");
                 rendered.insert(comments_path.clone(), comments_xml.into_bytes());
@@ -1724,12 +1760,35 @@ impl WorkbookOverlay {
                         .any(|w| w == b"<legacyDrawing")
                     {
                         let leg = format!("<legacyDrawing r:id=\"{v_rid}\"/>");
-                        splice_element(
+                        // Schema order: legacyDrawing follows drawing / page setup.
+                        splice_tail_control(
                             sheet_xml,
                             b"legacyDrawing",
-                            Some(leg.as_bytes()),
-                            &[b"</sheetData>", b"</worksheet>"],
+                            leg.as_bytes(),
+                            &[
+                                b"drawing",
+                                b"smartTags",
+                                b"ignoredErrors",
+                                b"cellWatches",
+                                b"customProperties",
+                                b"colBreaks",
+                                b"rowBreaks",
+                                b"headerFooter",
+                                b"pageSetup",
+                                b"pageMargins",
+                                b"printOptions",
+                                b"hyperlinks",
+                                b"dataValidations",
+                                b"conditionalFormatting",
+                                b"phoneticPr",
+                                b"mergeCells",
+                                b"autoFilter",
+                                b"sheetProtection",
+                                b"sheetData",
+                            ],
+                            b"</sheetData>",
                         );
+                        crate::turbo::overlay_drawings::ensure_r_namespace(sheet_xml);
                     }
                 }
             }
@@ -2854,6 +2913,68 @@ pub(crate) fn splice_element(
 /// Opening tags are matched at element boundaries and their complete element
 /// spans are used, so both paired and self-closing predecessors are supported.
 /// If no predecessor exists, insertion is immediately before `fallback_anchor`.
+/// `<hyperlink>` elements already in the sheet's `<hyperlinks>` block whose
+/// `ref` is not being replaced, concatenated verbatim.
+fn kept_hyperlinks(xml: &[u8], replaced: &AHashSet<String>) -> String {
+    let mut out = String::new();
+    let Some(start) = find_element(xml, b"hyperlinks", 0) else {
+        return out;
+    };
+    let end = memchr::memmem::find(&xml[start..], b"</hyperlinks>").map_or(xml.len(), |p| start + p);
+    let block = String::from_utf8_lossy(&xml[start..end]);
+    let mut rest = &block[..];
+    while let Some(p) = rest.find("<hyperlink ") {
+        let el = &rest[p..];
+        let Some(close) = el.find("/>").map(|e| e + 2).or_else(|| {
+            el.find("</hyperlink>").map(|e| e + "</hyperlink>".len())
+        }) else {
+            break;
+        };
+        let tag = &el[..close];
+        let r = tag
+            .split_once("ref=\"")
+            .and_then(|(_, t)| t.split_once('"'))
+            .map(|(v, _)| v);
+        if r.is_none_or(|r| !replaced.contains(r)) {
+            out.push_str(tag);
+        }
+        rest = &el[close..];
+    }
+    out
+}
+
+/// (comments part, VML part) of a source sheet that already has comments.
+fn existing_comment_parts(map: &ArchiveMap, target: &str) -> TurboResult<Option<(String, String)>> {
+    let (dir, file) = target.rsplit_once('/').unwrap_or(("", target));
+    let Some(rels_xml) = inflate_entry(map, &format!("{dir}/_rels/{file}.rels"))? else {
+        return Ok(None);
+    };
+    let rels = crate::turbo::structural::parse_rels(&rels_xml);
+    let base = format!("{dir}/");
+    let Some(comments) = rels
+        .values()
+        .find(|r| r.kind == crate::turbo::structural::RelKind::Comments)
+    else {
+        return Ok(None);
+    };
+    let Some(sheet_xml) = inflate_entry(map, target)? else {
+        return Ok(None);
+    };
+    let vml_rid = find_element(&sheet_xml, b"legacyDrawing", 0).and_then(|s| {
+        let tag = &sheet_xml[s..s + memchr::memchr(b'>', &sheet_xml[s..])?];
+        let t = String::from_utf8_lossy(tag);
+        let (_, v) = t.split_once("r:id=\"")?;
+        Some(v.split('"').next()?.to_string())
+    });
+    let Some(vml) = vml_rid.and_then(|id| rels.get(&id)) else {
+        return Ok(None);
+    };
+    Ok(Some((
+        crate::turbo::structural::resolve_zip_path(&base, &comments.target),
+        crate::turbo::structural::resolve_zip_path(&base, &vml.target),
+    )))
+}
+
 pub(crate) fn splice_tail_control(
     xml: &mut Vec<u8>,
     tag: &[u8],

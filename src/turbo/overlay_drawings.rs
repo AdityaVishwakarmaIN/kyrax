@@ -166,7 +166,7 @@ fn max_rid(rels: &str) -> u32 {
 }
 
 /// Make sure the worksheet root declares the `r:` prefix used by `<drawing>`.
-fn ensure_r_namespace(xml: &mut Vec<u8>) {
+pub(crate) fn ensure_r_namespace(xml: &mut Vec<u8>) {
     let Some(start) = find_element(xml, b"worksheet", 0) else {
         return;
     };
