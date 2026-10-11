@@ -9,16 +9,12 @@ if TYPE_CHECKING:
     import polars as pl
     import pyarrow as pa
 
+import os
+import sys
 from os.path import expanduser
-from pathlib import Path
 
-try:
-    import importlib.util
-
-    importlib.util.find_spec("pyarrow")
-    _PYARROW_AVAILABLE = True
-except ImportError:
-    _PYARROW_AVAILABLE = False
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from ._kyrax import (
     ArrowError,
@@ -109,6 +105,51 @@ except ImportError:
     range_boundaries = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     quote_sheetname = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
 
+_PYARROW_MISSING = object()
+_pyarrow_available_cache: bool | None = None
+
+
+def _pyarrow_available() -> bool:
+    """Whether ``pyarrow`` can be imported, decided lazily and cached.
+
+    ``importlib.util`` is imported here (not at ``import kyrax`` time) so the
+    cost is only paid on paths that need pyarrow anyway. ``sys.modules["pyarrow"]
+    = None`` (the standard way to block an import) is honoured, and so is any
+    ``sys.meta_path`` finder (editable / zip / custom importers).
+    """
+    global _pyarrow_available_cache
+    if _pyarrow_available_cache is None:
+        mod = sys.modules.get("pyarrow", _PYARROW_MISSING)
+        if mod is None:
+            _pyarrow_available_cache = False
+        elif mod is not _PYARROW_MISSING:
+            _pyarrow_available_cache = True
+        else:
+            import importlib.util
+
+            try:
+                _pyarrow_available_cache = importlib.util.find_spec("pyarrow") is not None
+            except (ValueError, ImportError):
+                _pyarrow_available_cache = False
+    return _pyarrow_available_cache
+
+
+def _expand_pathlike(p: typing.Any) -> typing.Any:
+    """Expand ``~`` for ``os.PathLike`` objects (``pathlib.Path`` etc.); str,
+    bytes, file-likes and ``None`` are returned untouched."""
+    if not isinstance(p, str | bytes) and hasattr(p, "__fspath__"):
+        return expanduser(os.fsdecode(os.fspath(p)))
+    return p
+
+
+def _expand_path(p: typing.Any) -> typing.Any:
+    """Expand ``~`` for ``str`` and ``os.PathLike`` inputs; leave anything else
+    (bytes content, file-likes, ``None``) untouched."""
+    if isinstance(p, str):
+        return expanduser(p)
+    return _expand_pathlike(p)
+
+
 def validate_excel(path: Path | str) -> dict:
     """Validate a workbook and return a structured report — never raises for a
     bad input.
@@ -121,8 +162,7 @@ def validate_excel(path: Path | str) -> dict:
         ``"dangling_rel"``, ``"overlapping_merge"``, ...) so callers can branch
         on it without string matching the message.
     """
-    if isinstance(path, Path):
-        path = expanduser(str(path))
+    path = _expand_pathlike(path)
     return _validate_excel(str(path))
 
 
@@ -141,10 +181,8 @@ def repair_excel(
     :return: ``{"wrote_output", "report", "actions"}`` where each action is
         ``{"code", "severity", "part", "description", "before", "after"}``.
     """
-    if isinstance(path, Path):
-        path = expanduser(str(path))
-    if isinstance(out_path, Path):
-        out_path = expanduser(str(out_path))
+    path = _expand_pathlike(path)
+    out_path = _expand_pathlike(out_path)
     return _repair_excel(str(path), str(out_path), severity=severity)
 
 
@@ -162,10 +200,8 @@ def load_workbook(
 
     If ``read_only=True``, returns a :class:`ReadOnlyWorkbook` backed by TurboReader.
     """
-    if isinstance(filename, Path):
-        filename = expanduser(str(filename))
-    elif isinstance(filename, str):
-        filename = expanduser(filename)
+    if isinstance(filename, str) or hasattr(filename, "__fspath__"):
+        filename = _expand_path(filename)
     elif not read_only and edit_mode is not False and not kwargs:
         # In-memory workbook: bytes / bytearray / file-like (BytesIO, open(..., "rb")).
         data = filename if isinstance(filename, (bytes, bytearray, memoryview)) else None
@@ -252,7 +288,7 @@ class ExcelSheet:
 
         Requires the `pyarrow` extra to be installed.
         """
-        if not _PYARROW_AVAILABLE:
+        if not _pyarrow_available():
             raise ImportError(
                 "pyarrow is required for to_arrow(). Install with: pip install 'kyrax[pyarrow]'"
             )
@@ -266,7 +302,7 @@ class ExcelSheet:
 
         Requires the `pyarrow` extra to be installed.
         """
-        if not _PYARROW_AVAILABLE:
+        if not _pyarrow_available():
             raise ImportError(
                 "pyarrow is required for to_arrow_with_errors(). Install with: pip install 'kyrax[pyarrow]'"  # noqa: E501
             )
@@ -373,7 +409,7 @@ class ExcelTable:
 
         Requires the `pyarrow` extra to be installed.
         """
-        if not _PYARROW_AVAILABLE:
+        if not _pyarrow_available():
             raise ImportError(
                 "pyarrow is required for to_arrow(). Install with: pip install 'kyrax[pyarrow]'"
             )
@@ -866,8 +902,7 @@ def read_excel(source: Path | str | bytes) -> ExcelReader:
 
     :param source: The path to a file or its content as bytes
     """
-    if isinstance(source, str | Path):
-        source = expanduser(source)
+    source = _expand_path(source)
     return ExcelReader(_read_excel(source))
 
 
@@ -901,7 +936,7 @@ class TurboSheet:
         :meth:`cell_errors`; pure-error columns may still show the error code
         string in values, while errors mixed into numeric columns are null.
         """
-        if not _PYARROW_AVAILABLE:
+        if not _pyarrow_available():
             raise ImportError(
                 "pyarrow is required for to_arrow(). Install with: pip install 'kyrax[pyarrow]'"
             )
@@ -915,7 +950,7 @@ class TurboSheet:
         ``position`` (1-based raw sheet grid), ``offset_position``
         (0-based, header row stripped), ``row_offset`` and ``detail``.
         """
-        if not _PYARROW_AVAILABLE:
+        if not _pyarrow_available():
             raise ImportError(
                 "pyarrow is required for to_arrow_with_errors(). Install with: pip install 'kyrax[pyarrow]'"
             )
@@ -928,7 +963,7 @@ class TurboSheet:
         excluded), ``code`` (utf8, e.g. ``\"#DIV/0!\"``). Always available
         (empty batch when the sheet has no error cells).
         """
-        if not _PYARROW_AVAILABLE:
+        if not _pyarrow_available():
             raise ImportError(
                 "pyarrow is required for cell_errors(). Install with: pip install 'kyrax[pyarrow]'"
             )
@@ -953,7 +988,7 @@ class TurboSheet:
         shared translated), ``ref`` (utf8, null unless array). None if not
         requested.
         """
-        if not _PYARROW_AVAILABLE:
+        if not _pyarrow_available():
             raise ImportError(
                 "pyarrow is required for formulas(). Install with: pip install 'kyrax[pyarrow]'"
             )
@@ -969,7 +1004,7 @@ class TurboSheet:
 
     def comments(self) -> pa.RecordBatch | None:
         """Comments as a RecordBatch: ref (A1), author, text. None if not requested."""
-        if not _PYARROW_AVAILABLE:
+        if not _pyarrow_available():
             raise ImportError(
                 "pyarrow is required for comments(). Install with: pip install 'kyrax[pyarrow]'"
             )
@@ -1247,7 +1282,7 @@ class ReadOnlyWorksheet:
                 "read_only=True streaming is values_only forward streaming"
             )
 
-        if read_excel_turbo_iter_rows is None or not _PYARROW_AVAILABLE:
+        if read_excel_turbo_iter_rows is None or not _pyarrow_available():
             # Fail loudly instead of silently materializing the whole sheet:
             # the read_only contract is bounded-memory streaming.
             raise ImportError(
@@ -1280,7 +1315,7 @@ class ReadOnlyWorksheet:
 
     def cell(self, row: int, column: int) -> _ReadOnlyCellProxy:
         self._ensure_open()
-        if read_excel_turbo_cell is None or not _PYARROW_AVAILABLE:
+        if read_excel_turbo_cell is None or not _pyarrow_available():
             raise ImportError(
                 "read_only cell lookup requires pyarrow "
                 "(install kyrax[pandas+pyarrow]) — refusing to load the full sheet eagerly"
@@ -1392,18 +1427,14 @@ def read_excel_turbo(path: Path | str, password: str | None = None) -> TurboRead
         workbook ignores it. ``None`` (the default) fails an encrypted workbook
         with a clear "password required" error.
     """
-    if isinstance(path, Path):
-        path = expanduser(str(path))
-    elif isinstance(path, str):
-        path = expanduser(path)
+    path = _expand_path(path)
     return TurboReader(_read_excel_turbo(path, password))
 
 
 def is_encrypted(path: Path | str) -> bool:
     """True if the file is an ECMA-376 encrypted workbook (OLE/CFB with an
     ``EncryptionInfo`` stream). Needs no password and never raises."""
-    if isinstance(path, Path):
-        path = expanduser(str(path))
+    path = _expand_pathlike(path)
     return _is_encrypted(str(path))
 
 
@@ -1415,8 +1446,7 @@ def encryption_info(path: Path | str) -> dict:
     Raises ``KyraxError`` when the file is not an encrypted workbook. Requires
     a build with the ``encryption`` feature.
     """
-    if isinstance(path, Path):
-        path = expanduser(str(path))
+    path = _expand_pathlike(path)
     if _encryption_info is None:
         raise KyraxError("encryption_info requires a kyrax build with the `encryption` feature")
     return _encryption_info(str(path))
@@ -1466,14 +1496,8 @@ def write_excel_turbo(
     :param vba_archive_path: path to a source `.xlsm` file to copy VBA project
         and macros from.
     """
-    if isinstance(path, Path):
-        path = expanduser(str(path))
-    elif isinstance(path, str):
-        path = expanduser(path)
-    if isinstance(vba_archive_path, Path):
-        vba_archive_path = expanduser(str(vba_archive_path))
-    elif isinstance(vba_archive_path, str):
-        vba_archive_path = expanduser(vba_archive_path)
+    path = _expand_path(path)
+    vba_archive_path = _expand_path(vba_archive_path)
     _write_excel_turbo(
         path,
         sheets,
@@ -1527,14 +1551,8 @@ def write_excel_turbo_stream(
     This path is deliberately serial; :func:`write_excel_turbo` remains the
     default and keeps its parallel multi-sheet compression.
     """
-    if isinstance(path, Path):
-        path = expanduser(str(path))
-    elif isinstance(path, str):
-        path = expanduser(path)
-    if isinstance(vba_archive_path, Path):
-        vba_archive_path = expanduser(str(vba_archive_path))
-    elif isinstance(vba_archive_path, str):
-        vba_archive_path = expanduser(vba_archive_path)
+    path = _expand_path(path)
+    vba_archive_path = _expand_path(vba_archive_path)
     _write_excel_turbo_stream(
         path,
         sheets,
@@ -1578,10 +1596,7 @@ def write_excel_turbo_bytes(
     vba_archive_path: Path | str | None = None,
 ) -> bytes:
     """Write an XLSX workbook and return bytes (same options as write_excel_turbo)."""
-    if isinstance(vba_archive_path, Path):
-        vba_archive_path = expanduser(str(vba_archive_path))
-    elif isinstance(vba_archive_path, str):
-        vba_archive_path = expanduser(vba_archive_path)
+    vba_archive_path = _expand_path(vba_archive_path)
     return _write_excel_turbo_bytes(
         sheets,
         string_mode=string_mode,
@@ -1603,8 +1618,6 @@ def write_excel_turbo_bytes(
     )
 
 
-import sys
-
 if "pandas" in sys.modules:
     # Register the pandas engine plugin (kyrax.pandas.register() injects the
     # reader into pandas.io.excel._base.ExcelFile._engines and the writer into
@@ -1621,20 +1634,22 @@ else:
     # pandas not imported yet: register the engines right after pandas
     # finishes importing (one-shot import hook), so
     # `import kyrax; import pandas` works the same as the reverse order.
-    import importlib as _il
-    import importlib.abc as _iabc
-    import importlib.util as _iutil
-
-    class _PandasEngineHook(_iabc.MetaPathFinder):
+    # No importlib.abc base class / importlib.util at import time (they pull
+    # in inspect, tempfile, ... ~15 ms): sys.meta_path finders are duck-typed,
+    # and importlib is imported lazily, only when pandas itself is imported.
+    class _PandasEngineHook:
         _busy = False
         _done = False
 
         def find_spec(self, name, path=None, target=None):
             if name != "pandas" or self._busy or self._done:
                 return None
+            import importlib
+            import importlib.util
+
             self._busy = True
             try:
-                spec = _iutil.find_spec(name)
+                spec = importlib.util.find_spec(name)
             finally:
                 self._busy = False
             if spec is None or spec.loader is None or not hasattr(spec.loader, "exec_module"):
@@ -1645,7 +1660,7 @@ else:
             def exec_module(module):
                 run(module)
                 try:
-                    _il.import_module(f"{__name__}.pandas")
+                    importlib.import_module(f"{__name__}.pandas")
                 except Exception:
                     pass
 
@@ -1752,4 +1767,7 @@ def __getattr__(name: str):
         import importlib
 
         return importlib.import_module(f"{__name__}.pandas")
+    if name == "_PYARROW_AVAILABLE":
+        # Back-compat alias for the old import-time constant; now computed lazily.
+        return _pyarrow_available()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
