@@ -59,7 +59,8 @@ use zip::read::HasZipMetadata;
 use crate::turbo::error::{TurboError, TurboResult};
 use crate::turbo::meta::RowDim;
 use crate::turbo::scan::{
-    CellError, ColTarget, ScanFeat, StringArena, parse_region, parse_shared_strings,
+    CellError, CellTag, ColTarget, ROW_CLOSE, ScanFeat, StringArena, fast_cell_tag, find_lit,
+    parse_region, parse_shared_strings,
 };
 use crate::turbo::structural::{RelKind, parse_rels, parse_workbook};
 
@@ -288,7 +289,7 @@ fn tag_end(x: &[u8], from: usize) -> Option<usize> {
 /// `(start, end)` of the first complete `<row>` in `buf[begin..end]`. A
 /// complete row is `<row .../>` or `<row ...>...</row>`. `None` when truncated.
 fn first_row_span(buf: &[u8], begin: usize, end: usize) -> Option<(usize, usize)> {
-    let o = memchr::memmem::find(&buf[begin..end], b"<row")?;
+    let o = find_lit(&buf[begin..end], b"<row")?;
     let s = begin + o;
     match buf.get(s + 4) {
         Some(b' ') | Some(b'>') | Some(b'/') | Some(b'\t') | Some(b'\n') | Some(b'\r') => {}
@@ -302,14 +303,25 @@ fn first_row_span(buf: &[u8], begin: usize, end: usize) -> Option<(usize, usize)
         return Some((s, gt + 1));
     }
     let after = gt + 1;
-    let rel = memchr::memmem::find(&buf[after..end], b"</row>")?;
+    let rel = ROW_CLOSE.find(&buf[after..end])?;
     Some((s, after + rel + b"</row>".len()))
 }
 
 /// Index just past the last complete row in `buf[begin..end]`.
+///
+/// Instead of framing every row front to back (two searches plus a quote-aware
+/// tag walk per row, over the whole 4 MiB window), jump straight to the last
+/// `</row>` and only walk forward from there, which is where a trailing
+/// self-closing `<row .../>` or a truncated row can be. For well-formed
+/// worksheet XML this is the same cut the front-to-back scan produced.
 fn last_complete_row_end(buf: &[u8], begin: usize, end: usize) -> Option<usize> {
     let mut i = begin;
     let mut last = None;
+    if let Some(p) = memchr::memmem::rfind(&buf[begin..end], b"</row>") {
+        let e = begin + p + b"</row>".len();
+        last = Some(e);
+        i = e;
+    }
     while i < end {
         match first_row_span(buf, i, end) {
             Some((_, e)) => {
@@ -437,21 +449,6 @@ fn is_data_cell(tag: &[u8]) -> bool {
     ) || attr_value(tag, b"t") == Some(b"s")
 }
 
-fn shared_index_in_range(body: &[u8], shared: &StringArena) -> bool {
-    let vo = match memchr::memmem::find(body, b"<v>") {
-        Some(o) => o + 3,
-        None => return false,
-    };
-    let Some(rel) = memchr::memmem::find(&body[vo..], b"</v>") else {
-        return false;
-    };
-    let raw = &body[vo..vo + rel];
-    match crate::turbo::decode::atoi(raw) {
-        Some(idx) => shared.try_resolve(idx).is_some(),
-        None => false,
-    }
-}
-
 /// Record type bits for the data cells in a row-aligned region. When
 /// `skip_first_row` is true the first row is treated as the header (it still
 /// contributes `ncols` but never type bits), mirroring `parse_region`.
@@ -481,7 +478,7 @@ fn scan_region_ncols_only(region: &[u8], ncols: &mut usize) {
     let mut ci = 0usize;
     let mut next_col = 0usize;
     while ci < region.len() {
-        let Some(o) = memchr::memmem::find(&region[ci..], b"<c") else {
+        let Some(o) = find_lit(&region[ci..], b"<c") else {
             break;
         };
         let s = ci + o;
@@ -500,6 +497,16 @@ fn scan_region_ncols_only(region: &[u8], ncols: &mut usize) {
     }
 }
 
+/// General cell-tag parse (the original `tag_end` / `cell_col` / `attr_value`
+/// sequence). `None` means a truncated tag.
+#[inline]
+fn slow_cell_tag(region: &[u8], s: usize) -> Option<CellTag<'_>> {
+    let gt = tag_end(region, s)?;
+    let self_closing = region.get(gt.wrapping_sub(1)) == Some(&b'/');
+    let tag = &region[s + 2..gt];
+    Some((gt, self_closing, cell_col(tag), attr_value(tag, b"t")))
+}
+
 fn scan_region_cells(
     region: &[u8],
     shared: &StringArena,
@@ -510,18 +517,30 @@ fn scan_region_cells(
     let mut ci = 0usize;
     let mut next_col = 0usize;
     while ci < region.len() {
-        let Some(o) = memchr::memmem::find(&region[ci..], b"<c") else {
-            break;
+        // Cells are back to back inside a row, so the next `<c` is usually
+        // exactly at `ci`; only row boundaries need a real search.
+        let s = if region[ci..].starts_with(b"<c") {
+            ci
+        } else {
+            let Some(o) = find_lit(&region[ci..], b"<c") else {
+                break;
+            };
+            ci + o
         };
-        let s = ci + o;
-        if !matches!(region.get(s + 2), Some(b' ') | Some(b'>') | Some(b'/')) {
+        let kind = region.get(s + 2).copied();
+        if !matches!(kind, Some(b' ') | Some(b'>') | Some(b'/')) {
             ci = s + 2;
             continue;
         }
-        let Some(gt) = tag_end(region, s) else { break };
-        let self_closing = region.get(gt.wrapping_sub(1)) == Some(&b'/');
-        let tag = &region[s + 2..gt];
-        let col = cell_col(tag).unwrap_or(next_col);
+        let parsed = if kind == Some(b' ') {
+            fast_cell_tag(region, s).or_else(|| slow_cell_tag(region, s))
+        } else {
+            slow_cell_tag(region, s)
+        };
+        let Some((gt, self_closing, col, ty)) = parsed else {
+            break;
+        };
+        let col = col.unwrap_or(next_col);
         next_col = col + 1;
         let nc = col + 1;
         if nc > has_num.len() {
@@ -533,74 +552,99 @@ fn scan_region_cells(
         if nc > *ncols {
             *ncols = nc;
         }
-        if !self_closing {
-            // A column's target is decided by two bits, and neither can be
-            // un-set. So once a bit is true, every further cell that would only
-            // set that same bit is DEAD WORK — and the dead work here is
-            // expensive: finding `</c>`, extracting `<v>`, and fully parsing
-            // the value as f64 purely to answer "is this column numeric".
-            //
-            // Measured: on a 50k x 4 homogeneous numeric sheet the pre-pass
-            // spent 57-64 ms, of which inflate was 11 ms and buffer management
-            // 0 ms — the rest was this loop parsing every value and discarding
-            // it. The type tag alone is enough to classify a string-ish cell,
-            // and it is already in `tag`, so the only cell that needs the body
-            // is one that might set a bit which is not yet set.
-            //
-            // This changes no result: skipping a numeric cell when has_num is
-            // already true cannot alter the column's target.
-            let ty = attr_value(tag, b"t");
-            let needs_body = match ty {
-                // `t="s"` still needs the body: an out-of-range shared index is
-                // NOT a string (the eager path nulls it), so the index must be
-                // checked before setting has_str.
-                Some(b"s") => !has_str[col],
-                Some(b"inlineStr") | Some(b"str") | Some(b"e") => false,
-                _ => !has_num[col],
+        if self_closing {
+            ci = gt + 1;
+            continue;
+        }
+        // A column's target is decided by two bits, and neither can be
+        // un-set. So once a bit is true, every further cell that would only
+        // set that same bit is DEAD WORK — and the dead work here is
+        // expensive: finding `</c>`, extracting `<v>`, and fully parsing
+        // the value as f64 purely to answer "is this column numeric".
+        //
+        // This changes no result: skipping a numeric cell when has_num is
+        // already true cannot alter the column's target.
+        let needs_body = match ty {
+            // `t="s"` still needs the body: an out-of-range shared index is
+            // NOT a string (the eager path nulls it), so the index must be
+            // checked before setting has_str.
+            Some(b"s") => !has_str[col],
+            Some(b"inlineStr") | Some(b"str") | Some(b"e") => false,
+            _ => !has_num[col],
+        };
+        // The canonical body is `<v>text</v></c>`; `text` is XML-escaped so the
+        // first `<` after `<v>` is `</v>`. Recognising that shape directly
+        // skips two substring searches per cell and yields the same value
+        // range and the same resume point as the general code below.
+        let body = &region[gt + 1..];
+        let mut canon: Option<(usize, usize)> = None; // (value end, next ci), absolute
+        if body.starts_with(b"<v>") {
+            let vs = gt + 4;
+            if let Some(o) = region[vs..].iter().position(|&b| b == b'<') {
+                let p = vs + o;
+                if region[p..].starts_with(b"</v></c>") {
+                    canon = Some((p, p + 8));
+                }
+            }
+        }
+        if !needs_body {
+            match ty {
+                Some(b"inlineStr") | Some(b"str") | Some(b"e") => has_str[col] = true,
+                _ => {}
+            }
+            ci = match canon {
+                Some((_, next)) => next,
+                None => gt + 1,
             };
-            let e = if needs_body {
-                memchr::memmem::find(&region[gt + 1..], b"</c>")
+            continue;
+        }
+        let (v_range, next_ci): (Option<(usize, usize)>, usize) = match canon {
+            Some((p, next)) => (Some((gt + 4, p)), next),
+            None => {
+                let e = find_lit(body, b"</c>")
                     .map(|r| gt + 1 + r)
                     .unwrap_or(region.len())
-                    .min(region.len())
-            } else {
-                // Still must step past this cell, but without searching for the
-                // close tag: the next `<c` scan finds it anyway.
-                gt
-            };
-            match ty {
-                Some(b"s") => {
-                    if needs_body && shared_index_in_range(&region[gt + 1..e], shared) {
+                    .min(region.len());
+                let v = v_range_in(region, gt + 1, e);
+                (v, e.saturating_add(4).min(region.len()))
+            }
+        };
+        match ty {
+            Some(b"s") => {
+                if let Some((a, b)) = v_range {
+                    if shared_index_raw_in_range(&region[a..b], shared) {
                         has_str[col] = true;
                     }
                 }
-                Some(b"inlineStr") | Some(b"str") | Some(b"e") => has_str[col] = true,
-                _ => {
-                    if needs_body {
-                        if let Some(v) = v_content(&region[gt + 1..e]) {
-                            if !v.is_empty() && fast_float2::parse::<f64, _>(v).is_ok() {
-                                has_num[col] = true;
-                            }
-                        }
+            }
+            _ => {
+                if let Some((a, b)) = v_range {
+                    let v = &region[a..b];
+                    if !v.is_empty() && fast_float2::parse::<f64, _>(v).is_ok() {
+                        has_num[col] = true;
                     }
                 }
             }
-            ci = if needs_body {
-                e.saturating_add(4).min(region.len())
-            } else {
-                gt + 1
-            };
-        } else {
-            ci = gt + 1;
         }
+        ci = next_ci;
     }
 }
 
-fn v_content(body: &[u8]) -> Option<&[u8]> {
-    let vo = memchr::memmem::find(body, b"<v>")?;
+/// `(start, end)` of the first `<v>..</v>` content within `region[from..to]`.
+fn v_range_in(region: &[u8], from: usize, to: usize) -> Option<(usize, usize)> {
+    let body = &region[from..to];
+    let vo = find_lit(body, b"<v>")?;
     let vs = vo + 3;
-    let ve = vs + memchr::memmem::find(&body[vs..], b"</v>")?;
-    Some(&body[vs..ve])
+    let ve = vs + find_lit(&body[vs..], b"</v>")?;
+    Some((from + vs, from + ve))
+}
+
+/// Shared-string index range check on an already-extracted `<v>` payload.
+fn shared_index_raw_in_range(raw: &[u8], shared: &StringArena) -> bool {
+    match crate::turbo::decode::atoi(raw) {
+        Some(idx) => shared.try_resolve(idx).is_some(),
+        None => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -657,6 +701,8 @@ pub struct SheetStream {
     targets: Vec<ColTarget>,
     // emit-pass window state
     pending: Vec<u8>,
+    /// Reusable inflate output buffer (allocated once, not per `next_batch`).
+    chunk: Vec<u8>,
     phase: StreamPhase,
     header_consumed: bool,
     emitted_any: bool,
@@ -769,6 +815,7 @@ impl SheetStream {
             shared,
             targets: Vec::new(),
             pending: Vec::new(),
+            chunk: Vec::new(),
             phase: StreamPhase::Pre,
             header_consumed: false,
             emitted_any: false,
@@ -818,6 +865,7 @@ impl SheetStream {
             shared: Arc::new(parse_shared_strings(b"")),
             targets: Vec::new(),
             pending: Vec::new(),
+            chunk: Vec::new(),
             phase: StreamPhase::Done,
             header_consumed: true,
             emitted_any: false,
@@ -945,7 +993,10 @@ impl SheetStream {
         if self.finished {
             return Ok(None);
         }
-        let mut chunk = vec![0u8; opts.window_bytes.max(64 * 1024)];
+        let chunk_len = opts.window_bytes.max(64 * 1024);
+        if self.chunk.len() != chunk_len {
+            self.chunk = vec![0u8; chunk_len];
+        }
         loop {
             if self.phase == StreamPhase::Pre {
                 if let Some(p) = find_sheetdata_open_end(&self.pending) {
@@ -967,9 +1018,7 @@ impl SheetStream {
             if self.phase == StreamPhase::Rows {
                 let rows_end = find_sheetdata_close(&self.pending).unwrap_or(self.pending.len());
                 if let Some(cut) = last_complete_row_end(&self.pending, 0, rows_end) {
-                    let region = self.pending[..cut].to_vec();
-                    self.pending.drain(..cut);
-                    return self.emit_region(&region);
+                    return self.emit_pending(cut);
                 } else if self.pending.len() > opts.max_row_bytes {
                     return Err(TurboError::Format(
                         "streaming read: a single row exceeds the row-size cap".into(),
@@ -978,16 +1027,14 @@ impl SheetStream {
             }
 
             let n = match self.inflate.as_mut() {
-                Some(i) => i.read(&mut chunk)?,
+                Some(i) => i.read(&mut self.chunk)?,
                 None => 0,
             };
             if n == 0 {
                 // End of entry: flush any complete rows that remain.
                 if self.phase == StreamPhase::Rows {
                     if let Some(cut) = last_complete_row_end(&self.pending, 0, self.pending.len()) {
-                        let region = self.pending[..cut].to_vec();
-                        self.pending.drain(..cut);
-                        return self.emit_region(&region);
+                        return self.emit_pending(cut);
                     }
                 }
                 self.finish();
@@ -1000,8 +1047,19 @@ impl SheetStream {
                 }
                 return Ok(None);
             }
-            self.pending.extend_from_slice(&chunk[..n]);
+            self.pending.extend_from_slice(&self.chunk[..n]);
         }
+    }
+
+    /// Parse the first `cut` bytes of `pending` in place (no copy of the
+    /// window), then drop them. Only the sub-row tail left after `cut` is
+    /// moved down. `pending` is restored even when the parse fails.
+    fn emit_pending(&mut self, cut: usize) -> TurboResult<Option<RecordBatch>> {
+        let pending = std::mem::take(&mut self.pending);
+        let res = self.emit_region(&pending[..cut]);
+        self.pending = pending;
+        self.pending.drain(..cut);
+        res
     }
 
     fn emit_region(&mut self, region: &[u8]) -> TurboResult<Option<RecordBatch>> {
