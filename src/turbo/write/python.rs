@@ -27,11 +27,12 @@ use crate::turbo::meta::{AutoFilterMeta, FilterColumnMeta};
 use crate::turbo::overlay::{WorkbookOverlay, hydrate_sheet_from_xml};
 use crate::turbo::overlay_layout::py as layout_py;
 use super::readback;
+use super::rowstream;
 use crate::turbo::scan::{MAX_GRID_COLS, MAX_GRID_ROWS, parse_ref_range_strict};
 use crate::turbo::structural::parse_range;
 use crate::turbo::zipmin::{ArchiveMap, read_entry};
 
-fn write_err_to_py(err: std::io::Error) -> PyErr {
+pub(super) fn write_err_to_py(err: std::io::Error) -> PyErr {
     let fe: KyraxError = KyraxErrorKind::Internal(format!("write error: {err}")).into();
     fe.into()
 }
@@ -47,7 +48,7 @@ fn turbo_err_to_py(err: TurboError) -> PyErr {
     fe.into()
 }
 
-fn parse_string_mode(s: &str) -> PyResult<StringMode> {
+pub(super) fn parse_string_mode(s: &str) -> PyResult<StringMode> {
     match s {
         "inline" | "inlineStr" | "inline_str" => Ok(StringMode::InlineStr),
         "sst" | "shared" | "sharedStrings" => Ok(StringMode::SharedStrings),
@@ -1906,7 +1907,7 @@ fn extract_wrapper_style(obj: &Bound<'_, PyAny>) -> PyResult<Option<Box<StyleDes
     Ok(None)
 }
 
-fn py_to_cell_value_flagged(
+pub(super) fn py_to_cell_value_flagged(
     obj: &Bound<'_, PyAny>,
     date1904: bool,
     mut style_flag: Option<&mut bool>,
@@ -4186,6 +4187,15 @@ pub fn py_write_excel_turbo(
     recalculate: bool,
     vba_archive_path: Option<&str>,
 ) -> PyResult<()> {
+    let plain = [features, named_styles, props, defined_names, chartsheets, external_links]
+        .iter()
+        .all(|o| o.is_none())
+        && vba_archive_path.is_none()
+        && !(lock_structure || macro_enabled || recalculate);
+    let kw = rowstream::Kw::new(string_mode, emit_cached_values, date1904, date_iso, active_tab, creator, plain);
+    if rowstream::try_write_path(py, sheets, &kw, path)? {
+        return Ok(());
+    }
     let wb = build_workbook_from_py(
         sheets,
         string_mode,
@@ -4254,6 +4264,15 @@ pub fn py_write_excel_turbo_stream(
     recalculate: bool,
     vba_archive_path: Option<&str>,
 ) -> PyResult<()> {
+    let plain = [features, named_styles, props, defined_names, chartsheets, external_links]
+        .iter()
+        .all(|o| o.is_none())
+        && vba_archive_path.is_none()
+        && !(lock_structure || macro_enabled || recalculate);
+    let kw = rowstream::Kw::new(string_mode, emit_cached_values, date1904, date_iso, active_tab, creator, plain);
+    if rowstream::try_write_path(py, sheets, &kw, path)? {
+        return Ok(());
+    }
     let wb = build_workbook_from_py(
         sheets,
         string_mode,
@@ -4324,6 +4343,15 @@ pub fn py_write_excel_turbo_bytes<'py>(
     recalculate: bool,
     vba_archive_path: Option<&str>,
 ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+    let plain = [features, named_styles, props, defined_names, chartsheets, external_links]
+        .iter()
+        .all(|o| o.is_none())
+        && vba_archive_path.is_none()
+        && !(lock_structure || macro_enabled || recalculate);
+    let kw = rowstream::Kw::new(string_mode, emit_cached_values, date1904, date_iso, active_tab, creator, plain);
+    if let Some(bytes) = rowstream::try_write_bytes(py, sheets, &kw)? {
+        return Ok(pyo3::types::PyBytes::new(py, &bytes));
+    }
     let wb = build_workbook_from_py(
         sheets,
         string_mode,
