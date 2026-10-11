@@ -210,6 +210,7 @@ def run(args):
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "cpus": os.cpu_count(),
+        "cpu_model": _cpu_model(),
         "mode": ("quick" if args.quick else "full") + (" (competitors reused)" if args.reuse else ""),
         "harness_runtime_s": round(time.perf_counter() - t_start, 1),
         "versions": _versions(python, env),
@@ -233,6 +234,17 @@ def _ratios(rows):
                                     "ratio": r["cpu_task_s"]["median"] / best_cpu["cpu_task_s"]["median"]}
                 r["vs_best_rss"] = {"lib": best_rss["lib"],
                                     "ratio": r["rss_mb"]["median"] / best_rss["rss_mb"]["median"]}
+
+
+def _cpu_model():
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return platform.processor() or "unknown"
 
 
 def _git():

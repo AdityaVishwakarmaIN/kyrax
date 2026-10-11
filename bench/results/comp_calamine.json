@@ -1,0 +1,183 @@
+{
+ "meta": {
+  "date_utc": "2026-10-11 12:28 UTC",
+  "git": "2067acf",
+  "python": "3.13.16",
+  "platform": "Linux-6.18.44-fc-v114-x86_64-with-glibc2.39",
+  "cpus": 4,
+  "cpu_model": "Intel(R) Xeon(R) Processor @ 2.80GHz",
+  "mode": "full",
+  "harness_runtime_s": 22.0,
+  "versions": {
+   "openpyxl": "3.1.5",
+   "XlsxWriter": "3.2.9",
+   "python-calamine": "0.8.3",
+   "pandas": "3.0.6",
+   "pyarrow": "23.0.0",
+   "numpy": "2.5.4",
+   "kyrax": "/home/user/kyrax/python/kyrax"
+  }
+ },
+ "rows": [
+  {
+   "task": "import",
+   "size": "small",
+   "rows": 1000,
+   "lib": "calamine",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.0012189999999999979,
+    "min": 0.0009739999999999992,
+    "max": 0.00145,
+    "n": 5,
+    "noise_pct": 39.048400328137944
+   },
+   "cpu_total_s": {
+    "median": 0.031402,
+    "min": 0.029591,
+    "max": 0.043273,
+    "n": 5,
+    "noise_pct": 43.57047321826635
+   },
+   "rss_mb": {
+    "median": 12.50390625,
+    "min": 12.41796875,
+    "max": 12.5390625,
+    "n": 5,
+    "noise_pct": 0.9684473601999375
+   },
+   "wall_task_s": {
+    "median": 0.0012171870000656781,
+    "min": 0.0009735730000102194,
+    "max": 0.0014492620000510215,
+    "n": 5,
+    "noise_pct": 39.08101220396984
+   },
+   "shape": [
+    0,
+    0
+   ],
+   "verify": "n/a"
+  },
+  {
+   "task": "read_values",
+   "size": "small",
+   "rows": 1000,
+   "lib": "calamine",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.007467000000000001,
+    "min": 0.007129,
+    "max": 0.008282999999999999,
+    "n": 5,
+    "noise_pct": 15.454667202357019
+   },
+   "cpu_total_s": {
+    "median": 0.039821999999999996,
+    "min": 0.037889,
+    "max": 0.04199699999999999,
+    "n": 5,
+    "noise_pct": 10.315905780724208
+   },
+   "rss_mb": {
+    "median": 13.46484375,
+    "min": 13.41796875,
+    "max": 13.52734375,
+    "n": 5,
+    "noise_pct": 0.8123005512039455
+   },
+   "wall_task_s": {
+    "median": 0.007580373999871881,
+    "min": 0.007131901000093421,
+    "max": 0.009076998999944408,
+    "n": 5,
+    "noise_pct": 25.659657424341614
+   },
+   "shape": [
+    1001,
+    8
+   ],
+   "verify": "n/a"
+  },
+  {
+   "task": "read_values",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "calamine",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.621918,
+    "min": 0.619972,
+    "max": 0.6282669999999999,
+    "n": 3,
+    "noise_pct": 1.3337771217427283
+   },
+   "cpu_total_s": {
+    "median": 0.6565110000000001,
+    "min": 0.6524260000000001,
+    "max": 0.6585019999999999,
+    "n": 3,
+    "noise_pct": 0.9254985826589134
+   },
+   "rss_mb": {
+    "median": 84.15625,
+    "min": 84.15234375,
+    "max": 84.2109375,
+    "n": 3,
+    "noise_pct": 0.06962495358336428
+   },
+   "wall_task_s": {
+    "median": 0.623152705000166,
+    "min": 0.6227255629999036,
+    "max": 0.6339707080001062,
+    "n": 3,
+    "noise_pct": 1.8045568782694585
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "verify": "n/a"
+  },
+  {
+   "task": "read_values",
+   "size": "large",
+   "rows": 1000000,
+   "lib": "calamine",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 6.337162999999999,
+    "min": 6.194203,
+    "max": 6.7753630000000005,
+    "n": 3,
+    "noise_pct": 9.170665169887545
+   },
+   "cpu_total_s": {
+    "median": 6.382719,
+    "min": 6.242417,
+    "max": 6.824772,
+    "n": 3,
+    "noise_pct": 9.12393291949717
+   },
+   "rss_mb": {
+    "median": 727.75,
+    "min": 727.7265625,
+    "max": 727.85546875,
+    "n": 3,
+    "noise_pct": 0.017712985228443834
+   },
+   "wall_task_s": {
+    "median": 6.396939856000017,
+    "min": 6.256324457000119,
+    "max": 6.816248719000214,
+    "n": 3,
+    "noise_pct": 8.753001819689041
+   },
+   "shape": [
+    1000001,
+    8
+   ],
+   "verify": "n/a"
+  }
+ ]
+}

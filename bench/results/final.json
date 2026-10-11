@@ -1,0 +1,1330 @@
+{
+ "baseline_meta": {
+  "date_utc": "2026-10-11 08:52 UTC",
+  "git": "ea9b33a",
+  "python": "3.13.16",
+  "platform": "Linux-6.18.44-fc-v114-x86_64-with-glibc2.39",
+  "cpus": 4,
+  "mode": "full",
+  "harness_runtime_s": 828.5,
+  "versions": {
+   "openpyxl": "3.1.5",
+   "XlsxWriter": "3.2.9",
+   "python-calamine": "0.8.3",
+   "pandas": "3.0.6",
+   "pyarrow": "23.0.0",
+   "numpy": "2.5.4",
+   "kyrax": "/home/user/kyrax/python/kyrax"
+  }
+ },
+ "after_meta": {
+  "date_utc": "2026-10-11 12:28 UTC",
+  "git": "2067acf",
+  "python": "3.13.16",
+  "platform": "Linux-6.18.44-fc-v114-x86_64-with-glibc2.39",
+  "cpus": 4,
+  "cpu_model": "Intel(R) Xeon(R) Processor @ 2.80GHz",
+  "mode": "full (competitors reused)",
+  "harness_runtime_s": 180.2,
+  "versions": {
+   "openpyxl": "3.1.5",
+   "XlsxWriter": "3.2.9",
+   "python-calamine": "0.8.3",
+   "pandas": "3.0.6",
+   "pyarrow": "23.0.0",
+   "numpy": "2.5.4",
+   "kyrax": "/home/user/kyrax/python/kyrax"
+  }
+ },
+ "rerun_meta": [
+  {
+   "date_utc": "2026-10-11 12:25 UTC",
+   "git": "6db1236",
+   "python": "3.13.16",
+   "platform": "Linux-6.18.44-fc-v114-x86_64-with-glibc2.39",
+   "cpus": 4,
+   "mode": "full",
+   "harness_runtime_s": 328.8,
+   "versions": {
+    "openpyxl": "3.1.5",
+    "XlsxWriter": "3.2.9",
+    "python-calamine": "0.8.3",
+    "pandas": "3.0.6",
+    "pyarrow": "23.0.0",
+    "numpy": "2.5.4",
+    "kyrax": "/tmp/claude-0/-home-user-kyrax/09afa392-8cb2-50e5-9d5c-db69f771ff35/scratchpad/wt_base/python/kyrax"
+   }
+  },
+  {
+   "date_utc": "2026-10-11 12:28 UTC",
+   "git": "2067acf",
+   "python": "3.13.16",
+   "platform": "Linux-6.18.44-fc-v114-x86_64-with-glibc2.39",
+   "cpus": 4,
+   "cpu_model": "Intel(R) Xeon(R) Processor @ 2.80GHz",
+   "mode": "full",
+   "harness_runtime_s": 22.0,
+   "versions": {
+    "openpyxl": "3.1.5",
+    "XlsxWriter": "3.2.9",
+    "python-calamine": "0.8.3",
+    "pandas": "3.0.6",
+    "pyarrow": "23.0.0",
+    "numpy": "2.5.4",
+    "kyrax": "/home/user/kyrax/python/kyrax"
+   }
+  },
+  {
+   "date_utc": "2026-10-11 12:29 UTC",
+   "git": "2067acf",
+   "python": "3.13.16",
+   "platform": "Linux-6.18.44-fc-v114-x86_64-with-glibc2.39",
+   "cpus": 4,
+   "cpu_model": "Intel(R) Xeon(R) Processor @ 2.80GHz",
+   "mode": "full",
+   "harness_runtime_s": 48.5,
+   "versions": {
+    "openpyxl": "3.1.5",
+    "XlsxWriter": "3.2.9",
+    "python-calamine": "0.8.3",
+    "pandas": "3.0.6",
+    "pyarrow": "23.0.0",
+    "numpy": "2.5.4",
+    "kyrax": "/home/user/kyrax/python/kyrax"
+   }
+  },
+  {
+   "date_utc": "2026-10-11 12:29 UTC",
+   "git": "2067acf",
+   "python": "3.13.16",
+   "platform": "Linux-6.18.44-fc-v114-x86_64-with-glibc2.39",
+   "cpus": 4,
+   "cpu_model": "Intel(R) Xeon(R) Processor @ 2.80GHz",
+   "mode": "full",
+   "harness_runtime_s": 40.9,
+   "versions": {
+    "openpyxl": "3.1.5",
+    "XlsxWriter": "3.2.9",
+    "python-calamine": "0.8.3",
+    "pandas": "3.0.6",
+    "pyarrow": "23.0.0",
+    "numpy": "2.5.4",
+    "kyrax": "/home/user/kyrax/python/kyrax"
+   }
+  },
+  {
+   "date_utc": "2026-10-11 12:30 UTC",
+   "git": "2067acf",
+   "python": "3.13.16",
+   "platform": "Linux-6.18.44-fc-v114-x86_64-with-glibc2.39",
+   "cpus": 4,
+   "cpu_model": "Intel(R) Xeon(R) Processor @ 2.80GHz",
+   "mode": "full",
+   "harness_runtime_s": 57.4,
+   "versions": {
+    "openpyxl": "3.1.5",
+    "XlsxWriter": "3.2.9",
+    "python-calamine": "0.8.3",
+    "pandas": "3.0.6",
+    "pyarrow": "23.0.0",
+    "numpy": "2.5.4",
+    "kyrax": "/home/user/kyrax/python/kyrax"
+   }
+  },
+  {
+   "date_utc": "2026-10-11 12:32 UTC",
+   "git": "2067acf",
+   "python": "3.13.16",
+   "platform": "Linux-6.18.44-fc-v114-x86_64-with-glibc2.39",
+   "cpus": 4,
+   "cpu_model": "Intel(R) Xeon(R) Processor @ 2.80GHz",
+   "mode": "full",
+   "harness_runtime_s": 74.4,
+   "versions": {
+    "openpyxl": "3.1.5",
+    "XlsxWriter": "3.2.9",
+    "python-calamine": "0.8.3",
+    "pandas": "3.0.6",
+    "pyarrow": "23.0.0",
+    "numpy": "2.5.4",
+    "kyrax": "/home/user/kyrax/python/kyrax"
+   }
+  }
+ ],
+ "rows": [
+  {
+   "task": "import",
+   "size": "small",
+   "rows": 1000,
+   "lib": "kyrax",
+   "before_source": "pre-change build re-measured in final session",
+   "baseline_original": {
+    "cpu": {
+     "median": 0.029500000000000002,
+     "min": 0.028474999999999993,
+     "max": 0.032641,
+     "n": 5,
+     "noise_pct": 14.122033898305117
+    },
+    "rss": {
+     "median": 20.06640625,
+     "min": 20.0078125,
+     "max": 20.14453125,
+     "n": 5,
+     "noise_pct": 0.6813315164492895
+    }
+   },
+   "before": {
+    "cpu": {
+     "median": 0.029525999999999993,
+     "min": 0.027763,
+     "max": 0.04254800000000001,
+     "n": 5,
+     "noise_pct": 50.074510600826436
+    },
+    "rss": {
+     "median": 20.359375,
+     "min": 20.296875,
+     "max": 20.44921875,
+     "n": 5,
+     "noise_pct": 0.7482732156561781
+    }
+   },
+   "after": {
+    "cpu": {
+     "median": 0.015348999999999995,
+     "min": 0.013234999999999997,
+     "max": 0.018858,
+     "n": 5,
+     "noise_pct": 36.634308424001595
+    },
+    "rss": {
+     "median": 18.1640625,
+     "min": 18.11328125,
+     "max": 18.21484375,
+     "n": 5,
+     "noise_pct": 0.5591397849462365
+    }
+   },
+   "verify_after": "n/a",
+   "status": "MEASURED",
+   "best_cpu": {
+    "lib": "calamine",
+    "cpu": 0.0012189999999999979
+   },
+   "best_rss": {
+    "lib": "calamine",
+    "rss": 12.50390625
+   }
+  },
+  {
+   "task": "read_values",
+   "size": "small",
+   "rows": 1000,
+   "lib": "kyrax",
+   "before_source": "pre-change build re-measured in final session",
+   "baseline_original": {
+    "cpu": {
+     "median": 0.36002900000000004,
+     "min": 0.326269,
+     "max": 0.40711600000000003,
+     "n": 5,
+     "noise_pct": 22.455691069330538
+    },
+    "rss": {
+     "median": 67.0,
+     "min": 66.94921875,
+     "max": 67.01171875,
+     "n": 5,
+     "noise_pct": 0.09328358208955224
+    }
+   },
+   "before": {
+    "cpu": {
+     "median": 0.370674,
+     "min": 0.306649,
+     "max": 0.48153699999999994,
+     "n": 5,
+     "noise_pct": 47.18108094983731
+    },
+    "rss": {
+     "median": 63.1640625,
+     "min": 63.06640625,
+     "max": 63.2578125,
+     "n": 5,
+     "noise_pct": 0.30303030303030304
+    }
+   },
+   "after": {
+    "cpu": {
+     "median": 0.027024,
+     "min": 0.02162800000000001,
+     "max": 0.030424999999999994,
+     "n": 5,
+     "noise_pct": 32.55254588513908
+    },
+    "rss": {
+     "median": 22.76953125,
+     "min": 22.7109375,
+     "max": 22.83203125,
+     "n": 5,
+     "noise_pct": 0.5318236404185966
+    }
+   },
+   "verify_after": "n/a",
+   "status": "MEASURED",
+   "best_cpu": {
+    "lib": "calamine",
+    "cpu": 0.007467000000000001
+   },
+   "best_rss": {
+    "lib": "calamine",
+    "rss": 13.46484375
+   }
+  },
+  {
+   "task": "read_values",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "kyrax",
+   "before_source": "pre-change build re-measured in final session",
+   "baseline_original": {
+    "cpu": {
+     "median": 1.915615,
+     "min": 1.8966640000000001,
+     "max": 1.9592930000000002,
+     "n": 3,
+     "noise_pct": 3.269393902219394
+    },
+    "rss": {
+     "median": 125.1953125,
+     "min": 125.01953125,
+     "max": 125.30859375,
+     "n": 3,
+     "noise_pct": 0.23088923556942278
+    }
+   },
+   "before": {
+    "cpu": {
+     "median": 2.0323130000000003,
+     "min": 1.9464649999999997,
+     "max": 2.04352,
+     "n": 3,
+     "noise_pct": 4.775593129601607
+    },
+    "rss": {
+     "median": 121.4453125,
+     "min": 121.22265625,
+     "max": 124.63671875,
+     "n": 3,
+     "noise_pct": 2.811193309745899
+    }
+   },
+   "after": {
+    "cpu": {
+     "median": 0.754449,
+     "min": 0.7197539999999999,
+     "max": 0.7742899999999999,
+     "n": 3,
+     "noise_pct": 7.228586690419105
+    },
+    "rss": {
+     "median": 75.73828125,
+     "min": 75.609375,
+     "max": 75.74609375,
+     "n": 3,
+     "noise_pct": 0.1805147248439837
+    }
+   },
+   "verify_after": "n/a",
+   "status": "MEASURED",
+   "best_cpu": {
+    "lib": "calamine",
+    "cpu": 0.621918
+   },
+   "best_rss": {
+    "lib": "openpyxl-ro",
+    "rss": 83.87109375
+   }
+  },
+  {
+   "task": "read_values",
+   "size": "large",
+   "rows": 1000000,
+   "lib": "kyrax",
+   "before_source": "pre-change build re-measured in final session",
+   "baseline_original": {
+    "cpu": {
+     "median": 16.07139,
+     "min": 15.589415999999998,
+     "max": 16.130595999999997,
+     "n": 3,
+     "noise_pct": 3.367350303862944
+    },
+    "rss": {
+     "median": 520.18359375,
+     "min": 520.109375,
+     "max": 520.5,
+     "n": 3,
+     "noise_pct": 0.07509367936500785
+    }
+   },
+   "before": {
+    "cpu": {
+     "median": 16.002631,
+     "min": 15.823330000000002,
+     "max": 16.550190999999998,
+     "n": 3,
+     "noise_pct": 4.542134352782339
+    },
+    "rss": {
+     "median": 516.5234375,
+     "min": 516.44921875,
+     "max": 516.76171875,
+     "n": 3,
+     "noise_pct": 0.06050064281932996
+    }
+   },
+   "after": {
+    "cpu": {
+     "median": 6.543659,
+     "min": 6.507284,
+     "max": 6.853510000000001,
+     "n": 3,
+     "noise_pct": 5.291015317271279
+    },
+    "rss": {
+     "median": 429.87109375,
+     "min": 429.66015625,
+     "max": 429.91796875,
+     "n": 3,
+     "noise_pct": 0.059974374585404416
+    }
+   },
+   "verify_after": "n/a",
+   "status": "MEASURED",
+   "best_cpu": {
+    "lib": "calamine",
+    "cpu": 6.337162999999999
+   },
+   "best_rss": {
+    "lib": "calamine",
+    "rss": 727.75
+   }
+  },
+  {
+   "task": "read_df",
+   "size": "small",
+   "rows": 1000,
+   "lib": "kyrax",
+   "before_source": "pre-change build re-measured in final session",
+   "baseline_original": {
+    "cpu": {
+     "median": 0.656425,
+     "min": 0.639223,
+     "max": 0.6928139999999999,
+     "n": 5,
+     "noise_pct": 8.16407053357199
+    },
+    "rss": {
+     "median": 111.92578125,
+     "min": 111.83984375,
+     "max": 112.078125,
+     "n": 5,
+     "noise_pct": 0.21289219278958574
+    }
+   },
+   "before": {
+    "cpu": {
+     "median": 0.637324,
+     "min": 0.6332059999999999,
+     "max": 0.668612,
+     "n": 5,
+     "noise_pct": 5.555416083499138
+    },
+    "rss": {
+     "median": 106.640625,
+     "min": 106.49609375,
+     "max": 106.81640625,
+     "n": 5,
+     "noise_pct": 0.30036630036630035
+    }
+   },
+   "after": {
+    "cpu": {
+     "median": 0.654682,
+     "min": 0.6289419999999999,
+     "max": 0.6959069999999999,
+     "n": 5,
+     "noise_pct": 10.228630083002137
+    },
+    "rss": {
+     "median": 106.4453125,
+     "min": 106.375,
+     "max": 106.5703125,
+     "n": 5,
+     "noise_pct": 0.1834862385321101
+    }
+   },
+   "verify_after": "n/a",
+   "status": "MEASURED",
+   "best_cpu": {
+    "lib": "pandas-calamine",
+    "cpu": 0.6592490000000001
+   },
+   "best_rss": {
+    "lib": "pandas-calamine",
+    "rss": 100.453125
+   }
+  },
+  {
+   "task": "read_df",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "kyrax",
+   "before_source": "pre-change build re-measured in final session",
+   "baseline_original": {
+    "cpu": {
+     "median": 1.16508,
+     "min": 1.1285020000000001,
+     "max": 1.165422,
+     "n": 3,
+     "noise_pct": 3.1688811068767677
+    },
+    "rss": {
+     "median": 153.7578125,
+     "min": 153.6015625,
+     "max": 153.8515625,
+     "n": 3,
+     "noise_pct": 0.1625933641583253
+    }
+   },
+   "before": {
+    "cpu": {
+     "median": 1.2680139999999998,
+     "min": 1.260876,
+     "max": 1.341895,
+     "n": 3,
+     "noise_pct": 6.389440495136487
+    },
+    "rss": {
+     "median": 148.31640625,
+     "min": 148.3125,
+     "max": 148.4296875,
+     "n": 3,
+     "noise_pct": 0.07901182543654034
+    }
+   },
+   "after": {
+    "cpu": {
+     "median": 1.147899,
+     "min": 1.116209,
+     "max": 1.200115,
+     "n": 3,
+     "noise_pct": 7.3095281030822425
+    },
+    "rss": {
+     "median": 148.21484375,
+     "min": 148.18359375,
+     "max": 148.30078125,
+     "n": 3,
+     "noise_pct": 0.0790659673721108
+    }
+   },
+   "verify_after": "n/a",
+   "status": "MEASURED",
+   "best_cpu": {
+    "lib": "pandas-calamine",
+    "cpu": 1.764593
+   },
+   "best_rss": {
+    "lib": "pandas-openpyxl",
+    "rss": 173.578125
+   }
+  },
+  {
+   "task": "read_df",
+   "size": "large",
+   "rows": 1000000,
+   "lib": "kyrax",
+   "before_source": "pre-change build re-measured in final session",
+   "baseline_original": {
+    "cpu": {
+     "median": 5.620989000000001,
+     "min": 5.602773999999999,
+     "max": 5.661194999999999,
+     "n": 3,
+     "noise_pct": 1.0393366718917267
+    },
+    "rss": {
+     "median": 618.7578125,
+     "min": 618.66796875,
+     "max": 618.76171875,
+     "n": 3,
+     "noise_pct": 0.015151323846921125
+    }
+   },
+   "before": {
+    "cpu": {
+     "median": 5.654967,
+     "min": 5.585577000000001,
+     "max": 6.189927999999999,
+     "n": 3,
+     "noise_pct": 10.687082700924664
+    },
+    "rss": {
+     "median": 619.10546875,
+     "min": 618.8046875,
+     "max": 619.10546875,
+     "n": 3,
+     "noise_pct": 0.04858320030790392
+    }
+   },
+   "after": {
+    "cpu": {
+     "median": 6.169496,
+     "min": 6.030292,
+     "max": 6.201561,
+     "n": 3,
+     "noise_pct": 2.7760614481312524
+    },
+    "rss": {
+     "median": 616.453125,
+     "min": 616.39453125,
+     "max": 616.5390625,
+     "n": 3,
+     "noise_pct": 0.023445618837604237
+    }
+   },
+   "verify_after": "n/a",
+   "status": "MEASURED",
+   "best_cpu": {
+    "lib": "pandas-calamine",
+    "cpu": 13.073549
+   },
+   "best_rss": {
+    "lib": "pandas-calamine",
+    "rss": 1313.16796875
+   }
+  },
+  {
+   "task": "edit",
+   "size": "large",
+   "rows": 1000000,
+   "lib": "kyrax",
+   "before_source": "pre-change build re-measured in final session",
+   "baseline_original": {
+    "cpu": {
+     "median": 6.701811,
+     "min": 6.6888499999999995,
+     "max": 7.088796,
+     "n": 3,
+     "noise_pct": 5.967730215012043
+    },
+    "rss": {
+     "median": 958.9765625,
+     "min": 958.96875,
+     "max": 959.07421875,
+     "n": 3,
+     "noise_pct": 0.010998052937294805
+    }
+   },
+   "before": {
+    "cpu": {
+     "median": 7.249571,
+     "min": 7.122098,
+     "max": 7.954458000000001,
+     "n": 3,
+     "noise_pct": 11.481506974688577
+    },
+    "rss": {
+     "median": 958.94921875,
+     "min": 958.94140625,
+     "max": 959.0859375,
+     "n": 3,
+     "noise_pct": 0.015071835627375341
+    }
+   },
+   "after": {
+    "cpu": {
+     "median": 6.778479,
+     "min": 6.453316,
+     "max": 7.117066,
+     "n": 3,
+     "noise_pct": 9.792019714157119
+    },
+    "rss": {
+     "median": 957.12890625,
+     "min": 957.015625,
+     "max": 957.12890625,
+     "n": 3,
+     "noise_pct": 0.011835526987042138
+    }
+   },
+   "verify_after": "ok (all values lossless)",
+   "status": "MEASURED"
+  },
+  {
+   "task": "write",
+   "size": "small",
+   "rows": 1000,
+   "lib": "kyrax",
+   "before_source": "pre-change build re-measured in final session",
+   "baseline_original": {
+    "cpu": {
+     "median": 0.040572,
+     "min": 0.039804,
+     "max": 0.057573000000000006,
+     "n": 5,
+     "noise_pct": 43.79621413782907
+    },
+    "rss": {
+     "median": 27.2265625,
+     "min": 27.14453125,
+     "max": 27.2421875,
+     "n": 5,
+     "noise_pct": 0.3586800573888092
+    }
+   },
+   "before": {
+    "cpu": {
+     "median": 0.039642,
+     "min": 0.039528,
+     "max": 0.041734999999999994,
+     "n": 5,
+     "noise_pct": 5.567327581857611
+    },
+    "rss": {
+     "median": 27.15625,
+     "min": 27.10546875,
+     "max": 27.23046875,
+     "n": 5,
+     "noise_pct": 0.46029919447640966
+    }
+   },
+   "after": {
+    "cpu": {
+     "median": 0.019713,
+     "min": 0.018961999999999993,
+     "max": 0.02713299999999999,
+     "n": 5,
+     "noise_pct": 41.449804697407785
+    },
+    "rss": {
+     "median": 21.7890625,
+     "min": 21.78125,
+     "max": 21.81640625,
+     "n": 5,
+     "noise_pct": 0.16134815346002152
+    }
+   },
+   "verify_after": "ok (reopens, all values)",
+   "status": "MEASURED",
+   "best_cpu": {
+    "lib": "xlsxwriter",
+    "cpu": 0.09243300000000002
+   },
+   "best_rss": {
+    "lib": "xlsxwriter-cm",
+    "rss": 20.8125
+   }
+  },
+  {
+   "task": "write",
+   "size": "small",
+   "rows": 1000,
+   "lib": "kyrax-stream",
+   "before_source": "pre-change build re-measured in final session",
+   "baseline_original": {
+    "cpu": {
+     "median": 0.04486899999999999,
+     "min": 0.038458999999999986,
+     "max": 0.05914699999999999,
+     "n": 5,
+     "noise_pct": 46.1075575564421
+    },
+    "rss": {
+     "median": 27.1640625,
+     "min": 27.125,
+     "max": 27.2421875,
+     "n": 5,
+     "noise_pct": 0.4314063848144953
+    }
+   },
+   "before": {
+    "cpu": {
+     "median": 0.041743,
+     "min": 0.040139999999999995,
+     "max": 0.058508999999999985,
+     "n": 5,
+     "noise_pct": 44.0049828713796
+    },
+    "rss": {
+     "median": 27.07421875,
+     "min": 27.03125,
+     "max": 27.09375,
+     "n": 5,
+     "noise_pct": 0.2308469196364161
+    }
+   },
+   "after": {
+    "cpu": {
+     "median": 0.019435999999999995,
+     "min": 0.017675000000000003,
+     "max": 0.019700999999999996,
+     "n": 5,
+     "noise_pct": 10.423955546408694
+    },
+    "rss": {
+     "median": 21.890625,
+     "min": 21.81640625,
+     "max": 21.9296875,
+     "n": 5,
+     "noise_pct": 0.5174875089221984
+    }
+   },
+   "verify_after": "ok (reopens, all values)",
+   "status": "MEASURED",
+   "best_cpu": {
+    "lib": "xlsxwriter",
+    "cpu": 0.09243300000000002
+   },
+   "best_rss": {
+    "lib": "xlsxwriter-cm",
+    "rss": 20.8125
+   }
+  },
+  {
+   "task": "write",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "kyrax",
+   "before_source": "pre-change build re-measured in final session",
+   "baseline_original": {
+    "cpu": {
+     "median": 1.076229,
+     "min": 1.034548,
+     "max": 1.097941,
+     "n": 3,
+     "noise_pct": 5.890289148499067
+    },
+    "rss": {
+     "median": 404.1484375,
+     "min": 404.1015625,
+     "max": 404.25,
+     "n": 3,
+     "noise_pct": 0.036728460690881676
+    }
+   },
+   "before": {
+    "cpu": {
+     "median": 1.133697,
+     "min": 1.091186,
+     "max": 1.4435069999999999,
+     "n": 3,
+     "noise_pct": 31.077174941805428
+    },
+    "rss": {
+     "median": 404.109375,
+     "min": 404.08203125,
+     "max": 404.2109375,
+     "n": 3,
+     "noise_pct": 0.03189885164134091
+    }
+   },
+   "after": {
+    "cpu": {
+     "median": 0.5288840000000001,
+     "min": 0.5271480000000001,
+     "max": 0.5654669999999999,
+     "n": 3,
+     "noise_pct": 7.245256048585299
+    },
+    "rss": {
+     "median": 126.671875,
+     "min": 126.65234375,
+     "max": 126.671875,
+     "n": 3,
+     "noise_pct": 0.015418773899099543
+    }
+   },
+   "verify_after": "ok (reopens, all values)",
+   "status": "MEASURED",
+   "best_cpu": {
+    "lib": "xlsxwriter",
+    "cpu": 5.122285000000001
+   },
+   "best_rss": {
+    "lib": "xlsxwriter-cm",
+    "rss": 55.6796875
+   }
+  },
+  {
+   "task": "write",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "kyrax-stream",
+   "before_source": "pre-change build re-measured in final session",
+   "baseline_original": {
+    "cpu": {
+     "median": 1.060009,
+     "min": 1.04718,
+     "max": 1.09335,
+     "n": 3,
+     "noise_pct": 4.355623395650419
+    },
+    "rss": {
+     "median": 399.55078125,
+     "min": 399.44140625,
+     "max": 399.55859375,
+     "n": 3,
+     "noise_pct": 0.02932981375568265
+    }
+   },
+   "before": {
+    "cpu": {
+     "median": 1.33957,
+     "min": 1.3190179999999998,
+     "max": 1.4051429999999998,
+     "n": 3,
+     "noise_pct": 6.429301940174833
+    },
+    "rss": {
+     "median": 399.68359375,
+     "min": 399.609375,
+     "max": 399.7265625,
+     "n": 3,
+     "noise_pct": 0.02932006763162267
+    }
+   },
+   "after": {
+    "cpu": {
+     "median": 0.54206,
+     "min": 0.537032,
+     "max": 0.5683769999999999,
+     "n": 3,
+     "noise_pct": 5.7825701951813375
+    },
+    "rss": {
+     "median": 126.6640625,
+     "min": 126.63671875,
+     "max": 126.76953125,
+     "n": 3,
+     "noise_pct": 0.10485412940233146
+    }
+   },
+   "verify_after": "ok (reopens, all values)",
+   "status": "MEASURED",
+   "best_cpu": {
+    "lib": "xlsxwriter",
+    "cpu": 5.122285000000001
+   },
+   "best_rss": {
+    "lib": "xlsxwriter-cm",
+    "rss": 55.6796875
+   }
+  },
+  {
+   "task": "write",
+   "size": "large",
+   "rows": 1000000,
+   "lib": "kyrax",
+   "before_source": "pre-change build re-measured in final session",
+   "baseline_original": {
+    "cpu": {
+     "median": 26.089771,
+     "min": 25.510367000000002,
+     "max": 26.916012000000002,
+     "n": 3,
+     "noise_pct": 5.387724560710018
+    },
+    "rss": {
+     "median": 3807.12109375,
+     "min": 3807.10546875,
+     "max": 3807.23046875,
+     "n": 3,
+     "noise_pct": 0.0032833208327732876
+    }
+   },
+   "before": {
+    "cpu": {
+     "median": 25.227114,
+     "min": 19.317555000000002,
+     "max": 25.868853,
+     "n": 3,
+     "noise_pct": 25.969272585044802
+    },
+    "rss": {
+     "median": 3807.36328125,
+     "min": 3807.32421875,
+     "max": 3807.40625,
+     "n": 3,
+     "noise_pct": 0.0021545422367226334
+    }
+   },
+   "after": {
+    "cpu": {
+     "median": 5.422233000000001,
+     "min": 5.124089999999999,
+     "max": 5.794519,
+     "n": 3,
+     "noise_pct": 12.364444685427593
+    },
+    "rss": {
+     "median": 1103.76171875,
+     "min": 1103.7578125,
+     "max": 1103.87890625,
+     "n": 3,
+     "noise_pct": 0.010971004696297817
+    }
+   },
+   "verify_after": "ok (reopens, spot rows)",
+   "status": "MEASURED",
+   "best_cpu": {
+    "lib": "xlsxwriter-cm",
+    "cpu": 56.814601999999994
+   },
+   "best_rss": {
+    "lib": "xlsxwriter-cm",
+    "rss": 372.546875
+   }
+  },
+  {
+   "task": "write",
+   "size": "large",
+   "rows": 1000000,
+   "lib": "kyrax-stream",
+   "before_source": "pre-change build re-measured in final session",
+   "baseline_original": {
+    "cpu": {
+     "median": 23.87423,
+     "min": 23.340417,
+     "max": 26.939546999999997,
+     "n": 3,
+     "noise_pct": 15.075376252972342
+    },
+    "rss": {
+     "median": 3832.67578125,
+     "min": 3832.453125,
+     "max": 3832.7578125,
+     "n": 3,
+     "noise_pct": 0.007949733225298497
+    }
+   },
+   "before": {
+    "cpu": {
+     "median": 23.949516000000003,
+     "min": 15.660275000000002,
+     "max": 25.798004,
+     "n": 3,
+     "noise_pct": 42.329577766832514
+    },
+    "rss": {
+     "median": 3832.87109375,
+     "min": 3832.765625,
+     "max": 3832.91796875,
+     "n": 3,
+     "noise_pct": 0.003974664064450706
+    }
+   },
+   "after": {
+    "cpu": {
+     "median": 5.653383000000001,
+     "min": 5.550793,
+     "max": 5.779582000000001,
+     "n": 3,
+     "noise_pct": 4.046939681956833
+    },
+    "rss": {
+     "median": 1103.75390625,
+     "min": 1103.74609375,
+     "max": 1103.875,
+     "n": 3,
+     "noise_pct": 0.011678894114899084
+    }
+   },
+   "verify_after": "ok (reopens, spot rows)",
+   "status": "MEASURED",
+   "best_cpu": {
+    "lib": "xlsxwriter-cm",
+    "cpu": 56.814601999999994
+   },
+   "best_rss": {
+    "lib": "xlsxwriter-cm",
+    "rss": 372.546875
+   }
+  },
+  {
+   "task": "edit",
+   "size": "small",
+   "rows": 1000,
+   "lib": "kyrax",
+   "before_source": "pre-change build re-measured in final session",
+   "baseline_original": {
+    "cpu": {
+     "median": 0.044091,
+     "min": 0.038884999999999996,
+     "max": 0.051112,
+     "n": 5,
+     "noise_pct": 27.73128302828242
+    },
+    "rss": {
+     "median": 25.41796875,
+     "min": 25.265625,
+     "max": 25.53125,
+     "n": 5,
+     "noise_pct": 1.045028430920547
+    }
+   },
+   "before": {
+    "cpu": {
+     "median": 0.04839099999999999,
+     "min": 0.039998000000000006,
+     "max": 0.05829399999999999,
+     "n": 5,
+     "noise_pct": 37.80868343286973
+    },
+    "rss": {
+     "median": 25.015625,
+     "min": 24.99609375,
+     "max": 25.0625,
+     "n": 5,
+     "noise_pct": 0.2654590880699563
+    }
+   },
+   "after": {
+    "cpu": {
+     "median": 0.023145,
+     "min": 0.021875999999999993,
+     "max": 0.034252000000000005,
+     "n": 5,
+     "noise_pct": 53.47159213653062
+    },
+    "rss": {
+     "median": 23.4609375,
+     "min": 23.4375,
+     "max": 23.703125,
+     "n": 5,
+     "noise_pct": 1.1322011322011323
+    }
+   },
+   "verify_after": "ok (all values lossless)",
+   "status": "MEASURED",
+   "best_cpu": {
+    "lib": "openpyxl",
+    "cpu": 0.6131319999999999
+   },
+   "best_rss": {
+    "lib": "openpyxl",
+    "rss": 42.41015625
+   }
+  },
+  {
+   "task": "edit",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "kyrax",
+   "before_source": "pre-change build re-measured in final session",
+   "baseline_original": {
+    "cpu": {
+     "median": 0.726979,
+     "min": 0.679148,
+     "max": 0.7383299999999999,
+     "n": 3,
+     "noise_pct": 8.140812870798186
+    },
+    "rss": {
+     "median": 114.3515625,
+     "min": 114.296875,
+     "max": 114.4296875,
+     "n": 3,
+     "noise_pct": 0.11614401858304298
+    }
+   },
+   "before": {
+    "cpu": {
+     "median": 0.8748769999999999,
+     "min": 0.726248,
+     "max": 0.8796619999999999,
+     "n": 3,
+     "noise_pct": 17.535493560809112
+    },
+    "rss": {
+     "median": 114.31640625,
+     "min": 114.24609375,
+     "max": 114.3671875,
+     "n": 3,
+     "noise_pct": 0.10592858363232531
+    }
+   },
+   "after": {
+    "cpu": {
+     "median": 0.7321089999999999,
+     "min": 0.691196,
+     "max": 0.8873219999999999,
+     "n": 3,
+     "noise_pct": 26.789180299654824
+    },
+    "rss": {
+     "median": 112.328125,
+     "min": 112.30078125,
+     "max": 112.33984375,
+     "n": 3,
+     "noise_pct": 0.034775351231047434
+    }
+   },
+   "verify_after": "ok (all values lossless)",
+   "status": "MEASURED",
+   "best_cpu": {
+    "lib": "openpyxl",
+    "cpu": 16.949475999999997
+   },
+   "best_rss": {
+    "lib": "openpyxl",
+    "rss": 442.3515625
+   }
+  }
+ ],
+ "competitor_reruns": [
+  {
+   "task": "import",
+   "size": "small",
+   "lib": "calamine",
+   "orig_cpu": 0.0010030000000000004,
+   "cpu": 0.0012189999999999979,
+   "n": 5,
+   "orig_rss": 12.5,
+   "rss": 12.50390625
+  },
+  {
+   "task": "read_values",
+   "size": "small",
+   "lib": "calamine",
+   "orig_cpu": 0.007389,
+   "cpu": 0.007467000000000001,
+   "n": 5,
+   "orig_rss": 13.48046875,
+   "rss": 13.46484375
+  },
+  {
+   "task": "read_values",
+   "size": "medium",
+   "lib": "calamine",
+   "orig_cpu": 0.635563,
+   "cpu": 0.621918,
+   "n": 3,
+   "orig_rss": 84.20703125,
+   "rss": 84.15625
+  },
+  {
+   "task": "read_values",
+   "size": "large",
+   "lib": "calamine",
+   "orig_cpu": 6.549704999999999,
+   "cpu": 6.337162999999999,
+   "n": 3,
+   "orig_rss": 727.7890625,
+   "rss": 727.75
+  },
+  {
+   "task": "read_df",
+   "size": "small",
+   "lib": "pandas-calamine",
+   "orig_cpu": 0.660802,
+   "cpu": 0.6592490000000001,
+   "n": 5,
+   "orig_rss": 106.0859375,
+   "rss": 100.453125
+  },
+  {
+   "task": "read_df",
+   "size": "medium",
+   "lib": "pandas-calamine",
+   "orig_cpu": 1.6996459999999998,
+   "cpu": 1.764593,
+   "n": 3,
+   "orig_rss": 227.140625,
+   "rss": 221.51171875
+  },
+  {
+   "task": "read_df",
+   "size": "large",
+   "lib": "pandas-calamine",
+   "orig_cpu": 13.236453000000001,
+   "cpu": 13.073549,
+   "n": 3,
+   "orig_rss": 1318.59375,
+   "rss": 1313.16796875
+  },
+  {
+   "task": "write",
+   "size": "small",
+   "lib": "xlsxwriter",
+   "orig_cpu": 0.09203599999999999,
+   "cpu": 0.09243300000000002,
+   "n": 5,
+   "orig_rss": 21.87109375,
+   "rss": 21.8046875
+  },
+  {
+   "task": "write",
+   "size": "small",
+   "lib": "xlsxwriter-cm",
+   "orig_cpu": 0.09712799999999999,
+   "cpu": 0.10785199999999999,
+   "n": 5,
+   "orig_rss": 20.8671875,
+   "rss": 20.8125
+  },
+  {
+   "task": "write",
+   "size": "medium",
+   "lib": "xlsxwriter",
+   "orig_cpu": 4.910325,
+   "cpu": 5.122285000000001,
+   "n": 3,
+   "orig_rss": 157.01953125,
+   "rss": 156.9609375
+  },
+  {
+   "task": "write",
+   "size": "medium",
+   "lib": "xlsxwriter-cm",
+   "orig_cpu": 5.369712,
+   "cpu": 5.58492,
+   "n": 3,
+   "orig_rss": 55.734375,
+   "rss": 55.6796875
+  },
+  {
+   "task": "edit",
+   "size": "small",
+   "lib": "openpyxl",
+   "orig_cpu": 0.610367,
+   "cpu": 0.6131319999999999,
+   "n": 5,
+   "orig_rss": 45.12109375,
+   "rss": 42.41015625
+  },
+  {
+   "task": "edit",
+   "size": "medium",
+   "lib": "openpyxl",
+   "orig_cpu": 17.343034,
+   "cpu": 16.949475999999997,
+   "n": 3,
+   "orig_rss": 444.953125,
+   "rss": 442.3515625
+  },
+  {
+   "task": "write",
+   "size": "large",
+   "lib": "xlsxwriter-cm",
+   "orig_cpu": 54.348299999999995,
+   "cpu": 56.814601999999994,
+   "n": 1,
+   "orig_rss": 372.68359375,
+   "rss": 372.546875
+  }
+ ]
+}

@@ -1,0 +1,183 @@
+{
+ "meta": {
+  "date_utc": "2026-10-11 12:29 UTC",
+  "git": "2067acf",
+  "python": "3.13.16",
+  "platform": "Linux-6.18.44-fc-v114-x86_64-with-glibc2.39",
+  "cpus": 4,
+  "cpu_model": "Intel(R) Xeon(R) Processor @ 2.80GHz",
+  "mode": "full",
+  "harness_runtime_s": 40.9,
+  "versions": {
+   "openpyxl": "3.1.5",
+   "XlsxWriter": "3.2.9",
+   "python-calamine": "0.8.3",
+   "pandas": "3.0.6",
+   "pyarrow": "23.0.0",
+   "numpy": "2.5.4",
+   "kyrax": "/home/user/kyrax/python/kyrax"
+  }
+ },
+ "rows": [
+  {
+   "task": "write",
+   "size": "small",
+   "rows": 1000,
+   "lib": "xlsxwriter",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.09243300000000002,
+    "min": 0.08998500000000001,
+    "max": 0.107711,
+    "n": 5,
+    "noise_pct": 19.17713370765851
+   },
+   "cpu_total_s": {
+    "median": 0.136749,
+    "min": 0.131811,
+    "max": 0.154137,
+    "n": 5,
+    "noise_pct": 16.326261983634236
+   },
+   "rss_mb": {
+    "median": 21.8046875,
+    "min": 21.76171875,
+    "max": 21.90625,
+    "n": 5,
+    "noise_pct": 0.6628448584736654
+   },
+   "wall_task_s": {
+    "median": 0.09794442800011893,
+    "min": 0.09211288500000592,
+    "max": 0.11224756900014654,
+    "n": 5,
+    "noise_pct": 20.557253139623395
+   },
+   "shape": [
+    1001,
+    8
+   ],
+   "verify": "ok (reopens, all values)"
+  },
+  {
+   "task": "write",
+   "size": "small",
+   "rows": 1000,
+   "lib": "xlsxwriter-cm",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.10785199999999999,
+    "min": 0.096887,
+    "max": 0.149439,
+    "n": 5,
+    "noise_pct": 48.7260319697363
+   },
+   "cpu_total_s": {
+    "median": 0.155281,
+    "min": 0.139721,
+    "max": 0.195406,
+    "n": 5,
+    "noise_pct": 35.86079430194292
+   },
+   "rss_mb": {
+    "median": 20.8125,
+    "min": 20.80078125,
+    "max": 20.93359375,
+    "n": 5,
+    "noise_pct": 0.6381381381381381
+   },
+   "wall_task_s": {
+    "median": 0.11094355599993833,
+    "min": 0.09948006199988413,
+    "max": 0.15299031300014576,
+    "n": 5,
+    "noise_pct": 48.23195950226382
+   },
+   "shape": [
+    1001,
+    8
+   ],
+   "verify": "ok (reopens, all values)"
+  },
+  {
+   "task": "write",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "xlsxwriter",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 5.122285000000001,
+    "min": 4.981698,
+    "max": 5.680832,
+    "n": 3,
+    "noise_pct": 13.648869596283687
+   },
+   "cpu_total_s": {
+    "median": 5.741066,
+    "min": 5.6180959999999995,
+    "max": 6.3292589999999995,
+    "n": 3,
+    "noise_pct": 12.387298804786427
+   },
+   "rss_mb": {
+    "median": 156.9609375,
+    "min": 156.9375,
+    "max": 157.02734375,
+    "n": 3,
+    "noise_pct": 0.057239560001990944
+   },
+   "wall_task_s": {
+    "median": 5.205497951000098,
+    "min": 5.096982017000073,
+    "max": 5.785491761999992,
+    "n": 3,
+    "noise_pct": 13.226587571082236
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "verify": "ok (reopens, all values)"
+  },
+  {
+   "task": "write",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "xlsxwriter-cm",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 5.58492,
+    "min": 5.494023,
+    "max": 5.732239,
+    "n": 3,
+    "noise_pct": 4.265343102497431
+   },
+   "cpu_total_s": {
+    "median": 6.015317,
+    "min": 5.900918,
+    "max": 6.157152,
+    "n": 3,
+    "noise_pct": 4.259692381964244
+   },
+   "rss_mb": {
+    "median": 55.6796875,
+    "min": 55.66015625,
+    "max": 55.6875,
+    "n": 3,
+    "noise_pct": 0.049109022028904166
+   },
+   "wall_task_s": {
+    "median": 5.698666015000072,
+    "min": 5.6375597220001055,
+    "max": 5.858972564999931,
+    "n": 3,
+    "noise_pct": 3.8853451389679776
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "verify": "ok (reopens, all values)"
+  }
+ ]
+}
