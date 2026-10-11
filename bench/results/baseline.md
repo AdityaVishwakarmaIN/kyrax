@@ -55,6 +55,16 @@
 | edit | medium (100,000) | openpyxl | 17.343 | 2% | 18.252 | 445 | 445-445 | 17.247 | 3 |  |  | ok (all values lossless) | MEASURED |
 | edit | large (1,000,000) | **kyrax** | 6.702 | 6% | 6.768 | 959 | 959-959 | 6.782 | 3 |  |  | ok (all values lossless) | MEASURED |
 
+## Value semantics caveat (read_values)
+
+The read_values libraries do not return identical Python values for the same file (fixture
+row 2 shown): kyrax read_only `iter_rows` -> `(1.0, 4918.52, 'cat-31', 'item-1384', 44973.0,
+'TRUE', 366.0, 47.994)` (dates as serial floats, booleans as "TRUE"/"FALSE" strings, ints as
+floats); python-calamine -> `[1.0, ..., datetime.date(2023, 2, 16), True, 366.0, ...]`;
+openpyxl -> `(1, ..., datetime.datetime(2023, 2, 16, 0, 0), True, 366, ...)`. kyrax therefore
+does less conversion work in this row; any "faster than" claim on read_values must carry this
+caveat.
+
 ## Test-suite baseline (commit ea9b33a, before any optimization)
 
 | suite | command | result |
