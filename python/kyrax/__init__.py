@@ -1247,12 +1247,12 @@ class ReadOnlyWorksheet:
                 "read_only=True streaming is values_only forward streaming"
             )
 
-        if read_excel_turbo_iter_rows is None or not _PYARROW_AVAILABLE:
+        if read_excel_turbo_iter_rows is None:
             # Fail loudly instead of silently materializing the whole sheet:
             # the read_only contract is bounded-memory streaming.
             raise ImportError(
-                "read_only=True streaming requires pyarrow "
-                "(install kyrax[pandas+pyarrow]) — refusing to load the full sheet eagerly"
+                "read_only=True streaming requires the native streaming reader "
+                "— refusing to load the full sheet eagerly"
             )
 
         rowiter = read_excel_turbo_iter_rows(
@@ -1280,10 +1280,10 @@ class ReadOnlyWorksheet:
 
     def cell(self, row: int, column: int) -> _ReadOnlyCellProxy:
         self._ensure_open()
-        if read_excel_turbo_cell is None or not _PYARROW_AVAILABLE:
+        if read_excel_turbo_cell is None:
             raise ImportError(
-                "read_only cell lookup requires pyarrow "
-                "(install kyrax[pandas+pyarrow]) — refusing to load the full sheet eagerly"
+                "read_only cell lookup requires the native streaming reader "
+                "— refusing to load the full sheet eagerly"
             )
         val = read_excel_turbo_cell(str(self._wb._path), self._sheet_idx, row, column)
         return _ReadOnlyCellProxy(val, row, column)
