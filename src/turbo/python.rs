@@ -11,7 +11,7 @@ use pyo3::{
     Bound, PyAny, PyResult, Python,
     exceptions::PyValueError,
     prelude::*,
-    types::{PyDict, PyList, PyString, PyTuple},
+    types::{PyBool, PyDict, PyFloat, PyList, PyString, PyTuple},
 };
 
 use super::{
@@ -1941,6 +1941,139 @@ pub fn py_read_excel_turbo_iter(
 // re-injection, min/max row/col selection, values_only tuples) and cell lookup
 // here in Rust so the Python layer stays a thin, loop-free API doorway.
 
+/// One Arrow column of a streamed batch, converted to Python objects one cell
+/// at a time without going through pyarrow. Produces exactly the values
+/// pyarrow's `to_pylist()` returned for the same column.
+enum PendingCol {
+    F64(arrow_array::Float64Array),
+    F32(arrow_array::Float32Array),
+    I64(arrow_array::Int64Array),
+    Bool(arrow_array::BooleanArray),
+    Utf8(arrow_array::StringArray),
+    LargeUtf8(arrow_array::LargeStringArray),
+    /// Dictionary<Int32, Utf8>: each dictionary value's `PyString` is created
+    /// at most once per batch and shared by every row that references it.
+    Dict {
+        keys: arrow_array::Int32Array,
+        values: arrow_array::StringArray,
+        cache: Vec<Option<Py<PyAny>>>,
+    },
+}
+
+impl PendingCol {
+    fn new(col: &ArrayRef) -> PyResult<Self> {
+        use arrow_array::{
+            BooleanArray, DictionaryArray, Float32Array, Float64Array, Int64Array,
+            LargeStringArray, StringArray,
+        };
+        use arrow_schema::DataType;
+        macro_rules! down {
+            ($t:ty) => {
+                col.as_any()
+                    .downcast_ref::<$t>()
+                    .expect("arrow type matches its declared DataType")
+            };
+        }
+        Ok(match col.data_type() {
+            DataType::Float64 => Self::F64(down!(Float64Array).clone()),
+            DataType::Float32 => Self::F32(down!(Float32Array).clone()),
+            DataType::Int64 => Self::I64(down!(Int64Array).clone()),
+            DataType::Boolean => Self::Bool(down!(BooleanArray).clone()),
+            DataType::Utf8 => Self::Utf8(down!(StringArray).clone()),
+            DataType::LargeUtf8 => Self::LargeUtf8(down!(LargeStringArray).clone()),
+            DataType::Dictionary(k, v)
+                if matches!(k.as_ref(), DataType::Int32) && matches!(v.as_ref(), DataType::Utf8) =>
+            {
+                let d = down!(DictionaryArray<Int32Type>);
+                let values = d
+                    .values()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("dictionary values are Utf8")
+                    .clone();
+                Self::Dict {
+                    keys: d.keys().clone(),
+                    cache: std::iter::repeat_with(|| None).take(values.len()).collect(),
+                    values,
+                }
+            }
+            other => {
+                return Err(arrow_err(format!(
+                    "unsupported streaming column type {other} for read_only rows"
+                ))
+                .into());
+            }
+        })
+    }
+
+    fn value_at<'py>(&mut self, py: Python<'py>, i: usize) -> Bound<'py, PyAny> {
+        match self {
+            Self::F64(a) => {
+                if a.is_null(i) {
+                    py.None().into_bound(py)
+                } else {
+                    PyFloat::new(py, a.value(i)).into_any()
+                }
+            }
+            Self::F32(a) => {
+                if a.is_null(i) {
+                    py.None().into_bound(py)
+                } else {
+                    PyFloat::new(py, f64::from(a.value(i))).into_any()
+                }
+            }
+            Self::I64(a) => {
+                if a.is_null(i) {
+                    py.None().into_bound(py)
+                } else {
+                    a.value(i).into_pyobject(py).unwrap().into_any()
+                }
+            }
+            Self::Bool(a) => {
+                if a.is_null(i) {
+                    py.None().into_bound(py)
+                } else {
+                    PyBool::new(py, a.value(i)).to_owned().into_any()
+                }
+            }
+            Self::Utf8(a) => {
+                if a.is_null(i) {
+                    py.None().into_bound(py)
+                } else {
+                    PyString::new(py, a.value(i)).into_any()
+                }
+            }
+            Self::LargeUtf8(a) => {
+                if a.is_null(i) {
+                    py.None().into_bound(py)
+                } else {
+                    PyString::new(py, a.value(i)).into_any()
+                }
+            }
+            Self::Dict {
+                keys,
+                values,
+                cache,
+            } => {
+                if keys.is_null(i) {
+                    return py.None().into_bound(py);
+                }
+                let k = keys.value(i) as usize;
+                if let Some(v) = &cache[k] {
+                    return v.bind(py).clone();
+                }
+                let obj: Bound<'py, PyAny> = if values.is_null(k) {
+                    py.None().into_bound(py)
+                } else {
+                    PyString::new(py, values.value(k)).into_any()
+                };
+                cache[k] = Some(obj.clone().unbind());
+                obj
+            }
+        }
+    }
+}
+
 #[pyclass(name = "ReadOnlyRows", module = "kyrax._kyrax")]
 pub struct PyReadOnlyRowIter {
     inner: Option<crate::turbo::stream::SheetStream>,
@@ -1954,11 +2087,12 @@ pub struct PyReadOnlyRowIter {
     header_done: bool,
     data_row: usize,
     finished: bool,
-    // Pending batch state: pyarrow lists for the selected columns, plus the
-    // row window within the batch that is still to be yielded. `pending_staged`
-    // distinguishes "a batch is staged" from "no columns were selected".
+    // Pending batch state: the batch's Arrow columns (selected columns only,
+    // converted to Python objects row by row), plus the row window within the
+    // batch that is still to be yielded. `pending_staged` distinguishes "a
+    // batch is staged" from "no columns were selected".
     pending_staged: bool,
-    pending_arrays: Vec<Py<PyAny>>,
+    pending_arrays: Vec<PendingCol>,
     pending_sub_start: usize,
     pending_sub_end: usize,
     pending_row: usize,
@@ -1995,11 +2129,11 @@ impl PyReadOnlyRowIter {
         Ok(PyTuple::new(py, items)?.into_any())
     }
 
-    fn build_row<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn build_row<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let r = self.pending_row;
         let mut items: Vec<Bound<'py, PyAny>> = Vec::with_capacity(self.pending_arrays.len());
-        for arr in &self.pending_arrays {
-            items.push(arr.bind(py).get_item(r)?);
+        for col in &mut self.pending_arrays {
+            items.push(col.value_at(py, r));
         }
         Ok(PyTuple::new(py, items)?.into_any())
     }
@@ -2013,47 +2147,29 @@ impl PyReadOnlyRowIter {
         batch_start: usize,
         num: usize,
     ) -> PyResult<()> {
-        #[cfg(feature = "pyarrow")]
-        {
-            use arrow_pyarrow::ToPyArrow;
-            let num_cols = batch.num_columns();
-            let c1 = self.min_col.saturating_sub(1);
-            let c2 = self.data_c2(num_cols);
-            let sub_start = self.min_row.saturating_sub(batch_start).min(num);
-            let sub_end = match self.max_row {
-                Some(m) => (m.saturating_sub(batch_start) + 1).min(num),
-                None => num,
-            };
-            let mut arrays: Vec<Py<PyAny>> = Vec::new();
-            if sub_start < sub_end {
-                for c in c1..c2 {
-                    if c < num_cols {
-                        let arr = batch.column(c).clone();
-                        let py_arr = arr
-                            .to_data()
-                            .to_pyarrow(py)
-                            .map_err(|e| arrow_err(e.to_string()))?;
-                        // to_pylist converts Arrow scalars to native Python
-                        // values (matching the old batch.to_pydict() path).
-                        let py_list = py_arr
-                            .call_method0("to_pylist")
-                            .map_err(|e| arrow_err(e.to_string()))?;
-                        arrays.push(py_list.unbind());
-                    }
+        let _ = py;
+        let num_cols = batch.num_columns();
+        let c1 = self.min_col.saturating_sub(1);
+        let c2 = self.data_c2(num_cols);
+        let sub_start = self.min_row.saturating_sub(batch_start).min(num);
+        let sub_end = match self.max_row {
+            Some(m) => (m.saturating_sub(batch_start) + 1).min(num),
+            None => num,
+        };
+        let mut arrays: Vec<PendingCol> = Vec::new();
+        if sub_start < sub_end {
+            for c in c1..c2 {
+                if c < num_cols {
+                    arrays.push(PendingCol::new(batch.column(c))?);
                 }
             }
-            self.pending_arrays = arrays;
-            self.pending_sub_start = sub_start;
-            self.pending_sub_end = sub_end;
-            self.pending_row = sub_start;
-            self.pending_staged = true;
-            Ok(())
         }
-        #[cfg(not(feature = "pyarrow"))]
-        {
-            let _ = (py, batch, batch_start, num);
-            Err(PyValueError::new_err("pyarrow feature is not enabled"))
-        }
+        self.pending_arrays = arrays;
+        self.pending_sub_start = sub_start;
+        self.pending_sub_end = sub_end;
+        self.pending_row = sub_start;
+        self.pending_staged = true;
+        Ok(())
     }
 }
 
@@ -2265,24 +2381,7 @@ pub fn py_read_excel_turbo_cell<'py>(
         if col0 >= num_cols {
             return Ok(py.None().into_bound(py));
         }
-        #[cfg(feature = "pyarrow")]
-        {
-            use arrow_pyarrow::ToPyArrow;
-            let arr = batch.column(col0).clone();
-            let py_arr = arr
-                .to_data()
-                .to_pyarrow(py)
-                .map_err(|e| arrow_err(e.to_string()))?;
-            let py_list = py_arr
-                .call_method0("to_pylist")
-                .map_err(|e| arrow_err(e.to_string()))?;
-            return Ok(py_list.get_item(idx)?);
-        }
-        #[cfg(not(feature = "pyarrow"))]
-        {
-            let _ = idx;
-            return Err(PyValueError::new_err("pyarrow feature is not enabled"));
-        }
+        return Ok(PendingCol::new(batch.column(col0))?.value_at(py, idx));
     }
     Ok(py.None().into_bound(py))
 }

@@ -3,3 +3,4 @@ __pycache__/
 results/smoke.*
 results/latest.*
 results/quick.*
+results/gate_*

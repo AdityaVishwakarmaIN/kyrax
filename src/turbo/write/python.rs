@@ -18,7 +18,8 @@ use super::style_engine::{
     ProtDesc, SideDesc, StyleDesc,
 };
 use super::writer::{
-    date_to_serial, datetime_to_serial, save_workbook, save_workbook_stream, write_workbook_bytes,
+    date_to_serial, datetime_to_serial, save_workbook_owned, save_workbook_stream_owned,
+    write_workbook_bytes_owned,
 };
 use crate::error::{KyraxError, KyraxErrorKind};
 use crate::turbo::error::{TurboError, TurboResult};
@@ -1915,6 +1916,29 @@ pub(super) fn py_to_cell_value_flagged(
     if obj.is_none() {
         return Ok(CellValue::Empty);
     }
+    // Exact-type pre-dispatch: skips the failing `extract` / `getattr` probes below
+    // (each failure builds a PyErr). Anything that does not match exactly, or whose
+    // fast conversion fails, falls through to the generic chain unchanged.
+    if let Ok(f) = obj.cast_exact::<pyo3::types::PyFloat>() {
+        return Ok(CellValue::Number(f.value()));
+    }
+    if obj.is_exact_instance_of::<pyo3::types::PyInt>() {
+        if let Ok(i) = obj.extract::<i64>() {
+            return Ok(CellValue::Number(i as f64));
+        }
+    } else if obj.is_exact_instance_of::<pyo3::types::PyString>() {
+        if let Ok(s) = obj.extract::<String>() {
+            return str_to_cell_value(obj, s);
+        }
+    } else if obj.is_exact_instance_of::<pyo3::types::PyBool>() {
+        if let Ok(b) = obj.extract::<bool>() {
+            return Ok(CellValue::Bool(b));
+        }
+    } else if let Some(has_time) = exact_datetime_kind(obj) {
+        if let Some(v) = date_attrs_to_cell(obj, style_flag.as_deref_mut(), Some(has_time)) {
+            return Ok(v);
+        }
+    }
     // Hot path first: numbers/bools/strings before dict (1M numeric must stay cheap)
     // bool before int (bool is subclass of int in Python)
     if obj.is_instance_of::<pyo3::types::PyBool>() {
@@ -1928,31 +1952,8 @@ pub(super) fn py_to_cell_value_flagged(
     if let Ok(f) = obj.extract::<f64>() {
         return Ok(CellValue::Number(f));
     }
-    if let Ok(mut s) = obj.extract::<String>() {
-        if s.starts_with('#') && is_excel_error(&s) {
-            return Ok(CellValue::Error(s));
-        }
-        // Byte length is an upper bound on char count, so the common case is one
-        // integer compare; only pay for the UTF-8 scan when it could actually trip.
-        if s.len() > 32767 {
-            let n = s.chars().count();
-            if n > 32767 {
-                pyo3::PyErr::warn(
-                    obj.py(),
-                    &obj.py().get_type::<pyo3::exceptions::PyUserWarning>(),
-                    std::ffi::CString::new(format!(
-                        "cell string is {n} characters; Excel's limit is 32767, so it was truncated. Shorten the value or split it across cells to silence this."
-                    ))
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?
-                    .as_c_str(),
-                    0,
-                )?;
-                if let Some((idx, _)) = s.char_indices().nth(32767) {
-                    s.truncate(idx);
-                }
-            }
-        }
-        return Ok(CellValue::Str(s));
+    if let Ok(s) = obj.extract::<String>() {
+        return str_to_cell_value(obj, s);
     }
     // rich text / styled wrappers (dict) — rare relative to scalars
     if let Ok(d) = obj.cast::<PyDict>() {
@@ -1968,38 +1969,8 @@ pub(super) fn py_to_cell_value_flagged(
         }
     }
     // datetime.date / datetime.datetime via attributes
-    if let Ok(year) = obj.getattr("year") {
-        if let (Ok(y), Ok(m), Ok(d)) = (
-            year.extract::<i32>(),
-            obj.getattr("month").and_then(|x| x.extract::<u32>()),
-            obj.getattr("day").and_then(|x| x.extract::<u32>()),
-        ) {
-            // datetime has hour
-            if let Ok(hour) = obj.getattr("hour").and_then(|x| x.extract::<u32>()) {
-                let minute = obj
-                    .getattr("minute")
-                    .and_then(|x| x.extract::<u32>())
-                    .unwrap_or(0);
-                let second = obj
-                    .getattr("second")
-                    .and_then(|x| x.extract::<u32>())
-                    .unwrap_or(0);
-                let micros = obj
-                    .getattr("microsecond")
-                    .and_then(|x| x.extract::<u32>())
-                    .unwrap_or(0);
-                if let Some(f) = style_flag.as_deref_mut() {
-                    *f = true;
-                }
-                return Ok(CellValue::DateSerial(datetime_to_serial(
-                    y, m, d, hour, minute, second, micros,
-                )));
-            }
-            if let Some(f) = style_flag {
-                *f = true;
-            }
-            return Ok(CellValue::DateSerial(date_to_serial(y, m, d)));
-        }
+    if let Some(v) = date_attrs_to_cell(obj, style_flag.as_deref_mut(), None) {
+        return Ok(v);
     }
     // datetime.time via attributes hour, minute, second (without year)
     if obj.getattr("year").is_err() {
@@ -2044,6 +2015,104 @@ pub(super) fn py_to_cell_value_flagged(
         "unsupported cell value type: {}",
         obj.get_type().name()?
     )))
+}
+
+/// Error-literal check + Excel's 32767-char limit (UserWarning + truncation) for a
+/// string cell. Shared by the exact-`str` fast path and the generic chain.
+fn str_to_cell_value(obj: &Bound<'_, PyAny>, mut s: String) -> PyResult<CellValue> {
+    if s.starts_with('#') && is_excel_error(&s) {
+        return Ok(CellValue::Error(s));
+    }
+    // Byte length is an upper bound on char count, so the common case is one
+    // integer compare; only pay for the UTF-8 scan when it could actually trip.
+    if s.len() > 32767 {
+        let n = s.chars().count();
+        if n > 32767 {
+            pyo3::PyErr::warn(
+                obj.py(),
+                &obj.py().get_type::<pyo3::exceptions::PyUserWarning>(),
+                std::ffi::CString::new(format!(
+                    "cell string is {n} characters; Excel's limit is 32767, so it was truncated. Shorten the value or split it across cells to silence this."
+                ))
+                .map_err(|e| PyValueError::new_err(e.to_string()))?
+                .as_c_str(),
+                0,
+            )?;
+            if let Some((idx, _)) = s.char_indices().nth(32767) {
+                s.truncate(idx);
+            }
+        }
+    }
+    Ok(CellValue::Str(s))
+}
+
+/// `Some(true)` if `obj` is exactly `datetime.datetime`, `Some(false)` if exactly
+/// `datetime.date` (subclasses such as pandas.Timestamp return `None`).
+fn exact_datetime_kind(obj: &Bound<'_, PyAny>) -> Option<bool> {
+    use pyo3::sync::PyOnceLock;
+    use pyo3::types::PyType;
+    static DATETIME: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+    static DATE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+    let py = obj.py();
+    let ty = obj.get_type_ptr();
+    if ty == DATETIME.import(py, "datetime", "datetime").ok()?.as_type_ptr() {
+        Some(true)
+    } else if ty == DATE.import(py, "datetime", "date").ok()?.as_type_ptr() {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// date / datetime via attributes. `shape`: `Some(true)` known datetime, `Some(false)`
+/// known plain date (skips the `hour` probe), `None` unknown (probe `hour`).
+/// Returns `None` when `obj` has no usable year/month/day (caller falls through).
+fn date_attrs_to_cell(
+    obj: &Bound<'_, PyAny>,
+    style_flag: Option<&mut bool>,
+    shape: Option<bool>,
+) -> Option<CellValue> {
+    use pyo3::intern;
+    let py = obj.py();
+    let year = obj.getattr(intern!(py, "year")).ok()?;
+    let (Ok(y), Ok(m), Ok(d)) = (
+        year.extract::<i32>(),
+        obj.getattr(intern!(py, "month"))
+            .and_then(|x| x.extract::<u32>()),
+        obj.getattr(intern!(py, "day"))
+            .and_then(|x| x.extract::<u32>()),
+    ) else {
+        return None;
+    };
+    // datetime has hour
+    let hour = if shape == Some(false) {
+        None
+    } else {
+        obj.getattr(intern!(py, "hour"))
+            .and_then(|x| x.extract::<u32>())
+            .ok()
+    };
+    if let Some(f) = style_flag {
+        *f = true;
+    }
+    if let Some(hour) = hour {
+        let minute = obj
+            .getattr(intern!(py, "minute"))
+            .and_then(|x| x.extract::<u32>())
+            .unwrap_or(0);
+        let second = obj
+            .getattr(intern!(py, "second"))
+            .and_then(|x| x.extract::<u32>())
+            .unwrap_or(0);
+        let micros = obj
+            .getattr(intern!(py, "microsecond"))
+            .and_then(|x| x.extract::<u32>())
+            .unwrap_or(0);
+        return Some(CellValue::DateSerial(datetime_to_serial(
+            y, m, d, hour, minute, second, micros,
+        )));
+    }
+    Some(CellValue::DateSerial(date_to_serial(y, m, d)))
 }
 
 fn is_excel_error(s: &str) -> bool {
@@ -4146,7 +4215,7 @@ pub fn py_write_excel_turbo(
         recalculate,
         vba_archive_path,
     )?;
-    py.detach(|| save_workbook(&wb, path))
+    py.detach(|| save_workbook_owned(wb, path))
         .map_err(write_err_to_py)
 }
 
@@ -4225,7 +4294,7 @@ pub fn py_write_excel_turbo_stream(
     )?;
     py.detach(|| {
         let file = std::fs::File::create(path)?;
-        save_workbook_stream(&wb, file)?;
+        save_workbook_stream_owned(wb, file)?;
         Ok::<(), std::io::Error>(())
     })
     .map_err(write_err_to_py)
@@ -4303,7 +4372,7 @@ pub fn py_write_excel_turbo_bytes<'py>(
         vba_archive_path,
     )?;
     let bytes = py
-        .detach(|| write_workbook_bytes(&wb))
+        .detach(|| write_workbook_bytes_owned(wb))
         .map_err(write_err_to_py)?;
     Ok(pyo3::types::PyBytes::new(py, &bytes))
 }

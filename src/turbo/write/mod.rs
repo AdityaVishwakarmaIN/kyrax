@@ -49,8 +49,9 @@ pub use style_engine::{
     StyleDesc, StyleEngine,
 };
 pub use writer::{
-    date_to_serial, datetime_to_serial, save_workbook, save_workbook_stream,
-    write_numeric_grid_sheet, write_workbook_bytes, write_worksheet,
+    date_to_serial, datetime_to_serial, save_workbook, save_workbook_owned, save_workbook_stream,
+    save_workbook_stream_owned, write_numeric_grid_sheet, write_workbook_bytes,
+    write_workbook_bytes_owned, write_worksheet,
 };
 pub use xml::{col_letters, dimension_ref, escape_text, write_coord};
 pub use zip::ZipWriter;
