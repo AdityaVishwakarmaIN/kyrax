@@ -60,7 +60,7 @@ fn put_xml_scratch(mut v: Vec<u8>) {
 const SHEET_NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const REL_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
-static THEME_XML: &str = include_str!("theme_office.xml");
+pub(super) static THEME_XML: &str = include_str!("theme_office.xml");
 
 const _: () = {
     let bytes = THEME_XML.as_bytes();
@@ -80,7 +80,7 @@ const DATETIME_NUM_FMT: &str = "m/d/yy h:mm";
 
 /// Global part counters for drawings/charts/tables/comments.
 #[derive(Default, Clone, Copy)]
-struct PartCounters {
+pub(super) struct PartCounters {
     chart_id: usize,
     drawing_id: usize,
     table_id: usize,
@@ -88,7 +88,7 @@ struct PartCounters {
 }
 
 /// SST access during sheet emission: build (serial) or fixed lookup (parallel).
-enum SstAccess<'a> {
+pub(super) enum SstAccess<'a> {
     Build(&'a mut SstBuilder),
     Fixed(&'a SstBuilder),
 }
@@ -111,7 +111,7 @@ struct SheetZipParts {
 }
 
 /// Extra package part produced while writing a sheet.
-struct ExtraPart {
+pub(super) struct ExtraPart {
     path: String,
     data: Vec<u8>,
     content_type: Option<&'static str>,
@@ -119,7 +119,7 @@ struct ExtraPart {
 
 /// Package sidecar parts for a sheet. Sheet XML itself is written into a
 /// caller-owned scratch buffer (write-through into the zip).
-struct SheetEmit {
+pub(super) struct SheetEmit {
     rels: Option<Vec<u8>>,
     extras: Vec<ExtraPart>,
     /// One entry per authored pivot on this sheet: the cache id the pivot parts
@@ -131,7 +131,7 @@ struct SheetEmit {
 /// Deterministic per-pivot assignment: the global part index (drives
 /// `pivotCacheDefinitionN.xml` / `pivotTableN.xml` numbering) and the cache id.
 #[derive(Clone, Copy)]
-struct PivotAssign {
+pub(super) struct PivotAssign {
     part_index: usize,
     cache_id: u32,
 }
@@ -139,7 +139,7 @@ struct PivotAssign {
 /// A pivot cache that reached the workbook level: its cacheId (referenced from
 /// workbook.xml `<pivotCaches>` and the pivot table) and its part index
 /// (determines the `pivotCache/pivotCacheDefinitionN.xml` rel target).
-struct PivotCacheWiring {
+pub(super) struct PivotCacheWiring {
     cache_id: u32,
     part_index: usize,
 }
@@ -647,7 +647,7 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
 
 const METHOD_DEFLATE: u16 = 8;
 
-fn stream_add_entry<W: io::Write + Seek>(
+pub(super) fn stream_add_entry<W: io::Write + Seek>(
     zip: &mut StreamingZipWriter<W>,
     name: &str,
     data: &[u8],
@@ -1003,22 +1003,14 @@ fn emit_sheet_auto_filter(out: &mut Vec<u8>, af: &AutoFilterMeta, features: Writ
     emit_auto_filter(out, &range_a1(&af.ref_), cols);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn write_sheet_package_stream<W: io::Write + Seek>(
+/// Everything through `<sheetData>`: opens the sheet entry and writes the
+/// worksheet head. Shared by the buffered-row streamer and `rowstream`.
+pub(super) fn write_sheet_head<W: io::Write + Seek>(
     zip: &mut StreamingZipWriter<W>,
     sheet_path: &str,
     sheet: &Sheet,
-    use_sst: bool,
-    emit_cache: bool,
-    sst: &mut SstAccess<'_>,
-    counters: &mut PartCounters,
-    features: WriteFeatures,
-    interner: &MediaInterner,
-    pivot_assigns: &[PivotAssign],
-    date_iso: bool,
-    date1904: bool,
     chunk_buf: &mut Vec<u8>,
-) -> io::Result<SheetEmit> {
+) -> io::Result<()> {
     zip.start_entry(sheet_path, METHOD_DEFLATE)?;
 
     let need_r = sheet_needs_r_ns(sheet);
@@ -1183,15 +1175,20 @@ fn write_sheet_package_stream<W: io::Write + Seek>(
     push(chunk_buf, b"<sheetData>");
     zip.write_chunk(chunk_buf)?;
     chunk_buf.clear();
+    Ok(())
+}
 
-    for row in &sheet.rows {
-        write_row(chunk_buf, row, use_sst, emit_cache, sst, date_iso, date1904);
-        if !chunk_buf.is_empty() {
-            zip.write_chunk(chunk_buf)?;
-            chunk_buf.clear();
-        }
-    }
-
+/// From `</sheetData>` through closing the sheet entry (structural trailers,
+/// sidecar parts, rels). `chunk_buf` must be empty on entry.
+pub(super) fn write_sheet_tail<W: io::Write + Seek>(
+    zip: &mut StreamingZipWriter<W>,
+    sheet: &Sheet,
+    counters: &mut PartCounters,
+    features: WriteFeatures,
+    interner: &MediaInterner,
+    pivot_assigns: &[PivotAssign],
+    chunk_buf: &mut Vec<u8>,
+) -> io::Result<SheetEmit> {
     push(chunk_buf, b"</sheetData>");
 
     let mut rels: Vec<(String, String, Option<String>)> = Vec::new();
@@ -1432,6 +1429,44 @@ fn write_sheet_package_stream<W: io::Write + Seek>(
     })
 }
 
+
+#[allow(clippy::too_many_arguments)]
+fn write_sheet_package_stream<W: io::Write + Seek>(
+    zip: &mut StreamingZipWriter<W>,
+    sheet_path: &str,
+    sheet: &Sheet,
+    use_sst: bool,
+    emit_cache: bool,
+    sst: &mut SstAccess<'_>,
+    counters: &mut PartCounters,
+    features: WriteFeatures,
+    interner: &MediaInterner,
+    pivot_assigns: &[PivotAssign],
+    date_iso: bool,
+    date1904: bool,
+    chunk_buf: &mut Vec<u8>,
+) -> io::Result<SheetEmit> {
+    write_sheet_head(zip, sheet_path, sheet, chunk_buf)?;
+
+    for row in &sheet.rows {
+        write_row(chunk_buf, row, use_sst, emit_cache, sst, date_iso, date1904);
+        if !chunk_buf.is_empty() {
+            zip.write_chunk(chunk_buf)?;
+            chunk_buf.clear();
+        }
+    }
+
+    write_sheet_tail(
+        zip,
+        sheet,
+        counters,
+        features,
+        interner,
+        pivot_assigns,
+        chunk_buf,
+    )
+}
+
 fn write_numeric_grid_sheet_stream<W: io::Write + Seek>(
     zip: &mut StreamingZipWriter<W>,
     grid: &NumericGrid,
@@ -1622,50 +1657,56 @@ pub fn resolve_workbook_styles(eng: &mut StyleEngine, sheets: &mut [Sheet], opti
         }
         for row in &mut sh.rows {
             for cell in &mut row.cells {
-                if let Some(desc) = cell.style_desc.take() {
-                    let idx = eng.resolve(desc.as_ref());
-                    cell.style = Some(idx).filter(|&i| i != 0);
-                } else if cell.style == Some(0) {
-                    // ledger 14: omit s=0
-                    cell.style = None;
-                }
-                // Date/time display: attach numFmt xf when DateSerial/Time/Duration has no style
-                if !options.date_iso && cell.style.is_none() {
-                    let inferred_fmt = match cell.value {
-                        CellValue::DateSerial(n) => {
-                            let has_time = (n.fract()).abs() > 1e-12;
-                            if has_time {
-                                Some(DATETIME_NUM_FMT)
-                            } else {
-                                Some(DATE_NUM_FMT)
-                            }
-                        }
-                        CellValue::Time(t) => {
-                            if ((t * 86400.0).round() % 60.0).abs() > 1e-6 {
-                                Some("hh:mm:ss")
-                            } else {
-                                Some("hh:mm")
-                            }
-                        }
-                        CellValue::Duration(_) => Some("[h]:mm:ss"),
-                        _ => None,
-                    };
-                    if let Some(fmt) = inferred_fmt {
-                        let idx = eng.resolve(&StyleDesc {
-                            num_fmt: Some(fmt.into()),
-                            ..Default::default()
-                        });
-                        if idx != 0 {
-                            cell.style = Some(idx);
-                        }
-                    }
-                }
+                resolve_cell_style(eng, cell, options);
             }
         }
     }
 }
 
-fn write_content_types(
+/// Per-cell style step of `resolve_workbook_styles`: resolve a pending
+/// `StyleDesc` and attach the inferred date/time/duration numFmt xf.
+pub(super) fn resolve_cell_style(eng: &mut StyleEngine, cell: &mut Cell, options: &WriteOptions) {
+    if let Some(desc) = cell.style_desc.take() {
+        let idx = eng.resolve(desc.as_ref());
+        cell.style = Some(idx).filter(|&i| i != 0);
+    } else if cell.style == Some(0) {
+        // ledger 14: omit s=0
+        cell.style = None;
+    }
+    // Date/time display: attach numFmt xf when DateSerial/Time/Duration has no style
+    if !options.date_iso && cell.style.is_none() {
+        let inferred_fmt = match cell.value {
+            CellValue::DateSerial(n) => {
+                let has_time = (n.fract()).abs() > 1e-12;
+                if has_time {
+                    Some(DATETIME_NUM_FMT)
+                } else {
+                    Some(DATE_NUM_FMT)
+                }
+            }
+            CellValue::Time(t) => {
+                if ((t * 86400.0).round() % 60.0).abs() > 1e-6 {
+                    Some("hh:mm:ss")
+                } else {
+                    Some("hh:mm")
+                }
+            }
+            CellValue::Duration(_) => Some("[h]:mm:ss"),
+            _ => None,
+        };
+        if let Some(fmt) = inferred_fmt {
+            let idx = eng.resolve(&StyleDesc {
+                num_fmt: Some(fmt.into()),
+                ..Default::default()
+            });
+            if idx != 0 {
+                cell.style = Some(idx);
+            }
+        }
+    }
+}
+
+pub(super) fn write_content_types(
     sheet_count: usize,
     chartsheet_count: usize,
     has_sst: bool,
@@ -1749,7 +1790,7 @@ fn write_content_types(
     out
 }
 
-fn write_workbook_rels(
+pub(super) fn write_workbook_rels(
     sheet_count: usize,
     chartsheet_count: usize,
     ext_link_count: usize,
@@ -1844,7 +1885,7 @@ fn write_workbook_rels(
     out
 }
 
-fn write_workbook_xml(
+pub(super) fn write_workbook_xml(
     wb: &Workbook,
     sheets: &[(String, SheetState)],
     chartsheets: &[String],
@@ -1940,7 +1981,7 @@ fn write_workbook_xml(
     out
 }
 
-fn write_sst(sst: &SstBuilder) -> Vec<u8> {
+pub(super) fn write_sst(sst: &SstBuilder) -> Vec<u8> {
     let mut out = Vec::with_capacity(sst.len() * 32 + 128);
     let unique = sst.len() as u32;
     let count = sst.total_refs();
@@ -2644,7 +2685,7 @@ fn format_iso_datetime(serial: f64, date1904: bool) -> Option<String> {
     }
 }
 
-fn write_row(
+pub(super) fn write_row(
     out: &mut Vec<u8>,
     row: &Row,
     use_sst: bool,
