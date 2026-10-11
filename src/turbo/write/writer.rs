@@ -172,6 +172,48 @@ pub fn save_workbook(wb: &Workbook, path: &str) -> io::Result<()> {
     std::fs::write(path, bytes)
 }
 
+/// Build styles.xml; with `Some(sheets)` also resolves pending style descs in place.
+fn build_styles(
+    named_styles: &[NamedStyleInput],
+    options: &WriteOptions,
+    sheets: Option<&mut [Sheet]>,
+) -> Vec<u8> {
+    let mut eng = StyleEngine::new();
+    for ns in named_styles {
+        eng.register_named_style(&ns.name, &ns.desc, ns.builtin_id);
+    }
+    if let Some(sheets) = sheets {
+        resolve_workbook_styles(&mut eng, sheets, options);
+        for sh in sheets.iter_mut() {
+            for cf in &mut sh.conditional_formatting {
+                cf.register_dxfs(&mut eng);
+            }
+        }
+    }
+    eng.emit_styles_xml()
+}
+
+/// Clone-based style prep for the borrowed entry points.
+fn prepare_styles_cloned(wb: &Workbook) -> (Vec<u8>, Option<Vec<Sheet>>) {
+    if workbook_needs_style_resolve(wb) {
+        let mut sheets = wb.sheets.clone();
+        let x = build_styles(&wb.named_styles, &wb.options, Some(&mut sheets));
+        (x, Some(sheets))
+    } else {
+        (build_styles(&wb.named_styles, &wb.options, None), None)
+    }
+}
+
+/// In-place style prep for the owned entry points (no sheet clone).
+fn prepare_styles_in_place(wb: &mut Workbook) -> Vec<u8> {
+    wb.auto_enable_structural_features();
+    if workbook_needs_style_resolve(wb) {
+        build_styles(&wb.named_styles, &wb.options, Some(&mut wb.sheets))
+    } else {
+        build_styles(&wb.named_styles, &wb.options, None)
+    }
+}
+
 pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
     // Auto-enable structural flags from content without requiring callers to set them.
     let mut wb_local;
@@ -182,7 +224,27 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
     } else {
         wb
     };
+    let (styles_xml, owned_sheets) = prepare_styles_cloned(wb);
+    write_workbook_bytes_inner(wb, styles_xml, owned_sheets)
+}
 
+/// Owned variant: resolves styles in place on `wb.sheets` (no model clone).
+/// Output is byte-identical to [`write_workbook_bytes`].
+pub fn write_workbook_bytes_owned(mut wb: Workbook) -> io::Result<Vec<u8>> {
+    let styles_xml = prepare_styles_in_place(&mut wb);
+    write_workbook_bytes_inner(&wb, styles_xml, None)
+}
+
+pub fn save_workbook_owned(wb: Workbook, path: &str) -> io::Result<()> {
+    let bytes = write_workbook_bytes_owned(wb)?;
+    std::fs::write(path, bytes)
+}
+
+fn write_workbook_bytes_inner(
+    wb: &Workbook,
+    styles_xml: Vec<u8>,
+    owned_sheets: Option<Vec<Sheet>>,
+) -> io::Result<Vec<u8>> {
     let mut zip = ZipWriter::new();
 
     let resolved_mode = wb.resolve_string_mode();
@@ -191,33 +253,6 @@ pub fn write_workbook_bytes(wb: &Workbook) -> io::Result<Vec<u8>> {
     let features = wb.options.features;
 
     // Ordering (ledger 19): resolve styles → CF dxfs → styles.xml → sheets.
-    let need_resolve = workbook_needs_style_resolve(wb);
-    let mut eng = StyleEngine::new();
-    let styles_xml: Vec<u8>;
-    let mut owned_sheets: Option<Vec<Sheet>> = None;
-
-    if need_resolve {
-        let mut sheets = wb.sheets.clone();
-        for ns in &wb.named_styles {
-            eng.register_named_style(&ns.name, &ns.desc, ns.builtin_id);
-        }
-        resolve_workbook_styles(&mut eng, &mut sheets, &wb.options);
-        for sh in &mut sheets {
-            for cf in &mut sh.conditional_formatting {
-                cf.register_dxfs(&mut eng);
-            }
-        }
-        styles_xml = eng.emit_styles_xml();
-        owned_sheets = Some(sheets);
-    } else if !wb.named_styles.is_empty() {
-        for ns in &wb.named_styles {
-            eng.register_named_style(&ns.name, &ns.desc, ns.builtin_id);
-        }
-        styles_xml = eng.emit_styles_xml();
-    } else {
-        styles_xml = eng.emit_styles_xml();
-    }
-
     let sheets_ref: &[Sheet] = owned_sheets.as_deref().unwrap_or(&wb.sheets);
 
     // Intern all images up front (first-seen order → deterministic media
@@ -680,40 +715,28 @@ pub fn save_workbook_stream<W: io::Write + Seek>(wb: &Workbook, w: W) -> io::Res
     } else {
         wb
     };
+    let (styles_xml, owned_sheets) = prepare_styles_cloned(wb);
+    save_workbook_stream_inner(wb, w, styles_xml, owned_sheets)
+}
 
+/// Owned streaming variant: resolves styles in place (no model clone).
+pub fn save_workbook_stream_owned<W: io::Write + Seek>(mut wb: Workbook, w: W) -> io::Result<W> {
+    let styles_xml = prepare_styles_in_place(&mut wb);
+    save_workbook_stream_inner(&wb, w, styles_xml, None)
+}
+
+fn save_workbook_stream_inner<W: io::Write + Seek>(
+    wb: &Workbook,
+    w: W,
+    styles_xml: Vec<u8>,
+    owned_sheets: Option<Vec<Sheet>>,
+) -> io::Result<W> {
     let mut zip = StreamingZipWriter::new(w);
 
     let resolved_mode = wb.resolve_string_mode();
     let use_sst = resolved_mode == StringMode::SharedStrings;
     let emit_cache = wb.options.emit_cached_values;
     let features = wb.options.features;
-
-    let need_resolve = workbook_needs_style_resolve(wb);
-    let mut eng = StyleEngine::new();
-    let styles_xml: Vec<u8>;
-    let mut owned_sheets: Option<Vec<Sheet>> = None;
-
-    if need_resolve {
-        let mut sheets = wb.sheets.clone();
-        for ns in &wb.named_styles {
-            eng.register_named_style(&ns.name, &ns.desc, ns.builtin_id);
-        }
-        resolve_workbook_styles(&mut eng, &mut sheets, &wb.options);
-        for sh in &mut sheets {
-            for cf in &mut sh.conditional_formatting {
-                cf.register_dxfs(&mut eng);
-            }
-        }
-        styles_xml = eng.emit_styles_xml();
-        owned_sheets = Some(sheets);
-    } else if !wb.named_styles.is_empty() {
-        for ns in &wb.named_styles {
-            eng.register_named_style(&ns.name, &ns.desc, ns.builtin_id);
-        }
-        styles_xml = eng.emit_styles_xml();
-    } else {
-        styles_xml = eng.emit_styles_xml();
-    }
 
     let sheets_ref: &[Sheet] = owned_sheets.as_deref().unwrap_or(&wb.sheets);
 
@@ -2931,6 +2954,8 @@ fn chrono_days(year: i32, month: u32, day: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::super::charts::{Chart, ChartType, Series};
+    use super::super::cf_dv::{CfRule, CfRuleKind, ConditionalFormatting};
+    use super::super::style_engine::{DxfDesc, FontDesc};
     use super::*;
     use pretty_assertions::assert_eq;
     use std::sync::Arc;
@@ -3429,5 +3454,131 @@ mod tests {
             2,
             "exactly two rels must point at the shared media part: {drels}"
         );
+    }
+
+    // ---- B1: owned vs borrowed entry points must be byte-identical ----
+
+    fn owned_base_wb() -> Workbook {
+        let mut wb = Workbook::new();
+        let mut sh = Sheet::new("S");
+        for r in 1..=20u32 {
+            let mut row = Row::new(r);
+            row.cells.push(Cell::new(1, CellValue::Number(r as f64 * 1.5)));
+            row.cells.push(Cell::new(2, CellValue::Str(format!("s{}", r % 4))));
+            sh.rows.push(row);
+        }
+        wb.sheets = vec![sh];
+        wb
+    }
+
+    fn owned_wb_dates() -> Workbook {
+        let mut wb = owned_base_wb();
+        let rows = &mut wb.sheets[0].rows;
+        rows[0].cells.push(Cell::new(3, CellValue::DateSerial(45000.0)));
+        rows[1].cells.push(Cell::new(3, CellValue::DateSerial(45000.5)));
+        rows[2].cells.push(Cell::new(3, CellValue::Time(0.25)));
+        rows[3].cells.push(Cell::new(3, CellValue::Duration(1.5)));
+        wb
+    }
+
+    fn owned_wb_styles() -> Workbook {
+        let mut wb = owned_base_wb();
+        let bold = StyleDesc {
+            font: Some(FontDesc {
+                bold: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        wb.named_styles.push(NamedStyleInput {
+            name: "Mine".into(),
+            desc: bold.clone(),
+            builtin_id: None,
+        });
+        let sh = &mut wb.sheets[0];
+        sh.rows[0].cells[0] = Cell::new(1, CellValue::Number(1.0)).with_style_desc(bold);
+        sh.rows[1].cells[0] = Cell::new(1, CellValue::Number(2.0)).with_style_desc(StyleDesc {
+            num_fmt: Some("0.00%".into()),
+            named_style: Some("Mine".into()),
+            ..Default::default()
+        });
+        sh.row_style_descs.push((
+            5,
+            StyleDesc {
+                num_fmt: Some("0.000".into()),
+                ..Default::default()
+            },
+        ));
+        sh.needs_style_work = true;
+        sh.conditional_formatting.push(ConditionalFormatting {
+            sqref: "A1:A20".into(),
+            rules: vec![CfRule {
+                kind: CfRuleKind::UniqueValues {
+                    dxf: DxfDesc {
+                        font: Some(FontDesc {
+                            italic: Some(true),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    stop_if_true: None,
+                },
+                priority: 1,
+                dxf_id: None,
+            }],
+        });
+        wb
+    }
+
+    fn owned_wb_structural() -> Workbook {
+        let mut wb = owned_base_wb();
+        let sh = &mut wb.sheets[0];
+        sh.merges.push("D1:E2".into());
+        sh.hyperlinks.push(Hyperlink {
+            ref_: "B1".into(),
+            target: Some("https://example.com".into()),
+            location: None,
+            display: None,
+        });
+        sh.auto_filter = Some(sample_auto_filter());
+        wb
+    }
+
+    fn owned_wb_dates_and_structural() -> Workbook {
+        let mut wb = owned_wb_dates();
+        wb.sheets[0].merges.push("F1:G2".into());
+        wb
+    }
+
+    fn owned_cases() -> Vec<(&'static str, Workbook)> {
+        vec![
+            ("dates", owned_wb_dates()),
+            ("styles", owned_wb_styles()),
+            ("structural", owned_wb_structural()),
+            ("numbers", owned_base_wb()),
+            ("dates+structural", owned_wb_dates_and_structural()),
+        ]
+    }
+
+    #[test]
+    fn owned_bytes_match_borrowed() {
+        for (name, wb) in owned_cases() {
+            let a = write_workbook_bytes(&wb).unwrap();
+            let b = write_workbook_bytes_owned(wb.clone()).unwrap();
+            assert!(a == b, "bytes differ for case {name}");
+        }
+    }
+
+    #[test]
+    fn owned_stream_matches_borrowed() {
+        for (name, wb) in owned_cases() {
+            let a = save_workbook_stream(&wb, std::io::Cursor::new(Vec::new()))
+                .unwrap()
+                .into_inner();
+            let b = save_workbook_stream_owned(wb.clone(), std::io::Cursor::new(Vec::new()))
+                .unwrap()
+                .into_inner();
+            assert!(a == b, "stream bytes differ for case {name}");
+        }
     }
 }
