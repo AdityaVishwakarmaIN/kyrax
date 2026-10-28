@@ -1,20 +1,14 @@
-"""Regenerate readonly_rows_expected.json (run against a BASELINE build).
+"""Shared typed-read corpus definitions and lossless value encoding.
 
-The expectations in the JSON file were produced by the pyarrow-based
-implementation of ``ReadOnlyWorksheet.iter_rows`` / ``cell`` before the
-rows were converted natively in Rust.
-
-Usage: python _gen_readonly_rows_expected.py <tests/fixtures dir> <out.json>
+Regenerate expectations with the independent reader in
+``bench/generate_readonly_oracle.py``. The saved corpus comes from openpyxl
+3.1.5, not from the Kyrax implementation under test.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import sys
-from pathlib import Path
-
-import kyrax
 
 FIXTURES = [
     "fixture-single-sheet.xlsx",
@@ -77,9 +71,9 @@ def digest(rows):
     return [len(rows), hashlib.sha256(blob).hexdigest()]
 
 
-def build(path):
+def build(path, *, load_workbook):
     out = {}
-    wb = kyrax.load_workbook(str(path / BIG), read_only=True)
+    wb = load_workbook(str(path / BIG), read_only=True)
     ws = wb.active
     out["__big__"] = [
         digest([[enc(c) for c in r] for r in ws.iter_rows(values_only=True, **w)])
@@ -87,7 +81,7 @@ def build(path):
     ]
     wb.close()
     for fx in FIXTURES:
-        wb = kyrax.load_workbook(str(path / fx), read_only=True)
+        wb = load_workbook(str(path / fx), read_only=True)
         entry = {}
         for name in wb.sheetnames[:2]:
             ws = wb[name]
@@ -102,4 +96,4 @@ def build(path):
 
 
 if __name__ == "__main__":
-    Path(sys.argv[2]).write_text(json.dumps(build(Path(sys.argv[1])), separators=(",", ":")))
+    raise SystemExit("Use bench/generate_readonly_oracle.py with the benchmark environment")
