@@ -186,8 +186,33 @@ def repair_excel(
     return _repair_excel(str(path), str(out_path), severity=severity)
 
 
+def _stage_workbook_source(source: typing.Any) -> typing.Any:
+    """Stage a binary workbook source to disk for the path-based streaming engine."""
+    import tempfile
+
+    staged = tempfile.NamedTemporaryFile(suffix=".xlsx")
+    try:
+        if isinstance(source, (bytes, bytearray, memoryview)):
+            staged.write(source)
+        elif hasattr(source, "read"):
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not isinstance(chunk, (bytes, bytearray, memoryview)):
+                    raise TypeError("workbook source must be a binary file-like object")
+                if not chunk:
+                    break
+                staged.write(chunk)
+        else:
+            raise TypeError("workbook source must be a path, bytes, or binary file-like object")
+        staged.flush()
+        return staged
+    except BaseException:
+        staged.close()
+        raise
+
+
 def load_workbook(
-    filename: Path | str,
+    filename: Path | str | bytes | bytearray | memoryview | typing.BinaryIO,
     read_only: bool = False,
     data_only: bool = False,
     edit_mode: bool | None = None,
@@ -195,38 +220,49 @@ def load_workbook(
 ) -> typing.Any:
     """Load an Excel workbook (openpyxl-compatible entry point).
 
+    Accepts paths, workbook bytes, and binary file-like objects. Streams are read
+    from their current position and remain open. Read-only in-memory inputs are
+    staged to a temporary file in bounded chunks; closing the workbook removes it.
+
     By default (or when ``edit_mode=True``), returns an :class:`EditableWorkbook` for
     in-place editing, sheet creation/deletion, cell mutation, styling, and formula evaluation.
 
-    If ``read_only=True``, returns a :class:`ReadOnlyWorkbook` backed by TurboReader.
+    If ``read_only=True``, returns a :class:`ReadOnlyWorkbook` backed by forward
+    streaming. ``data_only=False`` returns formula text; ``True`` returns cached
+    formula results (Kyrax does not calculate missing caches while reading).
     """
-    if isinstance(filename, str) or hasattr(filename, "__fspath__"):
+    if kwargs:
+        raise TypeError(f"unsupported arguments: {sorted(kwargs)}")
+    is_path = isinstance(filename, str) or hasattr(filename, "__fspath__")
+    if is_path:
         filename = _expand_path(filename)
-    elif not read_only and edit_mode is not False and not kwargs:
-        # In-memory workbook: bytes / bytearray / file-like (BytesIO, open(..., "rb")).
+
+    if read_only:
+        staged = None if is_path else _stage_workbook_source(filename)
+        path = filename if staged is None else staged.name
+        try:
+            reader = read_excel_turbo(path)
+            return ReadOnlyWorkbook(reader, path, data_only=data_only, source_file=staged)
+        except BaseException:
+            if staged is not None:
+                staged.close()
+            raise
+
+    if edit_mode is False:
+        return read_excel_turbo(filename)
+
+    if edit_excel is None:
+        raise NotImplementedError("edit_excel is not available in this build")
+    if not is_path:
         data = filename if isinstance(filename, (bytes, bytearray, memoryview)) else None
         if data is None and hasattr(filename, "read"):
             data = filename.read()
-        if data is not None:
-            if edit_excel_bytes is None:
-                raise NotImplementedError("edit_excel is not available in this build")
-            return edit_excel_bytes(bytes(data), data_only=data_only)
-
-    if read_only:
-        reader = read_excel_turbo(filename)
-        return ReadOnlyWorkbook(reader, filename)
-
-    if edit_mode is False:
-        if kwargs:
-            return read_excel(filename, **kwargs)
-        return read_excel_turbo(filename)
-
-    if kwargs:
-        raise TypeError(f"unsupported arguments: {sorted(kwargs)}")
-    if edit_excel is None:
-        raise NotImplementedError("edit_excel is not available in this build")
-    wb = edit_excel(str(filename), data_only=data_only)
-    return wb
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            raise TypeError("workbook source must be a path, bytes, or binary file-like object")
+        if edit_excel_bytes is None:
+            raise NotImplementedError("edit_excel is not available in this build")
+        return edit_excel_bytes(bytes(data), data_only=data_only)
+    return edit_excel(str(filename), data_only=data_only)
 
 
 DType = Literal["null", "int", "float", "string", "boolean", "datetime", "date", "duration"]
@@ -1297,6 +1333,7 @@ class ReadOnlyWorksheet:
             max_row=max_row,
             min_col=min_col,
             max_col=max_col,
+            data_only=self._wb._data_only,
         )
         self._wb._register_stream(rowiter)
         self._active_stream = rowiter
@@ -1320,7 +1357,9 @@ class ReadOnlyWorksheet:
                 "read_only cell lookup requires the native streaming reader "
                 "— refusing to load the full sheet eagerly"
             )
-        val = read_excel_turbo_cell(str(self._wb._path), self._sheet_idx, row, column)
+        val = read_excel_turbo_cell(
+            str(self._wb._path), self._sheet_idx, row, column, data_only=self._wb._data_only
+        )
         return _ReadOnlyCellProxy(val, row, column)
 
     def close(self) -> None:
@@ -1333,9 +1372,18 @@ class ReadOnlyWorksheet:
 class ReadOnlyWorkbook:
     """Read-only workbook wrapping TurboReader and streaming engine."""
 
-    def __init__(self, reader: TurboReader, path: str | Path) -> None:
+    def __init__(
+        self,
+        reader: TurboReader,
+        path: str | Path,
+        *,
+        data_only: bool = False,
+        source_file: typing.Any = None,
+    ) -> None:
         self._reader = reader
         self._path = path
+        self._data_only = data_only
+        self._source_file = source_file
         self._cached_sheets: dict[str, ReadOnlyWorksheet] = {}
         self._open_iterators: list = []
         self._closed = False
@@ -1415,6 +1463,9 @@ class ReadOnlyWorkbook:
         _close_streams(self._open_iterators)
         self._open_iterators = []
         self._cached_sheets.clear()
+        if self._source_file is not None:
+            self._source_file.close()
+            self._source_file = None
 
 
 def read_excel_turbo(path: Path | str, password: str | None = None) -> TurboReader:

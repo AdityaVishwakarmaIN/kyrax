@@ -180,6 +180,18 @@ for row in ws.iter_rows(values_only=True):
     pass
 ```
 
+`load_workbook` also accepts workbook `bytes`, `bytearray`, `memoryview`, and binary
+file-like objects such as `io.BytesIO`. Streams are consumed from their current
+position and remain open. Read-only inputs supplied in memory are staged to a
+temporary file with bounded reads; use a context manager or call `close()` to
+remove that file promptly. Path inputs stream directly from the source file.
+
+In read-only mode, `iter_rows(values_only=True)` and `cell(...).value` preserve
+individual cell values and types, including the first row. Use `data_only=True`
+for stored formula results; the default returns formula text. Reading does not
+calculate missing formula caches. The column-oriented Turbo/Arrow APIs continue
+to infer a shared column type for DataFrame workflows.
+
 ## Key Features
 
 - **Openpyxl drop-in replacement**: `load_workbook`, `Workbook`, `Font`, `PatternFill`, `Border`, `Side`, `Alignment`, `Protection`, `Comment`, `merge_cells`, `freeze_panes`.
