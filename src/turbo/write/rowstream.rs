@@ -18,18 +18,18 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Cursor, Seek, Write};
 
-use pyo3::exceptions::PyTypeError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 
 use super::model::*;
-use super::python::{parse_string_mode, py_to_cell_value_flagged, write_err_to_py};
+use super::python::{extract_wrapper_style, parse_string_mode, py_to_cell_value_flagged, write_err_to_py};
 use super::structural::{root_rels_xml, write_app_props, write_core_props};
 use super::style_engine::StyleEngine;
 use super::writer::{
     PartCounters, SstAccess, THEME_XML, resolve_cell_style, stream_add_entry, write_content_types,
-    write_row, write_sheet_head, write_sheet_tail, write_sst, write_workbook_rels,
+    write_row, write_sheet_head, write_sheet_head_unknown_dimension, write_sheet_tail, write_sst, write_workbook_rels,
     write_workbook_xml,
 };
 use super::media::MediaInterner;
@@ -148,12 +148,13 @@ struct SheetPlan<'py> {
     name: String,
     state: SheetState,
     rows: Option<Bound<'py, PyAny>>,
-    dimension: String,
+    dimension: Option<String>,
 }
 
 struct Plan<'py> {
     sheets: Vec<SheetPlan<'py>>,
     use_sst: bool,
+    iterable_rows: bool,
 }
 
 /// Read-only validation + dimension of one sheet's rows. `None` = ineligible.
@@ -207,6 +208,7 @@ fn plan<'py>(
     py: Python<'py>,
     sheets: &Bound<'py, PyAny>,
     kw: &Kw<'_>,
+    iterable_rows: bool,
 ) -> PyResult<Option<Plan<'py>>> {
     if !kw.plain {
         return Ok(None);
@@ -232,7 +234,7 @@ fn plan<'py>(
             let ok_key = k
                 .cast::<PyString>()
                 .ok()
-                .and_then(|s| s.to_str().ok().map(|s| matches!(s, "name" | "rows" | "visibility" | "state")))
+                .and_then(|s| s.to_str().ok().map(|s| matches!(s, "name" | "rows" | "visibility" | "state" | "rows_iter")))
                 .unwrap_or(false);
             if !ok_key {
                 return Ok(None);
@@ -257,12 +259,17 @@ fn plan<'py>(
             };
             state = st;
         }
-        let (rows, dimension) = match d.get_item("rows")? {
-            None => (None, "A1".to_string()),
-            Some(r) => match prepass(&types, &r)? {
-                Some(dim) => (Some(r), dim),
-                None => return Ok(None),
-            },
+        let source = d.get_item("rows")?.or(d.get_item("rows_iter")?);
+        let (rows, dimension) = if iterable_rows {
+            (source.filter(|r| !r.is_none()), None)
+        } else {
+            match source {
+                None => (None, Some("A1".to_string())),
+                Some(r) => match prepass(&types, &r)? {
+                    Some(dim) => (Some(r), Some(dim)),
+                    None => return Ok(None),
+                },
+            }
         };
         out.push(SheetPlan {
             name,
@@ -271,7 +278,7 @@ fn plan<'py>(
             dimension,
         });
     }
-    Ok(Some(Plan { sheets: out, use_sst }))
+    Ok(Some(Plan { sheets: out, use_sst, iterable_rows }))
 }
 
 /// Run the streaming pass into `w` and return it once the zip is finished.
@@ -288,7 +295,7 @@ fn stream<'py, W: Write + Seek + Send>(
         .map(|sp| {
             let mut s = Sheet::new(sp.name.clone());
             s.state = sp.state;
-            s.dimension = Some(sp.dimension.clone());
+            s.dimension = sp.dimension.clone();
             s
         })
         .collect();
@@ -336,23 +343,45 @@ fn stream<'py, W: Write + Seek + Send>(
 
     for (i, sp) in plan.sheets.iter().enumerate() {
         let path = format!("xl/worksheets/sheet{}.xml", i + 1);
-        write_sheet_head(&mut zip, &path, &wb.sheets[i], &mut buf).map_err(werr)?;
+        if plan.iterable_rows {
+            write_sheet_head_unknown_dimension(&mut zip, &path, &wb.sheets[i], &mut buf).map_err(werr)?;
+        } else {
+            write_sheet_head(&mut zip, &path, &wb.sheets[i], &mut buf).map_err(werr)?;
+        }
         buf.clear();
         if let Some(rows) = &sp.rows {
-            let completed = seq_for_each(rows, |ri, row_obj| {
+            let mut emit_row = |ri: usize, row_obj: Bound<'py, PyAny>| -> PyResult<bool> {
+                if ri >= MAX_ROWS {
+                    return Err(PyValueError::new_err("row count exceeds Excel limit of 1048576"));
+                }
                 row.row = ri as u32 + 1;
                 row.cells.clear();
-                let cells_ok = seq_for_each(&row_obj, |ci, c| {
+                let mut emit_cell = |ci: usize, c: Bound<'py, PyAny>| -> PyResult<bool> {
+                    if ci >= MAX_COLS {
+                        return Err(PyValueError::new_err(format!(
+                            "row {} exceeds Excel's column limit of 16384", ri + 1
+                        )));
+                    }
                     if c.is_none() {
                         return Ok(true);
                     }
                     let v = py_to_cell_value_flagged(&c, date1904, Some(&mut style_flag))?;
                     let mut cell = Cell::new(ci as u32 + 1, v);
+                    if plan.iterable_rows {
+                        cell.style_desc = extract_wrapper_style(&c)?;
+                    }
                     resolve_cell_style(&mut eng, &mut cell, &wb.options);
                     row.cells.push(cell);
                     Ok(true)
-                })?;
-                if !cells_ok {
+                };
+                if plan.iterable_rows {
+                    let cells = row_obj.try_iter().map_err(|_| {
+                        PyValueError::new_err("each row must be an iterable of cell values")
+                    })?;
+                    for (ci, c) in cells.enumerate() {
+                        emit_cell(ci, c?)?;
+                    }
+                } else if !seq_for_each(&row_obj, &mut emit_cell)? {
                     return Err(PyTypeError::new_err("row changed type while being written"));
                 }
                 write_row(
@@ -369,8 +398,15 @@ fn stream<'py, W: Write + Seek + Send>(
                     buf.clear();
                 }
                 Ok(true)
-            })?;
-            if !completed {
+            };
+            if plan.iterable_rows {
+                let iter = rows.try_iter().map_err(|_| {
+                    PyValueError::new_err("rows / rows_iter must be an iterable of row sequences")
+                })?;
+                for (ri, row_obj) in iter.enumerate() {
+                    emit_row(ri, row_obj?)?;
+                }
+            } else if !seq_for_each(rows, &mut emit_row)? {
                 return Err(PyTypeError::new_err("rows changed type while being written"));
             }
         }
@@ -456,7 +492,7 @@ pub(crate) fn try_write_path(
     kw: &Kw<'_>,
     path: &str,
 ) -> PyResult<bool> {
-    let Some(plan) = plan(py, sheets, kw)? else {
+    let Some(plan) = plan(py, sheets, kw, false)? else {
         return Ok(false);
     };
     let (file, created) = match OpenOptions::new().write(true).create_new(true).open(path) {
@@ -486,8 +522,56 @@ pub(crate) fn try_write_bytes(
     sheets: &Bound<'_, PyAny>,
     kw: &Kw<'_>,
 ) -> PyResult<Option<Vec<u8>>> {
-    let Some(plan) = plan(py, sheets, kw)? else {
+    let Some(plan) = plan(py, sheets, kw, false)? else {
         return Ok(None);
     };
     Ok(Some(stream(py, &plan, kw, Cursor::new(Vec::new()))?.into_inner()))
+}
+
+/// Single-pass row-iterable write. Eligibility is decided without consuming an
+/// iterator. A sibling temporary archive protects the destination if iteration,
+/// conversion, or an I/O operation fails late in the write.
+pub(crate) fn try_write_iter_path(
+    py: Python<'_>,
+    sheets: &Bound<'_, PyAny>,
+    kw: &Kw<'_>,
+    path: &str,
+) -> PyResult<bool> {
+    let Some(plan) = plan(py, sheets, kw, true)? else {
+        return Ok(false);
+    };
+    // Keep exact list/tuple input on the existing model fallback when it did
+    // not qualify for its validated fast path. This route is for one-shot and
+    // other lazy sources; no iterator is advanced by the eligibility check.
+    if !plan.sheets.iter().any(|s| s.rows.as_ref().is_some_and(|r| {
+        r.cast_exact::<PyList>().is_err() && r.cast_exact::<PyTuple>().is_err()
+    })) {
+        return Ok(false);
+    }
+    let target = std::path::Path::new(path);
+    let parent = target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    let name = target.file_name().ok_or_else(|| PyValueError::new_err("output path must name a file"))?;
+    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let (temp_path, file) = loop {
+        let id = NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut temp_name = std::ffi::OsString::from(".");
+        temp_name.push(name);
+        temp_name.push(format!(".kyrax-{}-{id}.tmp", std::process::id()));
+        let candidate = parent.join(temp_name);
+        match OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(file) => break (candidate, file),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(write_err_to_py(e)),
+        }
+    };
+    struct TempGuard(std::path::PathBuf);
+    impl Drop for TempGuard {
+        fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+    }
+    let guard = TempGuard(temp_path);
+    let mut writer = stream(py, &plan, kw, BufWriter::with_capacity(64 * 1024, file))?;
+    writer.flush().map_err(write_err_to_py)?;
+    drop(writer);
+    std::fs::rename(&guard.0, target).map_err(write_err_to_py)?;
+    Ok(true)
 }

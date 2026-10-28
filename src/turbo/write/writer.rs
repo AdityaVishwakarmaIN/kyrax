@@ -1034,6 +1034,27 @@ pub(super) fn write_sheet_head<W: io::Write + Seek>(
     sheet: &Sheet,
     chunk_buf: &mut Vec<u8>,
 ) -> io::Result<()> {
+    write_sheet_head_with_dimension(zip, sheet_path, sheet, chunk_buf, true)
+}
+
+/// Single-pass row iterators cannot know their final bounds up front. The
+/// worksheet dimension element is optional in OOXML; omit it in that case.
+pub(super) fn write_sheet_head_unknown_dimension<W: io::Write + Seek>(
+    zip: &mut StreamingZipWriter<W>,
+    sheet_path: &str,
+    sheet: &Sheet,
+    chunk_buf: &mut Vec<u8>,
+) -> io::Result<()> {
+    write_sheet_head_with_dimension(zip, sheet_path, sheet, chunk_buf, false)
+}
+
+fn write_sheet_head_with_dimension<W: io::Write + Seek>(
+    zip: &mut StreamingZipWriter<W>,
+    sheet_path: &str,
+    sheet: &Sheet,
+    chunk_buf: &mut Vec<u8>,
+    known_dimension: bool,
+) -> io::Result<()> {
     zip.start_entry(sheet_path, METHOD_DEFLATE)?;
 
     let need_r = sheet_needs_r_ns(sheet);
@@ -1080,9 +1101,11 @@ pub(super) fn write_sheet_head<W: io::Write + Seek>(
     } else {
         "A1".into()
     };
-    push(chunk_buf, br#"<dimension ref=""#);
-    push(chunk_buf, dim.as_bytes());
-    push(chunk_buf, br#""/>"#);
+    if known_dimension {
+        push(chunk_buf, br#"<dimension ref=""#);
+        push(chunk_buf, dim.as_bytes());
+        push(chunk_buf, br#""/>"#);
+    }
 
     push(chunk_buf, br#"<sheetViews><sheetView workbookViewId="0""#);
     if let Some(ref freeze) = sheet.view.freeze_cell {

@@ -1888,7 +1888,7 @@ fn apply_style_palette(sheet: &mut Sheet, palette: &[StyleDesc]) {
     }
 }
 
-fn extract_wrapper_style(obj: &Bound<'_, PyAny>) -> PyResult<Option<Box<StyleDesc>>> {
+pub(super) fn extract_wrapper_style(obj: &Bound<'_, PyAny>) -> PyResult<Option<Box<StyleDesc>>> {
     if let Ok(d) = obj.cast::<PyDict>() {
         if d.get_item("value")?.is_some() {
             if let Some(s) = d.get_item("style")? {
@@ -4271,6 +4271,9 @@ pub fn py_write_excel_turbo_stream(
         && !(lock_structure || macro_enabled || recalculate);
     let kw = rowstream::Kw::new(string_mode, emit_cached_values, date1904, date_iso, active_tab, creator, plain);
     if rowstream::try_write_path(py, sheets, &kw, path)? {
+        return Ok(());
+    }
+    if rowstream::try_write_iter_path(py, sheets, &kw, path)? {
         return Ok(());
     }
     let wb = build_workbook_from_py(
