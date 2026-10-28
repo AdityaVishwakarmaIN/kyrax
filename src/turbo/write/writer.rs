@@ -2961,6 +2961,16 @@ pub fn date_to_serial(year: i32, month: u32, day: u32) -> f64 {
     days as f64
 }
 
+/// Excel serial from a civil date in the selected workbook epoch.
+/// The 1904 epoch has no fictitious leap day, including for dates before 1904.
+pub fn date_to_serial_for_epoch(year: i32, month: u32, day: u32, date1904: bool) -> f64 {
+    if date1904 {
+        (chrono_days(year, month, day) - chrono_days(1904, 1, 1)) as f64
+    } else {
+        date_to_serial(year, month, day)
+    }
+}
+
 /// Excel serial from datetime (fractional day).
 pub fn datetime_to_serial(
     year: i32,
@@ -3004,6 +3014,16 @@ mod tests {
     #[test]
     fn serial_known() {
         assert_eq!(date_to_serial(2020, 1, 15), 43845.0);
+    }
+
+    #[test]
+    fn serial_1904_epoch() {
+        assert_eq!(date_to_serial_for_epoch(2024, 1, 2, true), 43831.0);
+        assert_eq!(date_to_serial_for_epoch(2024, 1, 2, false), 45293.0);
+        assert_eq!(date_to_serial_for_epoch(1904, 1, 1, true), 0.0);
+        assert_eq!(date_to_serial_for_epoch(1900, 1, 1, true), -1460.0);
+        assert_eq!(date_to_serial_for_epoch(1900, 2, 28, true), -1402.0);
+        assert_eq!(date_to_serial_for_epoch(1900, 3, 1, true), -1401.0);
     }
 
     #[test]

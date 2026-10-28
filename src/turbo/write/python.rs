@@ -18,7 +18,7 @@ use super::style_engine::{
     ProtDesc, SideDesc, StyleDesc,
 };
 use super::writer::{
-    date_to_serial, datetime_to_serial, save_workbook_owned, save_workbook_stream_owned,
+    date_to_serial_for_epoch, save_workbook_owned, save_workbook_stream_owned,
     write_workbook_bytes_owned,
 };
 use crate::error::{KyraxError, KyraxErrorKind};
@@ -1912,7 +1912,6 @@ pub(super) fn py_to_cell_value_flagged(
     date1904: bool,
     mut style_flag: Option<&mut bool>,
 ) -> PyResult<CellValue> {
-    let _ = date1904; // serial epoch reserved for W2 display; values use Windows 1900
     if obj.is_none() {
         return Ok(CellValue::Empty);
     }
@@ -1935,7 +1934,7 @@ pub(super) fn py_to_cell_value_flagged(
             return Ok(CellValue::Bool(b));
         }
     } else if let Some(has_time) = exact_datetime_kind(obj) {
-        if let Some(v) = date_attrs_to_cell(obj, style_flag.as_deref_mut(), Some(has_time)) {
+        if let Some(v) = date_attrs_to_cell(obj, date1904, style_flag.as_deref_mut(), Some(has_time)) {
             return Ok(v);
         }
     }
@@ -1969,7 +1968,7 @@ pub(super) fn py_to_cell_value_flagged(
         }
     }
     // datetime.date / datetime.datetime via attributes
-    if let Some(v) = date_attrs_to_cell(obj, style_flag.as_deref_mut(), None) {
+    if let Some(v) = date_attrs_to_cell(obj, date1904, style_flag.as_deref_mut(), None) {
         return Ok(v);
     }
     // datetime.time via attributes hour, minute, second (without year)
@@ -2069,6 +2068,7 @@ fn exact_datetime_kind(obj: &Bound<'_, PyAny>) -> Option<bool> {
 /// Returns `None` when `obj` has no usable year/month/day (caller falls through).
 fn date_attrs_to_cell(
     obj: &Bound<'_, PyAny>,
+    date1904: bool,
     style_flag: Option<&mut bool>,
     shape: Option<bool>,
 ) -> Option<CellValue> {
@@ -2108,11 +2108,17 @@ fn date_attrs_to_cell(
             .getattr(intern!(py, "microsecond"))
             .and_then(|x| x.extract::<u32>())
             .unwrap_or(0);
-        return Some(CellValue::DateSerial(datetime_to_serial(
-            y, m, d, hour, minute, second, micros,
-        )));
+        let fraction = hour as f64 / 24.0
+            + minute as f64 / 1440.0
+            + second as f64 / 86400.0
+            + micros as f64 / 86_400_000_000.0;
+        return Some(CellValue::DateSerial(
+            date_to_serial_for_epoch(y, m, d, date1904) + fraction,
+        ));
     }
-    Some(CellValue::DateSerial(date_to_serial(y, m, d)))
+    Some(CellValue::DateSerial(date_to_serial_for_epoch(
+        y, m, d, date1904,
+    )))
 }
 
 fn is_excel_error(s: &str) -> bool {
@@ -4523,7 +4529,7 @@ fn write_editable(
             kind: FormulaKind::Normal,
             cached: None,
         },
-        v => readback::rebase_epoch(v, date1904),
+        v => v,
     };
     let fmt = default_date_format(obj, &val);
     ov.set_cell(sheet, row, col, val);
