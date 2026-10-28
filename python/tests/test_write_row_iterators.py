@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import datetime as dt
 import itertools
+import os
+import stat
 import warnings
 import zipfile
 from pathlib import Path
@@ -158,3 +160,12 @@ def test_generator_row_limit_is_enforced_without_retaining_rows(tmp_path):
         )
     assert not target.exists()
     assert list(tmp_path.glob(".*.tmp")) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_generator_replacement_preserves_existing_permissions(tmp_path):
+    target = tmp_path / "private.xlsx"
+    target.write_bytes(b"old")
+    target.chmod(0o600)
+    kyrax.write_excel_turbo_stream(target, [{"rows": iter([[1]])}])
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600

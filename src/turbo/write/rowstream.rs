@@ -549,6 +549,11 @@ pub(crate) fn try_write_iter_path(
         return Ok(false);
     }
     let target = std::path::Path::new(path);
+    let existing_permissions = match std::fs::metadata(target) {
+        Ok(meta) => Some(meta.permissions()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(write_err_to_py(e)),
+    };
     let parent = target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
     let name = target.file_name().ok_or_else(|| PyValueError::new_err("output path must name a file"))?;
     static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -572,6 +577,9 @@ pub(crate) fn try_write_iter_path(
     let mut writer = stream(py, &plan, kw, BufWriter::with_capacity(64 * 1024, file))?;
     writer.flush().map_err(write_err_to_py)?;
     drop(writer);
+    if let Some(permissions) = existing_permissions {
+        std::fs::set_permissions(&guard.0, permissions).map_err(write_err_to_py)?;
+    }
     std::fs::rename(&guard.0, target).map_err(write_err_to_py)?;
     Ok(true)
 }
