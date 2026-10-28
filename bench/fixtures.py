@@ -20,14 +20,13 @@ SEED = 20261011
 FIXTURE_VERSION = 1
 
 
-def make_rows(n: int) -> list[list]:
-    """Header + n data rows, 8 mixed-type columns (int, float, str, date, bool)."""
+def iter_rows(n: int):
+    """Yield header + n deterministic rows without retaining the data set."""
     rnd = random.Random(SEED)
-    rows: list[list] = [list(HEADER)]
+    yield list(HEADER)
     cats = _CATS
     for i in range(n):
-        rows.append(
-            [
+        yield [
                 i + 1,
                 round(rnd.random() * 10_000, 2),
                 cats[rnd.randrange(50)],
@@ -37,8 +36,11 @@ def make_rows(n: int) -> list[list]:
                 rnd.randrange(1000),
                 round(rnd.random() * 100, 3),
             ]
-        )
-    return rows
+
+
+def make_rows(n: int) -> list[list]:
+    """Header + n data rows, 8 mixed-type columns (int, float, str, date, bool)."""
+    return list(iter_rows(n))
 
 
 def fixture_path(cache_dir: str, size: str) -> str:

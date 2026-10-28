@@ -99,7 +99,7 @@ def verify(task, lib, size, fixture, out, nrows):
     from python_calamine import CalamineWorkbook
 
     got = CalamineWorkbook.from_path(out).get_sheet_by_index(0).to_python()
-    if task == "write":
+    if task in ("write", "write_stream"):
         from fixtures import make_rows
 
         exp = make_rows(nrows)
@@ -161,12 +161,17 @@ def run(args):
     for s in sizes:
         ensure_fixture(cache, s)
     rows = []
+    matrix = dict(MATRIX)
+    # Generator workloads are opt-in: historical WRITE rows use prebuilt lists.
+    if args.tasks and "write_stream" in args.tasks:
+        for size in sizes:
+            matrix[("write_stream", size)] = list(TASKS["write_stream"])
     reuse = {}
     if args.reuse:
         with open(args.reuse) as f:
             reuse = {(r["task"], r["size"], r["lib"]): r for r in json.load(f)["rows"]}
     with tempfile.TemporaryDirectory(prefix="work-", dir=cache) as workdir:
-        for (task, size), libs in MATRIX.items():
+        for (task, size), libs in matrix.items():
             if size not in sizes or (args.tasks and task not in args.tasks):
                 continue
             if args.quick or args.kyrax_only or reuse:
@@ -188,7 +193,8 @@ def run(args):
                     r = measure(python, task, lib, size, fixture, workdir, env)
                     samples[lib].append(r)
                     if rep == 0:
-                        verdicts[lib] = verify(task, lib, size, fixture, r["out"], SIZES[size])
+                        verdicts[lib] = (r["verify_read"] if task in ("read_values", "read_df")
+                                         else verify(task, lib, size, fixture, r["out"], SIZES[size]))
                     print(f"  {task:<11} {size:<6} {lib:<16} rep{rep} cpu_task={r['cpu_task']:.3f}s "
                           f"rss={r['rss_mb']:.0f}MB", file=sys.stderr, flush=True)
             for lib in libs:
@@ -201,6 +207,7 @@ def run(args):
                     "rss_mb": summarize([x["rss_mb"] for x in ss]),
                     "wall_task_s": summarize([x["wall_task"] for x in ss]),
                     "shape": ss[0]["shape"],
+                    "read_types": ss[0].get("read_types", {}),
                     "verify": verdicts.get(lib, "n/a"),
                 })
     _ratios(rows)

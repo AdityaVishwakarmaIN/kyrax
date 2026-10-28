@@ -84,3 +84,33 @@ For an "after" table without re-measuring the (unchanged) competitors:
 
 Final before/after table: `bench/final.py BASELINE AFTER --rerun PRECHANGE [COMPETITOR...]`
 joins measured result files into `bench/results/final.{json,md}` (no new numbers).
+
+## Read correctness and generator inputs (October 2026 sprint)
+
+Fresh sprint runs validate every READ cell after the timed section. Validation
+uses the deterministic source generator; booleans must be booleans, date cells
+must be Python dates/datetimes (midnight dates are equivalent), strings must
+remain strings, and numeric cells must have equal numeric values. Integral
+floats are accepted because python-calamine exposes Excel numbers as floats;
+observed column type names are recorded as `read_types` in JSON. DataFrame
+reads check column names and every value using the same rules. The worker
+retains the result through the end of timing, then snapshots peak RSS before
+validation. These timings should be compared only with runs of this harness
+version. Historical READ rows marked `n/a` were not checked by this validator.
+A known type mismatch is recorded as `FAIL`; timings remain evidence of that
+workload but must not support a claim of equivalent semantics.
+
+The original WRITE matrix constructs a full input list before timing. Its RSS
+therefore includes the complete input, and the name `kyrax-stream` does not by
+itself establish bounded memory. To measure a producer/consumer workflow:
+
+```bash
+$BENCH_PYTHON bench/run.py --tasks write_stream --sizes small medium --out sprint_generator
+```
+
+This opt-in task feeds the same deterministic generator to Kyrax's stream API,
+XlsxWriter `constant_memory`, and openpyxl `write_only`. Generation CPU is inside
+the timed section for every library; no full input list is retained. A data-only
+row measures generator consumption as a floor. Output verification is identical
+to WRITE. Run large sizes only after checking available memory: an API accepting
+an iterator can still materialize it internally.

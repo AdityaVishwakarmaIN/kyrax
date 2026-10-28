@@ -29,6 +29,10 @@ def main() -> int:
     print(f"{'task':<11} {'size':<6} {'lib':<14} {'metric':<6} {'base':>9} {'new':>9} {'delta':>8} {'noise':>6} {'gnoise':>6}  verdict")
     for r in new:
         key = (r["task"], r["size"], r["lib"])
+        # New workloads also need correctness checks, even without a baseline.
+        if r.get("verify", "n/a").startswith("FAIL"):
+            print(f"{key[0]:<11} {key[1]:<6} {key[2]:<14} verify FAILED: {r['verify']}")
+            bad += 1
         if key not in base or (not a.all_libs and not r["lib"].startswith("kyrax")):
             continue
         b = base[key]
@@ -48,9 +52,6 @@ def main() -> int:
             wider = "  [gate noise wider than baseline]" if gnoise > noise + 1.0 else ""
             print(f"{key[0]:<11} {key[1]:<6} {key[2]:<14} {metric:<6} {bm:>9.3f} {nm:>9.3f} "
                   f"{delta:>+7.1f}% {noise:>5.0f}% {gnoise:>5.0f}%  {verdict}{wider}")
-        if r.get("verify", "n/a").startswith("FAIL"):
-            print(f"{key[0]:<11} {key[1]:<6} {key[2]:<14} verify FAILED: {r['verify']}")
-            bad += 1
     print(f"\n{bad} regression(s)")
     return 1 if bad else 0
 
