@@ -57,7 +57,7 @@ def test_stream_staging_uses_bounded_reads_and_current_position(workbook_bytes):
 def test_failed_staging_and_open_remove_temporary_files(workbook_bytes, monkeypatch):
     import tempfile
 
-    original = tempfile.NamedTemporaryFile
+    original = tempfile.TemporaryDirectory
     staged_paths = []
 
     def track(*args, **kwargs):
@@ -65,7 +65,7 @@ def test_failed_staging_and_open_remove_temporary_files(workbook_bytes, monkeypa
         staged_paths.append(Path(handle.name))
         return handle
 
-    monkeypatch.setattr(tempfile, "NamedTemporaryFile", track)
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", track)
     with pytest.raises(TypeError, match="binary file-like"):
         kyrax.load_workbook(io.StringIO("not binary"), read_only=True)
     with pytest.raises(Exception):
@@ -122,3 +122,20 @@ def test_read_only_values_preserve_per_cell_types(tmp_path):
         assert actual == expected
         assert isinstance(actual[0], (int, float)) and not isinstance(actual[0], bool)
         assert [type(value) for value in actual[1:]] == [type(value) for value in expected[1:]]
+
+
+def test_legacy_edit_mode_false_routes_reader_options_without_consuming_source(
+    workbook_bytes, monkeypatch
+):
+    source = io.BytesIO(workbook_bytes)
+    calls = []
+    result = object()
+
+    def legacy_reader(filename, **kwargs):
+        calls.append((filename, kwargs))
+        return result
+
+    monkeypatch.setattr(kyrax, "read_excel", legacy_reader)
+    assert kyrax.load_workbook(source, edit_mode=False, reader_option=True) is result
+    assert calls == [(source, {"reader_option": True})]
+    assert source.tell() == 0

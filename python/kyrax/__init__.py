@@ -186,25 +186,36 @@ def repair_excel(
     return _repair_excel(str(path), str(out_path), severity=severity)
 
 
-def _stage_workbook_source(source: typing.Any) -> typing.Any:
-    """Stage a binary workbook source to disk for the path-based streaming engine."""
-    import tempfile
+class _StagedWorkbookSource:
+    """Own a staging directory while native readers reopen its closed file."""
 
-    staged = tempfile.NamedTemporaryFile(suffix=".xlsx")
+    def __init__(self) -> None:
+        import tempfile
+
+        self._directory = tempfile.TemporaryDirectory(prefix="kyrax-")
+        self.name = os.path.join(self._directory.name, "workbook.xlsx")
+
+    def close(self) -> None:
+        self._directory.cleanup()
+
+
+def _stage_workbook_source(source: typing.Any) -> _StagedWorkbookSource:
+    """Stage a binary workbook source to disk for the path-based streaming engine."""
+    staged = _StagedWorkbookSource()
     try:
-        if isinstance(source, (bytes, bytearray, memoryview)):
-            staged.write(source)
-        elif hasattr(source, "read"):
-            while True:
-                chunk = source.read(1024 * 1024)
-                if not isinstance(chunk, (bytes, bytearray, memoryview)):
-                    raise TypeError("workbook source must be a binary file-like object")
-                if not chunk:
-                    break
-                staged.write(chunk)
-        else:
-            raise TypeError("workbook source must be a path, bytes, or binary file-like object")
-        staged.flush()
+        with open(staged.name, "wb") as output:
+            if isinstance(source, (bytes, bytearray, memoryview)):
+                output.write(source)
+            elif hasattr(source, "read"):
+                while True:
+                    chunk = source.read(1024 * 1024)
+                    if not isinstance(chunk, (bytes, bytearray, memoryview)):
+                        raise TypeError("workbook source must be a binary file-like object")
+                    if not chunk:
+                        break
+                    output.write(chunk)
+            else:
+                raise TypeError("workbook source must be a path, bytes, or binary file-like object")
         return staged
     except BaseException:
         staged.close()
@@ -231,7 +242,7 @@ def load_workbook(
     streaming. ``data_only=False`` returns formula text; ``True`` returns cached
     formula results (Kyrax does not calculate missing caches while reading).
     """
-    if kwargs:
+    if kwargs and (read_only or edit_mode is not False):
         raise TypeError(f"unsupported arguments: {sorted(kwargs)}")
     is_path = isinstance(filename, str) or hasattr(filename, "__fspath__")
     if is_path:
@@ -249,6 +260,8 @@ def load_workbook(
             raise
 
     if edit_mode is False:
+        if kwargs:
+            return read_excel(filename, **kwargs)
         return read_excel_turbo(filename)
 
     if edit_excel is None:
