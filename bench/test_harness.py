@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import read_streaming
 import worker
 from fixtures import HEADER, iter_rows, make_rows
 
@@ -63,6 +64,31 @@ class ReadVerificationTests(unittest.TestCase):
         self.assertTrue(verdict.startswith("ok"))
         self.assertEqual(types["5"], ["bool", "str"])
         self.assertEqual(types["0"], ["int", "str"])
+
+
+class StreamingChecksumTests(unittest.TestCase):
+    def test_generator_and_list_digests_match(self):
+        self.assertEqual(read_streaming.consume(iter_rows(7)), read_streaming.consume(make_rows(7)))
+
+    def test_consumer_limit_does_not_request_an_extra_row(self):
+        def rows():
+            yield [1]
+            yield [2]
+            raise AssertionError("consumer read beyond requested rows")
+
+        self.assertEqual(read_streaming.consume(rows(), 2)["count"], 2)
+
+    def test_checksum_distinguishes_bool_and_number(self):
+        numeric = read_streaming.consume([[1]])
+        boolean = read_streaming.consume([[True]])
+        self.assertNotEqual(numeric["checksum"], boolean["checksum"])
+        self.assertEqual(numeric["checksum"], read_streaming.consume([[1.0]])["checksum"])
+
+    def test_checksum_distinguishes_date_and_serial(self):
+        date = read_streaming.consume([[dt.date(2024, 1, 1)]])
+        datetime = read_streaming.consume([[dt.datetime(2024, 1, 1)]])
+        self.assertEqual(date["checksum"], datetime["checksum"])
+        self.assertNotEqual(date["checksum"], read_streaming.consume([[45292.0]])["checksum"])
 
 
 class RegressionGateTests(unittest.TestCase):

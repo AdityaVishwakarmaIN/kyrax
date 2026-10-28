@@ -114,3 +114,32 @@ the timed section for every library; no full input list is retained. A data-only
 row measures generator consumption as a floor. Output verification is identical
 to WRITE. Run large sizes only after checking available memory: an API accepting
 an iterator can still materialize it internally.
+
+## First-row latency and consuming without retaining rows
+
+`read_streaming.py` is an opt-in, separate benchmark. `read_first` opens the
+workbook, consumes ten rows including the header, and closes it; `read_stream`
+consumes every row without retaining an output list. Both include the same
+Python type bookkeeping and BLAKE2 full-cell checksum work in timing for all
+libraries. Calamine uses its eager `to_python()` API for both tasks; its lack of
+a streaming iterator is a material semantic difference. All readers may load
+shared strings eagerly, so memory need not be independent of workbook size.
+
+Every worker snapshots CPU, wall time, and Linux peak RSS before generating
+expected data for untimed validation. It consumes the entire requested workload
+even when historical readers return incorrect types; `FAIL` rows must not
+support equivalent-semantics performance claims. Numeric int/float values
+normalize together, while booleans, strings, and date cells remain distinct.
+
+```bash
+$BENCH_PYTHON bench/read_streaming.py --python "$BENCH_PYTHON" \
+    --package-root /path/to/source/python --source-revision COMMIT \
+    --cache bench/.cache --repeats 3 --out bench/results/sprint_read_streaming
+```
+
+`--package-root` must contain `kyrax/__init__.py`; both it and
+`--source-revision` are required. The imported Kyrax path is checked against
+that root. JSON records each sample, imported paths, competitor versions, and
+the native extension SHA256. This supports measuring a frozen baseline package
+without falsely attributing it to the current repository HEAD. The reported
+revision is an explicit caller-supplied source label, not inferred from HEAD.
