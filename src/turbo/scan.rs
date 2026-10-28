@@ -259,6 +259,18 @@ pub(crate) fn parse_shared_strings(xml: &[u8]) -> StringArena {
         let mut p = si_tag_end;
         while let Some(to) = find_lit(&xml[p..si_close], b"<t") {
             let topen = p + to;
+            // Phonetic guides annotate the visible runs; their <t> payloads
+            // must not be concatenated into the shared string's value.
+            if let Some(rp) = find_lit(&xml[p..topen], b"<rPh") {
+                let begin = p + rp;
+                let boundary = xml.get(begin + 4).copied().unwrap_or(b'>');
+                if boundary.is_ascii_whitespace() || boundary == b'>' {
+                    if let Some(close) = find_lit(&xml[begin..si_close], b"</rPh>") {
+                        p = begin + close + 6;
+                        continue;
+                    }
+                }
+            }
             let after = xml.get(topen + 2).copied().unwrap_or(b'>');
             if !(after == b' ' || after == b'>' || after == b'/') {
                 p = topen + 2;
@@ -3204,6 +3216,16 @@ impl FormulaColumn {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn shared_strings_exclude_phonetic_guides_without_shifting_indices() {
+        let xml = r#"<sst><si><r><t>東京</t></r><rPh sb="0" eb="2"><t>とうきょう</t></rPh><r><t xml:space="preserve"> &amp; tail</t></r></si><si/><si><t>next</t></si></sst>"#;
+        let strings = parse_shared_strings(xml.as_bytes());
+        assert_eq!(strings.try_resolve(0), Some("東京 & tail".as_bytes()));
+        assert_eq!(strings.try_resolve(1), Some(b"".as_slice()));
+        assert_eq!(strings.try_resolve(2), Some(b"next".as_slice()));
+        assert_eq!(strings.try_resolve(3), None);
+    }
 
     /// Build a formula column from anchor bodies and shared dependents.
     /// Anchors sit at data-row 1 / data-col 1 (delta 0 for the anchor cell
