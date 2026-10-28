@@ -27,15 +27,15 @@ def iter_rows(n: int):
     cats = _CATS
     for i in range(n):
         yield [
-                i + 1,
-                round(rnd.random() * 10_000, 2),
-                cats[rnd.randrange(50)],
-                f"item-{rnd.randrange(n * 4 + 1)}",
-                _EPOCH + _dt.timedelta(days=rnd.randrange(3650)),
-                rnd.random() < 0.5,
-                rnd.randrange(1000),
-                round(rnd.random() * 100, 3),
-            ]
+            i + 1,
+            round(rnd.random() * 10_000, 2),
+            cats[rnd.randrange(50)],
+            f"item-{rnd.randrange(n * 4 + 1)}",
+            _EPOCH + _dt.timedelta(days=rnd.randrange(3650)),
+            rnd.random() < 0.5,
+            rnd.randrange(1000),
+            round(rnd.random() * 100, 3),
+        ]
 
 
 def make_rows(n: int) -> list[list]:
