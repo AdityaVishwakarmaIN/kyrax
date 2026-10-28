@@ -369,6 +369,9 @@ fn stream<'py, W: Write + Seek + Send>(
                     let mut cell = Cell::new(ci as u32 + 1, v);
                     if plan.iterable_rows {
                         cell.style_desc = extract_wrapper_style(&c)?;
+                        if matches!(cell.value, CellValue::Empty) && cell.style_desc.is_none() {
+                            return Ok(true);
+                        }
                     }
                     resolve_cell_style(&mut eng, &mut cell, &wb.options);
                     row.cells.push(cell);
