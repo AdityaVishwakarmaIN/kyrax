@@ -122,7 +122,7 @@ enum InflateMethod {
 /// Streaming inflate of a single zip entry's payload: reads the compressed
 /// bytes from the file in bounded chunks and feeds miniz_oxide's resumable
 /// stream inflater. Both the compressed and the inflated side stay O(chunk).
-struct EntryInflate {
+pub(crate) struct EntryInflate {
     file: std::fs::File,
     data_offset: u64,
     remaining_compressed: usize,
@@ -138,7 +138,7 @@ struct EntryInflate {
 const COMP_CHUNK: usize = 256 * 1024;
 
 impl EntryInflate {
-    fn stored(file: std::fs::File, data_offset: u64, csize: usize) -> Self {
+    pub(crate) fn stored(file: std::fs::File, data_offset: u64, csize: usize) -> Self {
         EntryInflate {
             file,
             data_offset,
@@ -150,7 +150,7 @@ impl EntryInflate {
         }
     }
 
-    fn deflated(file: std::fs::File, data_offset: u64, csize: usize) -> Self {
+    pub(crate) fn deflated(file: std::fs::File, data_offset: u64, csize: usize) -> Self {
         EntryInflate {
             file,
             data_offset,
@@ -165,7 +165,7 @@ impl EntryInflate {
     }
 
     /// Read up to `out.len()` inflated bytes. `Ok(0)` means end of entry.
-    fn read(&mut self, out: &mut [u8]) -> TurboResult<usize> {
+    pub(crate) fn read(&mut self, out: &mut [u8]) -> TurboResult<usize> {
         if self.eof || out.is_empty() {
             return Ok(0);
         }
@@ -174,7 +174,8 @@ impl EntryInflate {
                 let mut n = 0usize;
                 while n < out.len() && self.remaining_compressed > 0 {
                     let to_read = (out.len() - n).min(self.remaining_compressed);
-                    let got = file_read_at(&mut self.file, &mut out[n..n + to_read], self.data_offset)?;
+                    let got =
+                        file_read_at(&mut self.file, &mut out[n..n + to_read], self.data_offset)?;
                     if got == 0 {
                         self.eof = true;
                         break;
@@ -267,7 +268,7 @@ fn file_read_at(file: &mut std::fs::File, buf: &mut [u8], at: u64) -> TurboResul
 
 /// Find the `>` that closes the tag starting at `from`, honoring quoted
 /// attribute values so `>` inside a value does not end the tag early.
-fn tag_end(x: &[u8], from: usize) -> Option<usize> {
+pub(crate) fn tag_end(x: &[u8], from: usize) -> Option<usize> {
     let mut quote: Option<u8> = None;
     let mut i = from;
     while i < x.len() {
@@ -288,7 +289,7 @@ fn tag_end(x: &[u8], from: usize) -> Option<usize> {
 
 /// `(start, end)` of the first complete `<row>` in `buf[begin..end]`. A
 /// complete row is `<row .../>` or `<row ...>...</row>`. `None` when truncated.
-fn first_row_span(buf: &[u8], begin: usize, end: usize) -> Option<(usize, usize)> {
+pub(crate) fn first_row_span(buf: &[u8], begin: usize, end: usize) -> Option<(usize, usize)> {
     let o = find_lit(&buf[begin..end], b"<row")?;
     let s = begin + o;
     match buf.get(s + 4) {
@@ -340,14 +341,14 @@ fn first_complete_row_end(buf: &[u8], begin: usize, end: usize) -> Option<usize>
 }
 
 /// Absolute end of the `<sheetData ...>` open tag (index just past `>`).
-fn find_sheetdata_open_end(buf: &[u8]) -> Option<usize> {
+pub(crate) fn find_sheetdata_open_end(buf: &[u8]) -> Option<usize> {
     let o = memchr::memmem::find(buf, b"<sheetData")?;
     let gt = tag_end(buf, o)?;
     Some(gt + 1)
 }
 
 /// Absolute index of the `</sheetData>` close tag, or `None`.
-fn find_sheetdata_close(buf: &[u8]) -> Option<usize> {
+pub(crate) fn find_sheetdata_close(buf: &[u8]) -> Option<usize> {
     memchr::memmem::find(buf, b"</sheetData>")
 }
 
@@ -653,7 +654,7 @@ fn shared_index_raw_in_range(raw: &[u8], shared: &StringArena) -> bool {
 
 /// Small part reader via the zip crate (bounded; used for workbook.xml, rels,
 /// sharedStrings — all small relative to sheet data).
-fn read_part_zip(
+pub(crate) fn read_part_zip(
     archive: &mut zip::ZipArchive<std::fs::File>,
     name: &str,
 ) -> TurboResult<Option<Vec<u8>>> {
@@ -671,7 +672,7 @@ fn read_part_zip(
     Ok(Some(buf))
 }
 
-fn resolve_sheet_path(
+pub(crate) fn resolve_sheet_path(
     meta: &crate::turbo::structural::SheetMeta,
     sheet_idx: usize,
     wb_rels: &crate::turbo::structural::RelMap,

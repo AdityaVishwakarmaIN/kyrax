@@ -1933,243 +1933,70 @@ pub fn py_read_excel_turbo_iter(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Read-only streaming row shaping / cell lookup / lifecycle (Rust-side)
-// ---------------------------------------------------------------------------
-//
-// The read_only doorway performs all grid-semantics shaping (header row 1
-// re-injection, min/max row/col selection, values_only tuples) and cell lookup
-// here in Rust so the Python layer stays a thin, loop-free API doorway.
-
-/// One Arrow column of a streamed batch, converted to Python objects one cell
-/// at a time without going through pyarrow. Produces exactly the values
-/// pyarrow's `to_pylist()` returned for the same column.
-enum PendingCol {
-    F64(arrow_array::Float64Array),
-    F32(arrow_array::Float32Array),
-    I64(arrow_array::Int64Array),
-    Bool(arrow_array::BooleanArray),
-    Utf8(arrow_array::StringArray),
-    LargeUtf8(arrow_array::LargeStringArray),
-    /// Dictionary<Int32, Utf8>: each dictionary value's `PyString` is created
-    /// at most once per batch and shared by every row that references it.
-    Dict {
-        keys: arrow_array::Int32Array,
-        values: arrow_array::StringArray,
-        cache: Vec<Option<Py<PyAny>>>,
-    },
-}
-
-impl PendingCol {
-    fn new(col: &ArrayRef) -> PyResult<Self> {
-        use arrow_array::{
-            BooleanArray, DictionaryArray, Float32Array, Float64Array, Int64Array,
-            LargeStringArray, StringArray,
-        };
-        use arrow_schema::DataType;
-        macro_rules! down {
-            ($t:ty) => {
-                col.as_any()
-                    .downcast_ref::<$t>()
-                    .expect("arrow type matches its declared DataType")
-            };
-        }
-        Ok(match col.data_type() {
-            DataType::Float64 => Self::F64(down!(Float64Array).clone()),
-            DataType::Float32 => Self::F32(down!(Float32Array).clone()),
-            DataType::Int64 => Self::I64(down!(Int64Array).clone()),
-            DataType::Boolean => Self::Bool(down!(BooleanArray).clone()),
-            DataType::Utf8 => Self::Utf8(down!(StringArray).clone()),
-            DataType::LargeUtf8 => Self::LargeUtf8(down!(LargeStringArray).clone()),
-            DataType::Dictionary(k, v)
-                if matches!(k.as_ref(), DataType::Int32) && matches!(v.as_ref(), DataType::Utf8) =>
-            {
-                let d = down!(DictionaryArray<Int32Type>);
-                let values = d
-                    .values()
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .expect("dictionary values are Utf8")
-                    .clone();
-                Self::Dict {
-                    keys: d.keys().clone(),
-                    cache: std::iter::repeat_with(|| None).take(values.len()).collect(),
-                    values,
-                }
-            }
-            other => {
-                return Err(arrow_err(format!(
-                    "unsupported streaming column type {other} for read_only rows"
-                ))
-                .into());
-            }
-        })
-    }
-
-    fn value_at<'py>(&mut self, py: Python<'py>, i: usize) -> Bound<'py, PyAny> {
-        match self {
-            Self::F64(a) => {
-                if a.is_null(i) {
-                    py.None().into_bound(py)
-                } else {
-                    PyFloat::new(py, a.value(i)).into_any()
-                }
-            }
-            Self::F32(a) => {
-                if a.is_null(i) {
-                    py.None().into_bound(py)
-                } else {
-                    PyFloat::new(py, f64::from(a.value(i))).into_any()
-                }
-            }
-            Self::I64(a) => {
-                if a.is_null(i) {
-                    py.None().into_bound(py)
-                } else {
-                    a.value(i).into_pyobject(py).unwrap().into_any()
-                }
-            }
-            Self::Bool(a) => {
-                if a.is_null(i) {
-                    py.None().into_bound(py)
-                } else {
-                    PyBool::new(py, a.value(i)).to_owned().into_any()
-                }
-            }
-            Self::Utf8(a) => {
-                if a.is_null(i) {
-                    py.None().into_bound(py)
-                } else {
-                    PyString::new(py, a.value(i)).into_any()
-                }
-            }
-            Self::LargeUtf8(a) => {
-                if a.is_null(i) {
-                    py.None().into_bound(py)
-                } else {
-                    PyString::new(py, a.value(i)).into_any()
-                }
-            }
-            Self::Dict {
-                keys,
-                values,
-                cache,
-            } => {
-                if keys.is_null(i) {
-                    return py.None().into_bound(py);
-                }
-                let k = keys.value(i) as usize;
-                if let Some(v) = &cache[k] {
-                    return v.bind(py).clone();
-                }
-                let obj: Bound<'py, PyAny> = if values.is_null(k) {
-                    py.None().into_bound(py)
-                } else {
-                    PyString::new(py, values.value(k)).into_any()
-                };
-                cache[k] = Some(obj.clone().unbind());
-                obj
-            }
-        }
-    }
-}
-
+// Typed worksheet row iteration keeps the Arrow table doorway separate: tables
+// have a column schema, whereas an Excel grid has an independent type per cell.
 #[pyclass(name = "ReadOnlyRows", module = "kyrax._kyrax")]
 pub struct PyReadOnlyRowIter {
-    inner: Option<crate::turbo::stream::SheetStream>,
-    opts: crate::turbo::stream::StreamOptions,
-    // 1-based grid bounds (min_row/min_col clamped to >= 1).
+    inner: Option<crate::turbo::grid::GridStream>,
+    pending: std::collections::VecDeque<Vec<crate::turbo::grid::GridValue>>,
     min_row: usize,
     max_row: Option<usize>,
     min_col: usize,
     max_col: Option<usize>,
-    header: Vec<String>,
-    header_done: bool,
-    data_row: usize,
-    finished: bool,
-    // Pending batch state: the batch's Arrow columns (selected columns only,
-    // converted to Python objects row by row), plus the row window within the
-    // batch that is still to be yielded. `pending_staged` distinguishes "a
-    // batch is staged" from "no columns were selected".
-    pending_staged: bool,
-    pending_arrays: Vec<PendingCol>,
-    pending_sub_start: usize,
-    pending_sub_end: usize,
-    pending_row: usize,
+    batch_rows: usize,
+    shared_cache: ahash::AHashMap<u32, Py<PyAny>>,
 }
 
 impl PyReadOnlyRowIter {
-    /// Mirror the Python `_select` helper for the header row: `lo = min_col-1`,
-    /// `hi = min(max_col, n)` (or `n` when max_col is None), empty when lo>=hi.
-    fn header_hi(&self) -> usize {
-        match self.max_col {
-            Some(b) => b.min(self.header.len()),
-            None => self.header.len(),
-        }
-    }
-
-    /// Data-columns upper bound: `min(max_col, num_cols)` when max_col is a
-    /// positive value, else `num_cols` (mirrors Python's `c2_bound or num_cols`).
-    fn data_c2(&self, num_cols: usize) -> usize {
-        match self.max_col {
-            Some(b) if b > 0 => b.min(num_cols),
-            _ => num_cols,
-        }
-    }
-
-    fn build_header<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let lo = self.min_col.saturating_sub(1);
-        let hi = self.header_hi();
-        let mut items: Vec<Bound<'py, PyAny>> = Vec::new();
-        if lo < hi {
-            for i in lo..hi.min(self.header.len()) {
-                items.push(PyString::new(py, &self.header[i]).into_any());
-            }
-        }
-        Ok(PyTuple::new(py, items)?.into_any())
-    }
-
-    fn build_row<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let r = self.pending_row;
-        let mut items: Vec<Bound<'py, PyAny>> = Vec::with_capacity(self.pending_arrays.len());
-        for col in &mut self.pending_arrays {
-            items.push(col.value_at(py, r));
-        }
-        Ok(PyTuple::new(py, items)?.into_any())
-    }
-
-    /// Select the columns and the row window for a batch and stage them for
-    /// `build_row`. Mirrors the Python batch shaping exactly.
-    fn prepare_batch<'py>(
+    fn value<'py>(
         &mut self,
         py: Python<'py>,
-        batch: &RecordBatch,
-        batch_start: usize,
-        num: usize,
-    ) -> PyResult<()> {
-        let _ = py;
-        let num_cols = batch.num_columns();
-        let c1 = self.min_col.saturating_sub(1);
-        let c2 = self.data_c2(num_cols);
-        let sub_start = self.min_row.saturating_sub(batch_start).min(num);
-        let sub_end = match self.max_row {
-            Some(m) => (m.saturating_sub(batch_start) + 1).min(num),
-            None => num,
-        };
-        let mut arrays: Vec<PendingCol> = Vec::new();
-        if sub_start < sub_end {
-            for c in c1..c2 {
-                if c < num_cols {
-                    arrays.push(PendingCol::new(batch.column(c))?);
+        value: crate::turbo::grid::GridValue,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        use crate::turbo::grid::GridValue;
+        Ok(match value {
+            GridValue::Empty => py.None().into_bound(py),
+            GridValue::Integer(n) => n.into_pyobject(py)?.into_any(),
+            GridValue::BigInteger(s) => py.get_type::<pyo3::types::PyInt>().call1((s,))?.into_any(),
+            GridValue::Number(n) => PyFloat::new(py, n).into_any(),
+            GridValue::Boolean(b) => PyBool::new(py, b).to_owned().into_any(),
+            GridValue::String(s) => PyString::new(py, &s).into_any(),
+            GridValue::Shared(id) => {
+                if let Some(value) = self.shared_cache.get(&id) {
+                    return Ok(value.bind(py).clone());
                 }
+                let stream = self
+                    .inner
+                    .as_ref()
+                    .expect("stream is open during conversion");
+                let bytes = stream.shared.try_resolve(id).ok_or_else(|| {
+                    PyValueError::new_err(format!("shared string index {id} out of range"))
+                })?;
+                let value = PyString::new(py, &String::from_utf8_lossy(bytes)).into_any();
+                self.shared_cache.insert(id, value.clone().unbind());
+                value
             }
-        }
-        self.pending_arrays = arrays;
-        self.pending_sub_start = sub_start;
-        self.pending_sub_end = sub_end;
-        self.pending_row = sub_start;
-        self.pending_staged = true;
-        Ok(())
+            GridValue::Serial(n, kind) => {
+                let epoch = self.inner.as_ref().is_some_and(|s| s.date1904);
+                crate::turbo::write::readback::serial_to_py(py, n, kind, epoch)?
+                    .unwrap_or_else(|| PyFloat::new(py, n).into_any())
+            }
+            GridValue::IsoDate(s) => {
+                let datetime = py.import("datetime")?;
+                // ISO dates in OOXML may contain a date, datetime, or time.
+                let text = s.trim_end_matches('Z').trim_start_matches('T');
+                let class = if text.contains('T') || text.contains(' ') {
+                    "datetime"
+                } else if text.contains(':') {
+                    "time"
+                } else {
+                    "date"
+                };
+                datetime
+                    .getattr(class)?
+                    .call_method1("fromisoformat", (text,))?
+            }
+        })
     }
 }
 
@@ -2180,94 +2007,37 @@ impl PyReadOnlyRowIter {
     }
 
     fn __next__<'py>(&mut self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-        // 0. A closed iterator yields no further rows (close() clears `inner`).
         if self.inner.is_none() {
             return Ok(None);
         }
-
-        let mut stream = match self.inner.take() {
-            Some(s) => s,
-            None => return Ok(None),
-        };
-        let opts = self.opts.clone();
-
-        loop {
-            // 1. Yield a staged row (an empty tuple when no columns matched).
-            if self.pending_staged {
-                if self.pending_row < self.pending_sub_end {
-                    let tup = self.build_row(py)?;
-                    self.pending_row += 1;
-                    self.inner = Some(stream);
-                    return Ok(Some(tup));
-                }
-                self.pending_staged = false;
-                self.pending_arrays = Vec::new();
-            }
-
-            // 2. Exhausted?
-            if self.finished {
-                self.inner = Some(stream);
-                return Ok(None);
-            }
-
-            // 3. Pull the next batch.
-            let batch = match py
-                .detach(|| stream.next_batch(&opts))
-                .map_err(turbo_err_to_py)?
-            {
-                Some(b) => b,
-                None => {
-                    self.finished = true;
-                    self.inner = Some(stream);
-                    return Ok(None);
-                }
-            };
-
-            if self.header.is_empty() {
-                self.header = stream.column_names().to_vec();
-            }
-
-            let num = batch.num_rows();
-            let batch_start = self.data_row;
-            let batch_end = self.data_row.saturating_add(num).saturating_sub(1);
-            self.data_row = self.data_row.saturating_add(num);
-
-            // 4. Grid row 1 is the header: re-inject it once, before the first
-            //    data batch, mirroring Python's openpyxl-parity semantics.
-            if !self.header_done {
-                self.header_done = true;
-                let in_bounds = self.min_row <= 1 && self.max_row.map_or(true, |m| m >= 1);
-                if in_bounds && (!self.header.is_empty() || num > 0) {
-                    let hdr = self.build_header(py)?;
-                    let done = self.max_row.map_or(false, |m| batch_start > m);
-                    if done {
-                        self.finished = true;
-                    } else if batch_end >= self.min_row {
-                        self.prepare_batch(py, &batch, batch_start, num)?;
-                    }
-                    self.inner = Some(stream);
-                    return Ok(Some(hdr));
-                }
-            }
-
-            // 5. Skip batches outside the requested data-row window.
-            let done = self.max_row.map_or(false, |m| batch_start > m);
-            if done {
-                self.finished = true;
-                continue;
-            }
-            if batch_end < self.min_row {
-                continue;
-            }
-
-            // 6. Stage the data-row window for this batch; loop to yield rows.
-            self.prepare_batch(py, &batch, batch_start, num)?;
+        if self.pending.is_empty() {
+            self.shared_cache.clear();
+            let (min_row, max_row, min_col, max_col, count) = (
+                self.min_row,
+                self.max_row,
+                self.min_col,
+                self.max_col,
+                self.batch_rows,
+            );
+            let stream = self.inner.as_mut().expect("checked open");
+            self.pending = py
+                .detach(|| stream.next_rows(count, min_row, max_row, min_col, max_col))
+                .map_err(turbo_err_to_py)?;
         }
+        let Some(row) = self.pending.pop_front() else {
+            return Ok(None);
+        };
+        let values = row
+            .into_iter()
+            .map(|v| self.value(py, v))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(Some(PyTuple::new(py, values)?.into_any()))
     }
 
-    fn close(&mut self) -> PyResult<()> {
+    fn close(&mut self) {
         self.inner = None;
-        Ok(())
+        self.pending.clear();
+        self.shared_cache.clear();
     }
 
     #[getter]
@@ -2276,19 +2046,10 @@ impl PyReadOnlyRowIter {
     }
 }
 
-/// Open a streaming read of a worksheet with grid-semantics row/column shaping
-/// applied in Rust. Yields Python tuples (values_only semantics), including the
-/// header row (grid row 1) for openpyxl parity.
+/// Read a typed worksheet grid without a full-sheet schema inference pass.
 #[pyfunction(name = "read_excel_turbo_iter_rows")]
-#[pyo3(signature = (
-    path,
-    sheet_idx = 0,
-    min_row = None,
-    max_row = None,
-    min_col = None,
-    max_col = None,
-    chunk_size = 10000
-))]
+#[pyo3(signature = (path, sheet_idx=0, min_row=None, max_row=None, min_col=None,
+    max_col=None, chunk_size=10000, data_only=false))]
 pub fn py_read_excel_turbo_iter_rows(
     py: Python<'_>,
     path: &str,
@@ -2298,40 +2059,27 @@ pub fn py_read_excel_turbo_iter_rows(
     min_col: Option<usize>,
     max_col: Option<usize>,
     chunk_size: usize,
+    data_only: bool,
 ) -> PyResult<PyReadOnlyRowIter> {
     sniff_magic_bytes(path).map_err(turbo_err_to_py)?;
-    let path_buf = path.to_string();
-    let opts = crate::turbo::stream::StreamOptions {
-        batch_rows: chunk_size,
-        ..Default::default()
-    };
     let stream = py
-        .detach(|| crate::turbo::stream::SheetStream::open(&path_buf, sheet_idx, opts.clone()))
+        .detach(|| crate::turbo::grid::GridStream::open(path, sheet_idx, data_only))
         .map_err(turbo_err_to_py)?;
     Ok(PyReadOnlyRowIter {
         inner: Some(stream),
-        opts,
+        pending: Default::default(),
         min_row: min_row.unwrap_or(1).max(1),
         max_row,
         min_col: min_col.unwrap_or(1).max(1),
         max_col,
-        header: Vec::new(),
-        header_done: false,
-        data_row: 2,
-        finished: false,
-        pending_staged: false,
-        pending_arrays: Vec::new(),
-        pending_sub_start: 0,
-        pending_sub_end: 0,
-        pending_row: 0,
+        batch_rows: chunk_size.clamp(1, 10000),
+        shared_cache: Default::default(),
     })
 }
 
-/// Look up a single grid cell value (row/column 1-based) in read_only mode.
-/// Grid row 1 is the header row. Returns the cell value or `None` when the cell
-/// is empty or out of range.
+/// Typed lookup shares exactly the row iterator's parsing and slicing rules.
 #[pyfunction(name = "read_excel_turbo_cell")]
-#[pyo3(signature = (path, sheet_idx = 0, row = 1, column = 1, chunk_size = 10000))]
+#[pyo3(signature = (path, sheet_idx=0, row=1, column=1, chunk_size=10000, data_only=false))]
 pub fn py_read_excel_turbo_cell<'py>(
     py: Python<'py>,
     path: &str,
@@ -2339,51 +2087,27 @@ pub fn py_read_excel_turbo_cell<'py>(
     row: usize,
     column: usize,
     chunk_size: usize,
+    data_only: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
-    sniff_magic_bytes(path).map_err(turbo_err_to_py)?;
-    let opts = crate::turbo::stream::StreamOptions {
-        batch_rows: chunk_size,
-        ..Default::default()
-    };
-    let mut stream = crate::turbo::stream::SheetStream::open(path, sheet_idx, opts.clone())
-        .map_err(turbo_err_to_py)?;
-    let col0 = column.saturating_sub(1);
-    let mut header_pending = true;
-    let mut data_row: usize = 2;
-    loop {
-        let batch = match py
-            .detach(|| stream.next_batch(&opts))
-            .map_err(turbo_err_to_py)?
-        {
-            Some(b) => b,
-            None => break,
-        };
-        if header_pending {
-            header_pending = false;
-            let names = stream.column_names().to_vec();
-            if row == 1 {
-                return if col0 < names.len() {
-                    Ok(PyString::new(py, &names[col0]).into_any())
-                } else {
-                    Ok(py.None().into_bound(py))
-                };
-            }
-        }
-        let num = batch.num_rows();
-        let batch_start = data_row;
-        let batch_end = data_row.saturating_add(num).saturating_sub(1);
-        data_row = data_row.saturating_add(num);
-        if row < batch_start || row > batch_end {
-            continue;
-        }
-        let idx = row - batch_start;
-        let num_cols = batch.num_columns();
-        if col0 >= num_cols {
-            return Ok(py.None().into_bound(py));
-        }
-        return Ok(PendingCol::new(batch.column(col0))?.value_at(py, idx));
+    if row == 0 || column == 0 {
+        return Err(PyValueError::new_err("row and column must be at least 1"));
     }
-    Ok(py.None().into_bound(py))
+    let mut it = py_read_excel_turbo_iter_rows(
+        py,
+        path,
+        sheet_idx,
+        Some(row),
+        Some(row),
+        Some(column),
+        Some(column),
+        chunk_size,
+        data_only,
+    )?;
+    match it.__next__(py)? {
+        Some(tuple) if tuple.len()? > 0 => tuple.get_item(0),
+        Some(_) => Ok(py.None().into_bound(py)),
+        None => Ok(py.None().into_bound(py)),
+    }
 }
 
 /// Close a list of streaming readers/iterators without a Python-level loop.

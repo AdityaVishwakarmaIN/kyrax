@@ -7,6 +7,7 @@ pub mod crypto;
 mod decode;
 mod error;
 mod formula;
+pub(crate) mod grid;
 pub mod io;
 mod meta;
 #[cfg(test)]
