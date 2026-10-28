@@ -589,8 +589,7 @@ def read_excel_turbo_iter(
     """Stream batches of rows from a worksheet as pyarrow RecordBatches."""
 
 class ReadOnlyRows:
-    """Streaming values_only row iterator with openpyxl grid semantics applied
-    in Rust: grid row 1 is the header row and is yielded first."""
+    """Stream typed worksheet values; row one is ordinary worksheet data."""
     def __iter__(self) -> ReadOnlyRows: ...
     def __next__(self) -> tuple[object, ...]: ...
     def close(self) -> None: ...
@@ -605,9 +604,10 @@ def read_excel_turbo_iter_rows(
     min_col: int | None = None,
     max_col: int | None = None,
     chunk_size: int = 10000,
+    data_only: bool = False,
 ) -> ReadOnlyRows:
     """Stream worksheet rows as Python value tuples, shaped by min/max bounds.
-    Grid row 1 is the header row and is yielded when in bounds."""
+    Row one retains its original types; data_only selects cached formula results."""
 
 def read_excel_turbo_cell(
     path: str,
@@ -615,8 +615,9 @@ def read_excel_turbo_cell(
     row: int = 1,
     column: int = 1,
     chunk_size: int = 10000,
+    data_only: bool = False,
 ) -> object | None:
-    """Read a single grid cell value (1-based row/column; row 1 is the header)."""
+    """Read a single grid cell value (1-based row/column, with per-cell types)."""
 
 def close_streams(streams: list[object]) -> None:
     """Close a list of streaming readers/iterators in one Rust call."""
