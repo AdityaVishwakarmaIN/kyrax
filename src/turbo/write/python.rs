@@ -5320,11 +5320,11 @@ impl PyEditableSheet {
             )));
         }
         let date1904 = {
-            let ov = self
+            let mut ov = self
                 .overlay
                 .lock()
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            readback::date1904(&ov)
+            readback::date1904(&mut ov)
         };
         let prepared = prepare_editable_value(value, date1904, None, false)?;
         let mut ov = self
@@ -5862,11 +5862,11 @@ impl PyEditableSheet {
         let nrows = (r2.saturating_sub(r1) + 1) as usize;
         let ncols = (c2.saturating_sub(c1) + 1) as usize;
         let date1904 = {
-            let ov = self
+            let mut ov = self
                 .overlay
                 .lock()
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            readback::date1904(&ov)
+            readback::date1904(&mut ov)
         };
         // Validate the entire matrix, including styles, before changing any cell.
         let matrix = extract_2d_values(value, nrows, ncols, date1904)?;
