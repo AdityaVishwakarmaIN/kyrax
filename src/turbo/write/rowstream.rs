@@ -558,14 +558,15 @@ pub(crate) fn try_write_iter_path(
         Err(e) => return Err(write_err_to_py(e)),
     };
     let parent = target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
-    let name = target.file_name().ok_or_else(|| PyValueError::new_err("output path must name a file"))?;
+    if target.file_name().is_none() {
+        return Err(PyValueError::new_err("output path must name a file"));
+    }
     static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let (temp_path, file) = loop {
         let id = NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut temp_name = std::ffi::OsString::from(".");
-        temp_name.push(name);
-        temp_name.push(format!(".kyrax-{}-{id}.tmp", std::process::id()));
-        let candidate = parent.join(temp_name);
+        // Do not append to the destination basename: a valid long filename
+        // could otherwise exceed the filesystem's per-component name limit.
+        let candidate = parent.join(format!(".kyrax-{}-{id}.tmp", std::process::id()));
         match OpenOptions::new().write(true).create_new(true).open(&candidate) {
             Ok(file) => break (candidate, file),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,

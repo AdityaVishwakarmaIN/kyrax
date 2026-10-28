@@ -170,3 +170,11 @@ def test_generator_replacement_preserves_existing_permissions(tmp_path):
     target.chmod(0o600)
     kyrax.write_excel_turbo_stream(target, [{"rows": iter([[1]])}])
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows path-length configuration varies")
+def test_generator_accepts_long_destination_basename(tmp_path):
+    target = tmp_path / ("a" * 240 + ".xlsx")
+    kyrax.write_excel_turbo_stream(target, [{"rows": iter([[1]])}])
+    assert zipfile.is_zipfile(target)
+    assert list(tmp_path.glob(".*.tmp")) == []
