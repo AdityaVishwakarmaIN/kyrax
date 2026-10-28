@@ -1610,7 +1610,8 @@ def write_excel_turbo_stream(
     Same options and sheet-dict schema as :func:`write_excel_turbo`. Plain sheets
     (``name``, ``rows`` or ``rows_iter``, and optional ``state``/``visibility``)
     with lazy row iterables are consumed once and deflated incrementally. Inline
-    strings use bounded row/chunk cell memory; SST mode retains unique strings.
+    strings use bounded row/chunk cell memory; SST mode retains unique strings,
+    and distinct styles are retained in either mode.
     Feature-rich sheets and unsupported option combinations use the eager cell
     model before streaming their XML.
 
