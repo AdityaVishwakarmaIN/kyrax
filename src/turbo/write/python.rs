@@ -1888,12 +1888,6 @@ fn apply_style_palette(sheet: &mut Sheet, palette: &[StyleDesc]) {
     }
 }
 
-/// Convert a Python scalar to CellValue.
-/// When `style_flag` is Some, set it if the value needs StyleEngine (dates/rich).
-fn py_to_cell_value(obj: &Bound<'_, PyAny>, date1904: bool) -> PyResult<CellValue> {
-    py_to_cell_value_flagged(obj, date1904, None)
-}
-
 fn extract_wrapper_style(obj: &Bound<'_, PyAny>) -> PyResult<Option<Box<StyleDesc>>> {
     if let Ok(d) = obj.cast::<PyDict>() {
         if d.get_item("value")?.is_some() {
@@ -4511,6 +4505,52 @@ fn is_covered_merged_cell(ov: &mut WorkbookOverlay, sheet_name: &str, row: u32, 
         .unwrap_or(false)
 }
 
+/// A validated value and its display metadata, prepared before mutation.
+struct PreparedEditableValue {
+    value: CellValue,
+    style: Option<Box<StyleDesc>>,
+    date_format: Option<&'static str>,
+}
+
+fn prepare_editable_value(
+    obj: &Bound<'_, PyAny>,
+    date1904: bool,
+    style_work: Option<&mut bool>,
+    detect_formulas: bool,
+) -> PyResult<PreparedEditableValue> {
+    let value = match py_to_cell_value_flagged(obj, date1904, style_work)? {
+        CellValue::Str(s) if detect_formulas && s.len() > 1 && s.starts_with('=') => {
+            CellValue::Formula {
+                text: s,
+                kind: FormulaKind::Normal,
+                cached: None,
+            }
+        }
+        other => other,
+    };
+    Ok(PreparedEditableValue {
+        date_format: default_date_format(obj, &value),
+        style: extract_wrapper_style(obj)?,
+        value,
+    })
+}
+
+fn apply_editable_value(
+    ov: &mut WorkbookOverlay,
+    sheet: &str,
+    row: u32,
+    col: u32,
+    prepared: PreparedEditableValue,
+) {
+    ov.set_cell(sheet, row, col, prepared.value);
+    if let Some(desc) = prepared.style {
+        ov.set_cell_style(sheet, row, col, *desc);
+    }
+    if let Some(fmt) = prepared.date_format {
+        readback::apply_default_format(ov, sheet, row, col, fmt);
+    }
+}
+
 /// Editable-doorway write of one Python value (openpyxl semantics): a str
 /// starting with "=" is a formula, dates use the workbook epoch and get a
 /// default date format when the cell has no explicit one.
@@ -4522,23 +4562,8 @@ fn write_editable(
     obj: &Bound<'_, PyAny>,
     style_work: Option<&mut bool>,
 ) -> PyResult<()> {
-    let date1904 = readback::date1904(ov);
-    let val = match py_to_cell_value_flagged(obj, date1904, style_work)? {
-        CellValue::Str(s) if s.len() > 1 && s.starts_with('=') => CellValue::Formula {
-            text: s,
-            kind: FormulaKind::Normal,
-            cached: None,
-        },
-        v => v,
-    };
-    let fmt = default_date_format(obj, &val);
-    ov.set_cell(sheet, row, col, val);
-    if let Some(desc) = extract_wrapper_style(obj)? {
-        ov.set_cell_style(sheet, row, col, *desc);
-    }
-    if let Some(f) = fmt {
-        readback::apply_default_format(ov, sheet, row, col, f);
-    }
+    let prepared = prepare_editable_value(obj, readback::date1904(ov), style_work, true)?;
+    apply_editable_value(ov, sheet, row, col, prepared);
     Ok(())
 }
 
@@ -5294,12 +5319,19 @@ impl PyEditableSheet {
                 "set_cell: ({row}, {col}) is out of grid (rows 1..={MAX_GRID_ROWS}, columns 1..={MAX_GRID_COLS})"
             )));
         }
-        let cell_val = py_to_cell_value(value, false)?;
+        let date1904 = {
+            let ov = self
+                .overlay
+                .lock()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            readback::date1904(&ov)
+        };
+        let prepared = prepare_editable_value(value, date1904, None, false)?;
         let mut ov = self
             .overlay
             .lock()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        ov.set_cell(&self.sheet_name, row, col, cell_val);
+        apply_editable_value(&mut ov, &self.sheet_name, row, col, prepared);
         Ok(())
     }
 
@@ -5829,14 +5861,28 @@ impl PyEditableSheet {
         }
         let nrows = (r2.saturating_sub(r1) + 1) as usize;
         let ncols = (c2.saturating_sub(c1) + 1) as usize;
-        let matrix = extract_2d_values(value, nrows, ncols)?;
+        let date1904 = {
+            let ov = self
+                .overlay
+                .lock()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            readback::date1904(&ov)
+        };
+        // Validate the entire matrix, including styles, before changing any cell.
+        let matrix = extract_2d_values(value, nrows, ncols, date1904)?;
         let mut ov = self
             .overlay
             .lock()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        for (dr, row_vals) in matrix.iter().enumerate() {
-            for (dc, v) in row_vals.iter().enumerate() {
-                ov.set_cell(&self.sheet_name, r1 + dr as u32, c1 + dc as u32, v.clone());
+        for (dr, row_vals) in matrix.into_iter().enumerate() {
+            for (dc, prepared) in row_vals.into_iter().enumerate() {
+                apply_editable_value(
+                    &mut ov,
+                    &self.sheet_name,
+                    r1 + dr as u32,
+                    c1 + dc as u32,
+                    prepared,
+                );
             }
         }
         Ok(())
@@ -6049,7 +6095,8 @@ fn extract_2d_values(
     value: &Bound<'_, PyAny>,
     nrows: usize,
     ncols: usize,
-) -> PyResult<Vec<Vec<CellValue>>> {
+    date1904: bool,
+) -> PyResult<Vec<Vec<PreparedEditableValue>>> {
     let outer: Vec<Bound<'_, PyAny>> = if let Ok(l) = value.cast::<PyList>() {
         l.iter().collect()
     } else if let Ok(t) = value.cast::<PyTuple>() {
@@ -6065,7 +6112,7 @@ fn extract_2d_values(
             outer.len()
         )));
     }
-    let mut matrix: Vec<Vec<CellValue>> = Vec::with_capacity(nrows);
+    let mut matrix: Vec<Vec<PreparedEditableValue>> = Vec::with_capacity(nrows);
     for row_obj in outer {
         let row_items: Vec<Bound<'_, PyAny>> = if let Ok(l) = row_obj.cast::<PyList>() {
             l.iter().collect()
@@ -6082,9 +6129,9 @@ fn extract_2d_values(
                 row_items.len()
             )));
         }
-        let mut row_vals: Vec<CellValue> = Vec::with_capacity(ncols);
+        let mut row_vals: Vec<PreparedEditableValue> = Vec::with_capacity(ncols);
         for item in row_items {
-            row_vals.push(py_to_cell_value(&item, false)?);
+            row_vals.push(prepare_editable_value(&item, date1904, None, false)?);
         }
         matrix.push(row_vals);
     }
