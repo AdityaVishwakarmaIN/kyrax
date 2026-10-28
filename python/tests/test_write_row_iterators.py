@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import itertools
 import warnings
 import zipfile
 from pathlib import Path
@@ -147,3 +148,13 @@ def test_unknown_dimensions_empty_and_multiple_sheets(tmp_path):
     assert workbook["Sparse"].cell(2, 2).value == 4
     assert workbook["List"].cell(1, 1).value is True
     workbook.close()
+
+
+def test_generator_row_limit_is_enforced_without_retaining_rows(tmp_path):
+    target = tmp_path / "too_many.xlsx"
+    with pytest.raises(ValueError, match="1048576"):
+        kyrax.write_excel_turbo_stream(
+            target, [{"name": "S", "rows": itertools.repeat((), 1_048_577)}]
+        )
+    assert not target.exists()
+    assert list(tmp_path.glob(".*.tmp")) == []
