@@ -1607,10 +1607,17 @@ def write_excel_turbo_stream(
 ) -> None:
     """Stream an XLSX workbook straight to disk (openpyxl ``write_only`` analogue).
 
-    Same options and sheet-dict schema as :func:`write_excel_turbo`, but sheet
-    XML is deflated and flushed incrementally instead of being buffered whole,
-    so writer-side memory stays bounded regardless of row count. Emits Zip64
-    records when the archive crosses the 4 GB / 65535-entry limits.
+    Same options and sheet-dict schema as :func:`write_excel_turbo`. Plain sheets
+    (``name``, ``rows`` or ``rows_iter``, and optional ``state``/``visibility``)
+    with lazy row iterables are consumed once and deflated incrementally. Inline
+    strings use bounded row/chunk cell memory; SST mode retains unique strings.
+    Feature-rich sheets and unsupported option combinations use the eager cell
+    model before streaming their XML.
+
+    Lazy-row output omits the optional worksheet dimension. Other readers may
+    report unknown maximum row/column counts until scanning the sheet. A sibling
+    temporary archive preserves the destination if a row generator fails late.
+    Emits Zip64 records when the archive crosses the 4 GB / 65535-entry limits.
 
     This path is deliberately serial; :func:`write_excel_turbo` remains the
     default and keeps its parallel multi-sheet compression.
