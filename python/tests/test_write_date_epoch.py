@@ -31,6 +31,9 @@ def test_calendar_values_use_workbook_epoch(entry, source, date1904, date_iso, t
     values = [
         dt.date(2024, 1, 2),
         dt.datetime(2024, 1, 2, 12, 30, 0),
+        dt.datetime(2024, 1, 2, 12, 0, 0, 500000),
+        dt.datetime(2024, 1, 2, 23, 59, 59, 123456),
+        dt.datetime(2024, 1, 2, 23, 59, 59, 999999),
         dt.date(1900, 1, 1),
         dt.date(1900, 2, 28),
         dt.date(1900, 3, 1),
@@ -53,9 +56,10 @@ def test_calendar_values_use_workbook_epoch(entry, source, date1904, date_iso, t
         text = cell.find("s:v", NS).text
         if date_iso:
             assert cell.get("t") == "d"
-            expected = value.isoformat()
-            # The date-only ISO form represents a midnight datetime equally.
-            assert text == expected
+            if isinstance(value, dt.datetime):
+                assert dt.datetime.fromisoformat(text) == value
+            else:
+                assert text == value.isoformat()
         else:
             assert cell.get("t") is None
             epoch = dt.datetime(1904, 1, 1) if date1904 else dt.datetime(1899, 12, 30)

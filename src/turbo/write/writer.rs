@@ -2696,15 +2696,30 @@ fn serial_parts(serial: f64, date1904: bool) -> (i64, u32, u32, f64) {
 }
 
 fn format_iso_datetime(serial: f64, date1904: bool) -> Option<String> {
-    let (y, m, d, frac) = serial_parts(serial, date1904);
-    if frac.abs() < 1e-10 {
+    const MICROS_PER_DAY: u64 = 86_400_000_000;
+    let (mut y, mut m, mut d, frac) = serial_parts(serial, date1904);
+    // Keep subsecond precision. Rounding to whole seconds both lost fractions
+    // and wrapped 23:59:59.5 to midnight without advancing the calendar date.
+    let mut micros = (frac * MICROS_PER_DAY as f64).round() as u64;
+    if micros >= MICROS_PER_DAY {
+        (y, m, d, _) = serial_parts(serial.floor() + 1.0, date1904);
+        micros = 0;
+    }
+    if micros == 0 {
         Some(format!("{y:04}-{m:02}-{d:02}"))
     } else {
-        let total_seconds = (frac * 86400.0).round() as u64;
-        let hours = (total_seconds / 3600) % 24;
-        let minutes = (total_seconds % 3600) / 60;
-        let seconds = total_seconds % 60;
-        Some(format!("{y:04}-{m:02}-{d:02}T{hours:02}:{minutes:02}:{seconds:02}"))
+        let seconds = micros / 1_000_000;
+        let hours = seconds / 3600;
+        let minutes = (seconds % 3600) / 60;
+        let seconds = seconds % 60;
+        let fractional = micros % 1_000_000;
+        let mut iso = format!("{y:04}-{m:02}-{d:02}T{hours:02}:{minutes:02}:{seconds:02}");
+        if fractional != 0 {
+            iso.push('.');
+            let digits = format!("{fractional:06}");
+            iso.push_str(digits.trim_end_matches('0'));
+        }
+        Some(iso)
     }
 }
 
@@ -3024,6 +3039,15 @@ mod tests {
         assert_eq!(date_to_serial_for_epoch(1900, 1, 1, true), -1460.0);
         assert_eq!(date_to_serial_for_epoch(1900, 2, 28, true), -1402.0);
         assert_eq!(date_to_serial_for_epoch(1900, 3, 1, true), -1401.0);
+    }
+
+    #[test]
+    fn iso_datetime_preserves_subseconds_and_midnight_carry() {
+        let near_midnight = datetime_to_serial(2024, 1, 2, 23, 59, 59, 999999);
+        assert_eq!(format_iso_datetime(near_midnight, false).as_deref(), Some("2024-01-02T23:59:59.999999"));
+        let half_second = datetime_to_serial(2024, 1, 2, 12, 0, 0, 500000);
+        assert_eq!(format_iso_datetime(half_second, false).as_deref(), Some("2024-01-02T12:00:00.5"));
+        assert_eq!(format_iso_datetime(1.0 - 1e-12, true).as_deref(), Some("1904-01-02"));
     }
 
     #[test]
