@@ -1,8 +1,9 @@
 """Direct row streaming (rowstream) must be byte-identical to the model path.
 
 A sheet whose ``rows`` is a plain list-of-lists takes the fast path. Passing the
-same rows as an iterator makes the sheet ineligible, so the old model path runs;
-every zip part must then decompress to identical bytes.
+same rows through the non-streaming bytes entry point with an iterator forces
+the model reference; every zip part must decompress to identical bytes. Lazy
+streaming itself may omit the optional dimension element.
 """
 
 from __future__ import annotations
@@ -63,7 +64,7 @@ def _assert_identical(entry, tmp_path, sheets, **kw):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         fast = _parts(_write(entry, tmp_path, sheets, **kw))
-        slow = _parts(_write(entry, tmp_path, _model(sheets), **kw))
+        slow = _parts(_write("bytes", tmp_path, _model(sheets), **kw))
     assert set(fast) == set(slow)
     for name in slow:
         assert fast[name] == slow[name], name
@@ -113,7 +114,7 @@ def test_long_string_warns_and_truncates(entry, tmp_path):
         fast = _parts(_write(entry, tmp_path, sheets))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        slow = _parts(_write(entry, tmp_path, _model(sheets)))
+        slow = _parts(_write("bytes", tmp_path, _model(sheets)))
     assert fast == slow
 
 
@@ -177,9 +178,20 @@ def test_ineligible_inputs_unchanged(name, entry, tmp_path):
         got = _parts(_write(entry, tmp_path, build()))
     except Exception as e:  # same error as the iterator spelling
         with pytest.raises(type(e)):
-            _write(entry, tmp_path, _model(build()))
+            _write("bytes", tmp_path, _model(build()))
         return
-    ref = _parts(_write(entry, tmp_path, _model(build())))
+    ref = _parts(_write("bytes", tmp_path, _model(build())))
+    if entry == "stream" and name == "generator":
+        # A one-shot source now takes the streaming path. Only the optional
+        # worksheet bounds differ; all cell, type, style and metadata XML must
+        # remain identical to the independent model route.
+        for part in ref:
+            if part.startswith("xl/worksheets/"):
+                assert b"<dimension " not in got[part]
+                xml = ref[part]
+                start = xml.index(b"<dimension ")
+                end = xml.index(b"/>", start) + 2
+                ref[part] = xml[:start] + xml[end:]
     assert got == ref
 
 
@@ -196,11 +208,13 @@ def test_ineligible_kwargs_unchanged(entry, tmp_path):
         {"external_links": ["file.xlsx"]},
     ):
         got = _parts(_write(entry, tmp_path, base, **kw))
-        ref = _parts(_write(entry, tmp_path, _model(base), **kw))
+        ref = _parts(_write("bytes", tmp_path, _model(base), **kw))
         assert got == ref, kw
     # extra sheet keys also fall through to the model path
     extra = [{"name": "S", "rows": rows, "freeze_panes": "A2", "merges": ["A1:B1"]}]
-    assert _parts(_write(entry, tmp_path, extra)) == _parts(_write(entry, tmp_path, _model(extra)))
+    assert _parts(_write(entry, tmp_path, extra)) == _parts(
+        _write("bytes", tmp_path, _model(extra))
+    )
 
 
 @pytest.mark.parametrize("entry", ENTRIES)
@@ -265,7 +279,7 @@ def test_fast_path_is_taken(entry, tmp_path):
         return zipfile.ZipFile(io.BytesIO(data)).namelist()
 
     fast = order(_write(entry, tmp_path, sheets))
-    slow = order(_write(entry, tmp_path, _model(sheets)))
+    slow = order(_write("bytes", tmp_path, _model(sheets)))
     assert fast.index("xl/styles.xml") > fast.index("xl/worksheets/sheet1.xml")
     assert slow.index("xl/styles.xml") < slow.index("xl/worksheets/sheet1.xml")
 
@@ -286,7 +300,9 @@ def test_fast_path_taken_and_identical_without_unsafe_cells(entry, tmp_path):
 
 
 @pytest.mark.parametrize("entry", ENTRIES)
-@pytest.mark.parametrize("cell", [2**63, -(2**63) - 1, BIG, LONG])
+@pytest.mark.parametrize(
+    "cell", [2**63, -(2**63) - 1, BIG, LONG], ids=["above-i64", "below-i64", "big", "long"]
+)
 def test_cells_that_can_fail_midstream_use_model_path(entry, cell, tmp_path):
     """Master condition 3: ints outside i64 and > 32767-char strings are
     ineligible, so fast-path mid-write errors can only be I/O errors."""

@@ -36,8 +36,8 @@ def test_generator_matches_model_parts(tmp_path, row_key, string_mode, date_opti
         [1, "text <&>\t\n中", dt.date(2024, 2, 29), 2.5, None, True],
         [2, "", dt.datetime(2020, 1, 1, 12, 30), -(2**63), None, False],
         [],
-        [None, {"value": 3, "style": {"bold": True}}, dt.time(1, 2, 3)],
-        [dt.timedelta(days=2, seconds=5), {"rich": True, "runs": [{"text": "a"}]}],
+        [None, {"value": 3, "style": {"font": {"bold": True}}}, dt.time(1, 2, 3)],
+        [dt.timedelta(days=2, seconds=5), {"rich": [{"text": "a"}]}],
         ["#N/A", "=literal", float("inf"), float("nan")],
         [{"value": None}],
     ]
@@ -147,7 +147,8 @@ def test_unknown_dimensions_empty_and_multiple_sheets(tmp_path):
         )
     workbook = kyrax.load_workbook(target)
     assert workbook.sheetnames == ["Empty", "Sparse", "List"]
-    assert workbook.active.title == "Sparse"
+    with kyrax.load_workbook(target, read_only=True) as reader:
+        assert reader.active.title == "Sparse"
     assert workbook["Sparse"].cell(2, 2).value == 4
     assert workbook["List"].cell(1, 1).value is True
     workbook.close()
