@@ -341,9 +341,9 @@ fn atoi_i64(s: &[u8]) -> Result<i64, ()> {
 
 fn parse_iso_date_or_datetime(s: &[u8]) -> Option<(bool, i64)> {
     let s_str = std::str::from_utf8(s).ok()?.trim();
-    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s_str, "%Y-%m-%dT%H:%M:%S") {
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s_str, "%Y-%m-%dT%H:%M:%S%.f") {
         Some((true, dt.and_utc().timestamp_millis()))
-    } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s_str, "%Y-%m-%d %H:%M:%S") {
+    } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s_str, "%Y-%m-%d %H:%M:%S%.f") {
         Some((true, dt.and_utc().timestamp_millis()))
     } else if let Ok(d) = chrono::NaiveDate::parse_from_str(s_str, "%Y-%m-%d") {
         let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)?;
@@ -3214,6 +3214,21 @@ impl FormulaColumn {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn iso_datetime_fractional_seconds_keep_millisecond_schema() {
+        let cases: [(&[u8], Option<(bool, i64)>); 6] = [
+            (b"2024-01-02T12:00:00", Some((true, 1_704_196_800_000))),
+            (b"2024-01-02T12:00:00.5", Some((true, 1_704_196_800_500))),
+            (b"2024-01-02 12:00:00.123456", Some((true, 1_704_196_800_123))),
+            (b"2024-01-02T23:59:59.999999", Some((true, 1_704_239_999_999))),
+            (b"2024-01-02", Some((false, 19_724))),
+            (b"2024-01-02T12:00:00.invalid", None),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(super::parse_iso_date_or_datetime(input), expected);
+        }
+    }
+
     use super::*;
     use pretty_assertions::assert_eq;
 
