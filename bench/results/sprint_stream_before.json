@@ -1,0 +1,934 @@
+{
+  "meta": {
+    "date_utc": "2026-10-28T18:20:41.092578+00:00",
+    "source_revision": "fc0fcb0",
+    "package_root": "/workspace/kyrax-baseline-package",
+    "extension_sha256": {
+      "_kyrax.abi3.so": "67263c6c9e2560e0afaa41c00d79beb8901e7a575335c1330ac685d196c19201"
+    },
+    "python": "3.12.14",
+    "worker_interpreter": "/workspace/benchenv/bin/python",
+    "platform": "Linux-6.18.55-x86_64-with-glibc2.41",
+    "semantics": "first10/all rows; identical timed typed checksum consumer; calamine eager"
+  },
+  "rows": [
+    {
+      "task": "read_first",
+      "size": "small",
+      "lib": "kyrax",
+      "n": 3,
+      "cpu_task_s": {
+        "median": 0.008932999999999996,
+        "min": 0.008661000000000002,
+        "max": 0.01087299999999998
+      },
+      "wall_task_s": {
+        "median": 0.008904602000029627,
+        "min": 0.0086589739998999,
+        "max": 0.010874668999804271
+      },
+      "rss_mb": {
+        "median": 26.39453125,
+        "min": 25.890625,
+        "max": 26.69921875
+      },
+      "verify": "FAIL typed checksum/count",
+      "samples": [
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.008932999999999996,
+          "wall_task_s": 0.008904602000029627,
+          "rss_mb": 25.890625,
+          "verify": "FAIL typed checksum/count",
+          "expected_checksum": "436f22e9fb012ad37cc3fe74d229b467",
+          "imported_path": "/workspace/kyrax-baseline-package/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 10,
+          "checksum": "ec72ace81cfbbfab47d5f6fcb08842d1",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.008661000000000002,
+          "wall_task_s": 0.0086589739998999,
+          "rss_mb": 26.39453125,
+          "verify": "FAIL typed checksum/count",
+          "expected_checksum": "436f22e9fb012ad37cc3fe74d229b467",
+          "imported_path": "/workspace/kyrax-baseline-package/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 10,
+          "checksum": "ec72ace81cfbbfab47d5f6fcb08842d1",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.01087299999999998,
+          "wall_task_s": 0.010874668999804271,
+          "rss_mb": 26.69921875,
+          "verify": "FAIL typed checksum/count",
+          "expected_checksum": "436f22e9fb012ad37cc3fe74d229b467",
+          "imported_path": "/workspace/kyrax-baseline-package/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 10,
+          "checksum": "ec72ace81cfbbfab47d5f6fcb08842d1",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "task": "read_first",
+      "size": "medium",
+      "lib": "kyrax",
+      "n": 3,
+      "cpu_task_s": {
+        "median": 0.12138499999999999,
+        "min": 0.116478,
+        "max": 0.125631
+      },
+      "wall_task_s": {
+        "median": 0.12139196899988747,
+        "min": 0.11648361800007478,
+        "max": 0.12658364499998243
+      },
+      "rss_mb": {
+        "median": 39.59375,
+        "min": 39.49609375,
+        "max": 39.62890625
+      },
+      "verify": "FAIL typed checksum/count",
+      "samples": [
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.116478,
+          "wall_task_s": 0.11648361800007478,
+          "rss_mb": 39.62890625,
+          "verify": "FAIL typed checksum/count",
+          "expected_checksum": "e078d034047a1cf53ca13b6e56569508",
+          "imported_path": "/workspace/kyrax-baseline-package/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 10,
+          "checksum": "2a93696246185936fcd98595110ecbda",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.125631,
+          "wall_task_s": 0.12658364499998243,
+          "rss_mb": 39.49609375,
+          "verify": "FAIL typed checksum/count",
+          "expected_checksum": "e078d034047a1cf53ca13b6e56569508",
+          "imported_path": "/workspace/kyrax-baseline-package/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 10,
+          "checksum": "2a93696246185936fcd98595110ecbda",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.12138499999999999,
+          "wall_task_s": 0.12139196899988747,
+          "rss_mb": 39.59375,
+          "verify": "FAIL typed checksum/count",
+          "expected_checksum": "e078d034047a1cf53ca13b6e56569508",
+          "imported_path": "/workspace/kyrax-baseline-package/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 10,
+          "checksum": "2a93696246185936fcd98595110ecbda",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "task": "read_first",
+      "size": "large",
+      "lib": "kyrax",
+      "n": 3,
+      "cpu_task_s": {
+        "median": 0.824094,
+        "min": 0.755932,
+        "max": 0.831548
+      },
+      "wall_task_s": {
+        "median": 0.8242499010000301,
+        "min": 0.7560781109998516,
+        "max": 0.8318119400000796
+      },
+      "rss_mb": {
+        "median": 75.859375,
+        "min": 75.828125,
+        "max": 75.953125
+      },
+      "verify": "FAIL typed checksum/count",
+      "samples": [
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.755932,
+          "wall_task_s": 0.7560781109998516,
+          "rss_mb": 75.828125,
+          "verify": "FAIL typed checksum/count",
+          "expected_checksum": "7f25450353315c8447ce11f2af05960b",
+          "imported_path": "/workspace/kyrax-baseline-package/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 10,
+          "checksum": "ad757a45d1e0216310a46de7d99721ed",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.831548,
+          "wall_task_s": 0.8318119400000796,
+          "rss_mb": 75.953125,
+          "verify": "FAIL typed checksum/count",
+          "expected_checksum": "7f25450353315c8447ce11f2af05960b",
+          "imported_path": "/workspace/kyrax-baseline-package/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 10,
+          "checksum": "ad757a45d1e0216310a46de7d99721ed",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.824094,
+          "wall_task_s": 0.8242499010000301,
+          "rss_mb": 75.859375,
+          "verify": "FAIL typed checksum/count",
+          "expected_checksum": "7f25450353315c8447ce11f2af05960b",
+          "imported_path": "/workspace/kyrax-baseline-package/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 10,
+          "checksum": "ad757a45d1e0216310a46de7d99721ed",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "task": "read_stream",
+      "size": "small",
+      "lib": "kyrax",
+      "n": 3,
+      "cpu_task_s": {
+        "median": 0.016464999999999994,
+        "min": 0.01577399999999999,
+        "max": 0.016882000000000008
+      },
+      "wall_task_s": {
+        "median": 0.01646679000009499,
+        "min": 0.015774821999912092,
+        "max": 0.016883775999986028
+      },
+      "rss_mb": {
+        "median": 26.5546875,
+        "min": 26.54296875,
+        "max": 26.671875
+      },
+      "verify": "FAIL typed checksum/count",
+      "samples": [
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.016464999999999994,
+          "wall_task_s": 0.01646679000009499,
+          "rss_mb": 26.5546875,
+          "verify": "FAIL typed checksum/count",
+          "expected_checksum": "f4b378be9faab9ca788aabb93be146d7",
+          "imported_path": "/workspace/kyrax-baseline-package/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 1001,
+          "checksum": "b221bc1cddd82dd9281498f94b2347fb",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.016882000000000008,
+          "wall_task_s": 0.016883775999986028,
+          "rss_mb": 26.54296875,
+          "verify": "FAIL typed checksum/count",
+          "expected_checksum": "f4b378be9faab9ca788aabb93be146d7",
+          "imported_path": "/workspace/kyrax-baseline-package/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 1001,
+          "checksum": "b221bc1cddd82dd9281498f94b2347fb",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.01577399999999999,
+          "wall_task_s": 0.015774821999912092,
+          "rss_mb": 26.671875,
+          "verify": "FAIL typed checksum/count",
+          "expected_checksum": "f4b378be9faab9ca788aabb93be146d7",
+          "imported_path": "/workspace/kyrax-baseline-package/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 1001,
+          "checksum": "b221bc1cddd82dd9281498f94b2347fb",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "task": "read_stream",
+      "size": "medium",
+      "lib": "kyrax",
+      "n": 3,
+      "cpu_task_s": {
+        "median": 1.1048239999999998,
+        "min": 1.072315,
+        "max": 1.108733
+      },
+      "wall_task_s": {
+        "median": 1.1049222100000406,
+        "min": 1.0724860410000474,
+        "max": 1.1089214119999724
+      },
+      "rss_mb": {
+        "median": 41.89453125,
+        "min": 41.7734375,
+        "max": 41.93359375
+      },
+      "verify": "FAIL typed checksum/count",
+      "samples": [
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 1.072315,
+          "wall_task_s": 1.0724860410000474,
+          "rss_mb": 41.93359375,
+          "verify": "FAIL typed checksum/count",
+          "expected_checksum": "0b4e0fdcbf246372e343676c720d5791",
+          "imported_path": "/workspace/kyrax-baseline-package/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 100001,
+          "checksum": "52efb53cfd3cfb30ac02293007139756",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 1.1048239999999998,
+          "wall_task_s": 1.1049222100000406,
+          "rss_mb": 41.89453125,
+          "verify": "FAIL typed checksum/count",
+          "expected_checksum": "0b4e0fdcbf246372e343676c720d5791",
+          "imported_path": "/workspace/kyrax-baseline-package/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 100001,
+          "checksum": "52efb53cfd3cfb30ac02293007139756",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 1.108733,
+          "wall_task_s": 1.1089214119999724,
+          "rss_mb": 41.7734375,
+          "verify": "FAIL typed checksum/count",
+          "expected_checksum": "0b4e0fdcbf246372e343676c720d5791",
+          "imported_path": "/workspace/kyrax-baseline-package/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 100001,
+          "checksum": "52efb53cfd3cfb30ac02293007139756",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "task": "read_stream",
+      "size": "large",
+      "lib": "kyrax",
+      "n": 3,
+      "cpu_task_s": {
+        "median": 11.218744000000001,
+        "min": 11.179764999999998,
+        "max": 11.900601
+      },
+      "wall_task_s": {
+        "median": 11.229810633999932,
+        "min": 11.181176492999839,
+        "max": 11.902770215999908
+      },
+      "rss_mb": {
+        "median": 75.890625,
+        "min": 75.890625,
+        "max": 75.9140625
+      },
+      "verify": "FAIL typed checksum/count",
+      "samples": [
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 11.900601,
+          "wall_task_s": 11.902770215999908,
+          "rss_mb": 75.9140625,
+          "verify": "FAIL typed checksum/count",
+          "expected_checksum": "4a07f89281249e0310487beddd0e573f",
+          "imported_path": "/workspace/kyrax-baseline-package/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 1000001,
+          "checksum": "fb9cd2aeb3186ba26562869fee6dba9e",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 11.179764999999998,
+          "wall_task_s": 11.181176492999839,
+          "rss_mb": 75.890625,
+          "verify": "FAIL typed checksum/count",
+          "expected_checksum": "4a07f89281249e0310487beddd0e573f",
+          "imported_path": "/workspace/kyrax-baseline-package/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 1000001,
+          "checksum": "fb9cd2aeb3186ba26562869fee6dba9e",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 11.218744000000001,
+          "wall_task_s": 11.229810633999932,
+          "rss_mb": 75.890625,
+          "verify": "FAIL typed checksum/count",
+          "expected_checksum": "4a07f89281249e0310487beddd0e573f",
+          "imported_path": "/workspace/kyrax-baseline-package/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 1000001,
+          "checksum": "fb9cd2aeb3186ba26562869fee6dba9e",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        }
+      ]
+    }
+  ]
+}
