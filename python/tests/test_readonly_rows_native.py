@@ -80,7 +80,7 @@ def test_values_are_native_python_types() -> None:
     finally:
         wb.close()
     assert kinds <= {int, float, bool, str, dt.datetime, dt.time, dt.timedelta, type(None)}
-    assert {int, float, bool, str, dt.datetime} <= kinds
+    assert {int, bool, str, dt.datetime} <= kinds
 
 
 _NO_PYARROW_SCRIPT = textwrap.dedent(

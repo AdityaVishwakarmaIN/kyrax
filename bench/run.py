@@ -149,7 +149,7 @@ def summarize(vals):
 def run(args):
     python = args.python
     env = dict(os.environ)
-    env["PYTHONPATH"] = os.path.join(REPO, "python") + (
+    env["PYTHONPATH"] = args.package_root + (
         os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
     )
     env.setdefault("PYTHONHASHSEED", "0")
@@ -213,7 +213,8 @@ def run(args):
     _ratios(rows)
     meta = {
         "date_utc": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-        "git": _git(),
+        "git": args.source_revision or _git(),
+        "package_root": args.package_root,
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "cpus": os.cpu_count(),
@@ -314,6 +315,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--python", default=os.environ.get("BENCH_PYTHON", sys.executable),
                     help="interpreter of the competitor venv (default: $BENCH_PYTHON or this one)")
+    ap.add_argument("--package-root", default=os.path.join(REPO, "python"))
+    ap.add_argument("--source-revision", help="revision of an explicitly selected package build")
     ap.add_argument("--cache", default=os.path.join(HERE, ".cache"), help="fixture cache dir")
     ap.add_argument("--quick", action="store_true", help="kyrax rows only, small+medium")
     ap.add_argument("--kyrax-only", action="store_true", help="kyrax rows only, all sizes")

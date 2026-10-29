@@ -1,0 +1,290 @@
+[
+  {
+    "fixture": "decimal-numbers.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 3
+  },
+  {
+    "fixture": "decimal-numbers.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 3
+  },
+  {
+    "fixture": "div0.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 5
+  },
+  {
+    "fixture": "div0.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 5
+  },
+  {
+    "fixture": "empty.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 0
+  },
+  {
+    "fixture": "empty.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 0
+  },
+  {
+    "fixture": "fixture-changing-header-location.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 20
+  },
+  {
+    "fixture": "fixture-changing-header-location.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 20
+  },
+  {
+    "fixture": "fixture-invalid-cell-value-num.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 1048576
+  },
+  {
+    "fixture": "fixture-invalid-cell-value-num.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 1048576
+  },
+  {
+    "fixture": "fixture-invalid-cell-value.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 5
+  },
+  {
+    "fixture": "fixture-invalid-cell-value.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 5
+  },
+  {
+    "fixture": "fixture-multi-dtypes-columns.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 10
+  },
+  {
+    "fixture": "fixture-multi-dtypes-columns.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 10
+  },
+  {
+    "fixture": "fixture-multi-sheet.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 9
+  },
+  {
+    "fixture": "fixture-multi-sheet.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 9
+  },
+  {
+    "fixture": "fixture-sheets-different-visibilities.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 3
+  },
+  {
+    "fixture": "fixture-sheets-different-visibilities.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 3
+  },
+  {
+    "fixture": "fixture-single-sheet-duplicated-columns.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 3
+  },
+  {
+    "fixture": "fixture-single-sheet-duplicated-columns.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 3
+  },
+  {
+    "fixture": "fixture-single-sheet-with-types.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 4
+  },
+  {
+    "fixture": "fixture-single-sheet-with-types.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 4
+  },
+  {
+    "fixture": "fixture-single-sheet.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 3
+  },
+  {
+    "fixture": "fixture-single-sheet.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 3
+  },
+  {
+    "fixture": "fixture-type-errors.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 23
+  },
+  {
+    "fixture": "fixture-type-errors.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 23
+  },
+  {
+    "fixture": "infer-dtypes-fallback.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 140151
+  },
+  {
+    "fixture": "infer-dtypes-fallback.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 140151
+  },
+  {
+    "fixture": "no-header.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 10
+  },
+  {
+    "fixture": "no-header.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 10
+  },
+  {
+    "fixture": "null-column.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 21
+  },
+  {
+    "fixture": "null-column.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 21
+  },
+  {
+    "fixture": "sheet-and-table-with-offset.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 22
+  },
+  {
+    "fixture": "sheet-and-table-with-offset.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 22
+  },
+  {
+    "fixture": "sheet-and-table-with-whitespace.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 2000
+  },
+  {
+    "fixture": "sheet-and-table-with-whitespace.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 2000
+  },
+  {
+    "fixture": "sheet-null-strings-empty.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 11
+  },
+  {
+    "fixture": "sheet-null-strings-empty.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 11
+  },
+  {
+    "fixture": "sheet-null-strings.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 11
+  },
+  {
+    "fixture": "sheet-null-strings.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 11
+  },
+  {
+    "fixture": "sheet-with-defined-names.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 7
+  },
+  {
+    "fixture": "sheet-with-defined-names.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 7
+  },
+  {
+    "fixture": "sheet-with-na.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 6
+  },
+  {
+    "fixture": "sheet-with-na.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 6
+  },
+  {
+    "fixture": "sheet-with-tables.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 9
+  },
+  {
+    "fixture": "sheet-with-tables.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 9
+  },
+  {
+    "fixture": "single-sheet-skip-rows-durations.xlsx",
+    "data_only": false,
+    "status": "pass",
+    "rows": 13
+  },
+  {
+    "fixture": "single-sheet-skip-rows-durations.xlsx",
+    "data_only": true,
+    "status": "pass",
+    "rows": 13
+  }
+]
