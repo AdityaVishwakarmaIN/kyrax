@@ -1,0 +1,106 @@
+{
+ "meta": {
+  "date_utc": "2026-10-29 04:05 UTC",
+  "git": "fc0fcb0",
+  "package_root": "/workspace/kyrax-baseline-package",
+  "python": "3.12.14",
+  "platform": "Linux-6.18.55-x86_64-with-glibc2.41",
+  "cpus": 3,
+  "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+  "mode": "full",
+  "harness_runtime_s": 5.0,
+  "versions": {
+   "openpyxl": "3.1.5",
+   "XlsxWriter": "3.2.9",
+   "python-calamine": "0.9.0",
+   "pandas": "3.1.0",
+   "pyarrow": "26.0.0",
+   "numpy": "2.5.4",
+   "kyrax": "/workspace/kyrax-baseline-package/kyrax"
+  }
+ },
+ "rows": [
+  {
+   "task": "read_values",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "kyrax",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.532137,
+    "min": 0.5234899999999999,
+    "max": 0.537215,
+    "n": 3,
+    "noise_pct": 2.5792230196359394
+   },
+   "cpu_total_s": {
+    "median": 0.574798,
+    "min": 0.560843,
+    "max": 0.576809,
+    "n": 3,
+    "noise_pct": 2.777671460234732
+   },
+   "rss_mb": {
+    "median": 72.19921875,
+    "min": 72.13671875,
+    "max": 72.265625,
+    "n": 3,
+    "noise_pct": 0.17854244440837527
+   },
+   "wall_task_s": {
+    "median": 0.5372646789999749,
+    "min": 0.5239693249999959,
+    "max": 0.5426730550000229,
+    "n": 3,
+    "noise_pct": 3.481287851425625
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "read_types": {},
+   "verify": "FAIL row 1 col 4: 44973.0 (float) != datetime.datetime(2023, 2, 16, 0, 0) (datetime)"
+  },
+  {
+   "task": "write_stream",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "kyrax-stream",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.72262,
+    "min": 0.7152609999999998,
+    "max": 0.762297,
+    "n": 3,
+    "noise_pct": 6.509091915529627
+   },
+   "cpu_total_s": {
+    "median": 0.765058,
+    "min": 0.757914,
+    "max": 0.804171,
+    "n": 3,
+    "noise_pct": 6.046208261334434
+   },
+   "rss_mb": {
+    "median": 223.56640625,
+    "min": 223.46484375,
+    "max": 223.69921875,
+    "n": 3,
+    "noise_pct": 0.1048346233816155
+   },
+   "wall_task_s": {
+    "median": 0.7234054610000271,
+    "min": 0.7153043019999927,
+    "max": 0.762921930999994,
+    "n": 3,
+    "noise_pct": 6.582425979225422
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "read_types": {},
+   "verify": "ok (reopens, all values)"
+  }
+ ]
+}

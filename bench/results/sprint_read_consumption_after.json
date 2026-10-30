@@ -1,0 +1,86 @@
+{
+  "meta": {
+    "date_utc": "2026-10-29T04:12:07.185273+00:00",
+    "source_revision": "fe07016",
+    "package_root": "/workspace/kyrax/python",
+    "extension_sha256": {
+      "_kyrax.abi3.so": "4f5ddddb2c82c9072b89a695268b296e3411d66cbf6ec633e7ff67cb99a66205"
+    },
+    "python": "3.12.14",
+    "worker_interpreter": "/workspace/benchenv/bin/python",
+    "platform": "Linux-6.18.55-x86_64-with-glibc2.41",
+    "semantics": "first10/all rows; identical timed typed checksum consumer; calamine eager"
+  },
+  "rows": [
+    {
+      "task": "read_stream",
+      "size": "large",
+      "lib": "kyrax",
+      "n": 1,
+      "cpu_task_s": {
+        "median": 8.746463,
+        "min": 8.746463,
+        "max": 8.746463
+      },
+      "wall_task_s": {
+        "median": 8.753942922999954,
+        "min": 8.753942922999954,
+        "max": 8.753942922999954
+      },
+      "rss_mb": {
+        "median": 75.90234375,
+        "min": 75.90234375,
+        "max": 75.90234375
+      },
+      "verify": "ok (count and typed full-cell checksum)",
+      "samples": [
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 8.746463,
+          "wall_task_s": 8.753942922999954,
+          "rss_mb": 75.90234375,
+          "verify": "ok (count and typed full-cell checksum)",
+          "expected_checksum": "4a07f89281249e0310487beddd0e573f",
+          "imported_path": "/workspace/kyrax/python/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 1000001,
+          "checksum": "4a07f89281249e0310487beddd0e573f",
+          "read_types": [
+            [
+              "int",
+              "str"
+            ],
+            [
+              "float",
+              "int",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "datetime",
+              "str"
+            ],
+            [
+              "bool",
+              "str"
+            ],
+            [
+              "int",
+              "str"
+            ],
+            [
+              "float",
+              "int",
+              "str"
+            ]
+          ]
+        }
+      ]
+    }
+  ]
+}

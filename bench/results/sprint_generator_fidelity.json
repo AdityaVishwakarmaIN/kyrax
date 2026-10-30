@@ -1,0 +1,32 @@
+{
+  "generator_fidelity": [
+    {
+      "date1904": false,
+      "string_mode": "inline",
+      "openpyxl_normal": "pass",
+      "openpyxl_read_only": "pass",
+      "python_calamine": "pass"
+    },
+    {
+      "date1904": false,
+      "string_mode": "sst",
+      "openpyxl_normal": "pass",
+      "openpyxl_read_only": "pass",
+      "python_calamine": "pass"
+    },
+    {
+      "date1904": true,
+      "string_mode": "inline",
+      "openpyxl_normal": "pass",
+      "openpyxl_read_only": "pass",
+      "python_calamine": "pass"
+    },
+    {
+      "date1904": true,
+      "string_mode": "sst",
+      "openpyxl_normal": "pass",
+      "openpyxl_read_only": "pass",
+      "python_calamine": "pass"
+    }
+  ]
+}

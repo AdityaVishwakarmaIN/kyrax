@@ -1,0 +1,952 @@
+{
+  "meta": {
+    "date_utc": "2026-10-29T04:11:50.646878+00:00",
+    "source_revision": "fe07016",
+    "package_root": "/workspace/kyrax/python",
+    "extension_sha256": {
+      "_kyrax.abi3.so": "4f5ddddb2c82c9072b89a695268b296e3411d66cbf6ec633e7ff67cb99a66205"
+    },
+    "python": "3.12.14",
+    "worker_interpreter": "/workspace/benchenv/bin/python",
+    "platform": "Linux-6.18.55-x86_64-with-glibc2.41",
+    "semantics": "first10/all rows; identical timed typed checksum consumer; calamine eager"
+  },
+  "rows": [
+    {
+      "task": "read_first",
+      "size": "small",
+      "lib": "kyrax",
+      "n": 3,
+      "cpu_task_s": {
+        "median": 0.007340000000000013,
+        "min": 0.007158999999999985,
+        "max": 0.009202999999999996
+      },
+      "wall_task_s": {
+        "median": 0.00733945699994365,
+        "min": 0.007158584999956474,
+        "max": 0.009222844000078112
+      },
+      "rss_mb": {
+        "median": 25.8046875,
+        "min": 25.75390625,
+        "max": 26.03515625
+      },
+      "verify": "ok (count and typed full-cell checksum)",
+      "samples": [
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.007158999999999985,
+          "wall_task_s": 0.007158584999956474,
+          "rss_mb": 25.8046875,
+          "verify": "ok (count and typed full-cell checksum)",
+          "expected_checksum": "436f22e9fb012ad37cc3fe74d229b467",
+          "imported_path": "/workspace/kyrax/python/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 10,
+          "checksum": "436f22e9fb012ad37cc3fe74d229b467",
+          "read_types": [
+            [
+              "int",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "datetime",
+              "str"
+            ],
+            [
+              "bool",
+              "str"
+            ],
+            [
+              "int",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.007340000000000013,
+          "wall_task_s": 0.00733945699994365,
+          "rss_mb": 25.75390625,
+          "verify": "ok (count and typed full-cell checksum)",
+          "expected_checksum": "436f22e9fb012ad37cc3fe74d229b467",
+          "imported_path": "/workspace/kyrax/python/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 10,
+          "checksum": "436f22e9fb012ad37cc3fe74d229b467",
+          "read_types": [
+            [
+              "int",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "datetime",
+              "str"
+            ],
+            [
+              "bool",
+              "str"
+            ],
+            [
+              "int",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.009202999999999996,
+          "wall_task_s": 0.009222844000078112,
+          "rss_mb": 26.03515625,
+          "verify": "ok (count and typed full-cell checksum)",
+          "expected_checksum": "436f22e9fb012ad37cc3fe74d229b467",
+          "imported_path": "/workspace/kyrax/python/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 10,
+          "checksum": "436f22e9fb012ad37cc3fe74d229b467",
+          "read_types": [
+            [
+              "int",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "datetime",
+              "str"
+            ],
+            [
+              "bool",
+              "str"
+            ],
+            [
+              "int",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "task": "read_first",
+      "size": "small",
+      "lib": "calamine",
+      "n": 3,
+      "cpu_task_s": {
+        "median": 0.005718999999999988,
+        "min": 0.005514999999999999,
+        "max": 0.006028000000000006
+      },
+      "wall_task_s": {
+        "median": 0.005719085000009727,
+        "min": 0.005514789000017117,
+        "max": 0.006027317999951265
+      },
+      "rss_mb": {
+        "median": 19.1875,
+        "min": 19.1875,
+        "max": 19.30078125
+      },
+      "verify": "ok (count and typed full-cell checksum)",
+      "samples": [
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.005514999999999999,
+          "wall_task_s": 0.005514789000017117,
+          "rss_mb": 19.30078125,
+          "verify": "ok (count and typed full-cell checksum)",
+          "expected_checksum": "436f22e9fb012ad37cc3fe74d229b467",
+          "imported_path": "python_calamine",
+          "library_version": "0.9.0",
+          "count": 10,
+          "checksum": "436f22e9fb012ad37cc3fe74d229b467",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "date",
+              "str"
+            ],
+            [
+              "bool",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.005718999999999988,
+          "wall_task_s": 0.005719085000009727,
+          "rss_mb": 19.1875,
+          "verify": "ok (count and typed full-cell checksum)",
+          "expected_checksum": "436f22e9fb012ad37cc3fe74d229b467",
+          "imported_path": "python_calamine",
+          "library_version": "0.9.0",
+          "count": 10,
+          "checksum": "436f22e9fb012ad37cc3fe74d229b467",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "date",
+              "str"
+            ],
+            [
+              "bool",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.006028000000000006,
+          "wall_task_s": 0.006027317999951265,
+          "rss_mb": 19.1875,
+          "verify": "ok (count and typed full-cell checksum)",
+          "expected_checksum": "436f22e9fb012ad37cc3fe74d229b467",
+          "imported_path": "python_calamine",
+          "library_version": "0.9.0",
+          "count": 10,
+          "checksum": "436f22e9fb012ad37cc3fe74d229b467",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "date",
+              "str"
+            ],
+            [
+              "bool",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "task": "read_first",
+      "size": "medium",
+      "lib": "kyrax",
+      "n": 3,
+      "cpu_task_s": {
+        "median": 0.02656800000000001,
+        "min": 0.022763999999999993,
+        "max": 0.032013
+      },
+      "wall_task_s": {
+        "median": 0.026571655999987343,
+        "min": 0.023082844000100522,
+        "max": 0.032016693000059604
+      },
+      "rss_mb": {
+        "median": 30.0703125,
+        "min": 30.05078125,
+        "max": 30.23046875
+      },
+      "verify": "ok (count and typed full-cell checksum)",
+      "samples": [
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.02656800000000001,
+          "wall_task_s": 0.026571655999987343,
+          "rss_mb": 30.23046875,
+          "verify": "ok (count and typed full-cell checksum)",
+          "expected_checksum": "e078d034047a1cf53ca13b6e56569508",
+          "imported_path": "/workspace/kyrax/python/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 10,
+          "checksum": "e078d034047a1cf53ca13b6e56569508",
+          "read_types": [
+            [
+              "int",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "datetime",
+              "str"
+            ],
+            [
+              "bool",
+              "str"
+            ],
+            [
+              "int",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.022763999999999993,
+          "wall_task_s": 0.023082844000100522,
+          "rss_mb": 30.0703125,
+          "verify": "ok (count and typed full-cell checksum)",
+          "expected_checksum": "e078d034047a1cf53ca13b6e56569508",
+          "imported_path": "/workspace/kyrax/python/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 10,
+          "checksum": "e078d034047a1cf53ca13b6e56569508",
+          "read_types": [
+            [
+              "int",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "datetime",
+              "str"
+            ],
+            [
+              "bool",
+              "str"
+            ],
+            [
+              "int",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.032013,
+          "wall_task_s": 0.032016693000059604,
+          "rss_mb": 30.05078125,
+          "verify": "ok (count and typed full-cell checksum)",
+          "expected_checksum": "e078d034047a1cf53ca13b6e56569508",
+          "imported_path": "/workspace/kyrax/python/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 10,
+          "checksum": "e078d034047a1cf53ca13b6e56569508",
+          "read_types": [
+            [
+              "int",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "datetime",
+              "str"
+            ],
+            [
+              "bool",
+              "str"
+            ],
+            [
+              "int",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "task": "read_first",
+      "size": "medium",
+      "lib": "calamine",
+      "n": 3,
+      "cpu_task_s": {
+        "median": 0.561696,
+        "min": 0.5344230000000001,
+        "max": 0.599908
+      },
+      "wall_task_s": {
+        "median": 0.5617678229999683,
+        "min": 0.5351960450000206,
+        "max": 0.6008327639999607
+      },
+      "rss_mb": {
+        "median": 91.65625,
+        "min": 91.65625,
+        "max": 91.71875
+      },
+      "verify": "ok (count and typed full-cell checksum)",
+      "samples": [
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.561696,
+          "wall_task_s": 0.5617678229999683,
+          "rss_mb": 91.65625,
+          "verify": "ok (count and typed full-cell checksum)",
+          "expected_checksum": "e078d034047a1cf53ca13b6e56569508",
+          "imported_path": "python_calamine",
+          "library_version": "0.9.0",
+          "count": 10,
+          "checksum": "e078d034047a1cf53ca13b6e56569508",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "date",
+              "str"
+            ],
+            [
+              "bool",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.5344230000000001,
+          "wall_task_s": 0.5351960450000206,
+          "rss_mb": 91.65625,
+          "verify": "ok (count and typed full-cell checksum)",
+          "expected_checksum": "e078d034047a1cf53ca13b6e56569508",
+          "imported_path": "python_calamine",
+          "library_version": "0.9.0",
+          "count": 10,
+          "checksum": "e078d034047a1cf53ca13b6e56569508",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "date",
+              "str"
+            ],
+            [
+              "bool",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.599908,
+          "wall_task_s": 0.6008327639999607,
+          "rss_mb": 91.71875,
+          "verify": "ok (count and typed full-cell checksum)",
+          "expected_checksum": "e078d034047a1cf53ca13b6e56569508",
+          "imported_path": "python_calamine",
+          "library_version": "0.9.0",
+          "count": 10,
+          "checksum": "e078d034047a1cf53ca13b6e56569508",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "date",
+              "str"
+            ],
+            [
+              "bool",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "task": "read_first",
+      "size": "large",
+      "lib": "kyrax",
+      "n": 3,
+      "cpu_task_s": {
+        "median": 0.136965,
+        "min": 0.132486,
+        "max": 0.14896399999999999
+      },
+      "wall_task_s": {
+        "median": 0.13697145399999044,
+        "min": 0.13255683700003829,
+        "max": 0.14897391499994228
+      },
+      "rss_mb": {
+        "median": 75.9453125,
+        "min": 75.36328125,
+        "max": 75.96484375
+      },
+      "verify": "ok (count and typed full-cell checksum)",
+      "samples": [
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.14896399999999999,
+          "wall_task_s": 0.14897391499994228,
+          "rss_mb": 75.9453125,
+          "verify": "ok (count and typed full-cell checksum)",
+          "expected_checksum": "7f25450353315c8447ce11f2af05960b",
+          "imported_path": "/workspace/kyrax/python/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 10,
+          "checksum": "7f25450353315c8447ce11f2af05960b",
+          "read_types": [
+            [
+              "int",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "datetime",
+              "str"
+            ],
+            [
+              "bool",
+              "str"
+            ],
+            [
+              "int",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.136965,
+          "wall_task_s": 0.13697145399999044,
+          "rss_mb": 75.36328125,
+          "verify": "ok (count and typed full-cell checksum)",
+          "expected_checksum": "7f25450353315c8447ce11f2af05960b",
+          "imported_path": "/workspace/kyrax/python/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 10,
+          "checksum": "7f25450353315c8447ce11f2af05960b",
+          "read_types": [
+            [
+              "int",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "datetime",
+              "str"
+            ],
+            [
+              "bool",
+              "str"
+            ],
+            [
+              "int",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 0.132486,
+          "wall_task_s": 0.13255683700003829,
+          "rss_mb": 75.96484375,
+          "verify": "ok (count and typed full-cell checksum)",
+          "expected_checksum": "7f25450353315c8447ce11f2af05960b",
+          "imported_path": "/workspace/kyrax/python/kyrax/__init__.py",
+          "library_version": "source package (see extension SHA256)",
+          "count": 10,
+          "checksum": "7f25450353315c8447ce11f2af05960b",
+          "read_types": [
+            [
+              "int",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "datetime",
+              "str"
+            ],
+            [
+              "bool",
+              "str"
+            ],
+            [
+              "int",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "task": "read_first",
+      "size": "large",
+      "lib": "calamine",
+      "n": 3,
+      "cpu_task_s": {
+        "median": 4.988441999999999,
+        "min": 4.881913,
+        "max": 5.745620000000001
+      },
+      "wall_task_s": {
+        "median": 4.989028312000073,
+        "min": 4.885847184999989,
+        "max": 5.74736790999998
+      },
+      "rss_mb": {
+        "median": 760.421875,
+        "min": 760.359375,
+        "max": 760.5859375
+      },
+      "verify": "ok (count and typed full-cell checksum)",
+      "samples": [
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 4.881913,
+          "wall_task_s": 4.885847184999989,
+          "rss_mb": 760.5859375,
+          "verify": "ok (count and typed full-cell checksum)",
+          "expected_checksum": "7f25450353315c8447ce11f2af05960b",
+          "imported_path": "python_calamine",
+          "library_version": "0.9.0",
+          "count": 10,
+          "checksum": "7f25450353315c8447ce11f2af05960b",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "date",
+              "str"
+            ],
+            [
+              "bool",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 4.988441999999999,
+          "wall_task_s": 4.989028312000073,
+          "rss_mb": 760.359375,
+          "verify": "ok (count and typed full-cell checksum)",
+          "expected_checksum": "7f25450353315c8447ce11f2af05960b",
+          "imported_path": "python_calamine",
+          "library_version": "0.9.0",
+          "count": 10,
+          "checksum": "7f25450353315c8447ce11f2af05960b",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "date",
+              "str"
+            ],
+            [
+              "bool",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        },
+        {
+          "python_version": "3.12.14",
+          "cpu_task_s": 5.745620000000001,
+          "wall_task_s": 5.74736790999998,
+          "rss_mb": 760.421875,
+          "verify": "ok (count and typed full-cell checksum)",
+          "expected_checksum": "7f25450353315c8447ce11f2af05960b",
+          "imported_path": "python_calamine",
+          "library_version": "0.9.0",
+          "count": 10,
+          "checksum": "7f25450353315c8447ce11f2af05960b",
+          "read_types": [
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "str"
+            ],
+            [
+              "date",
+              "str"
+            ],
+            [
+              "bool",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ],
+            [
+              "float",
+              "str"
+            ]
+          ]
+        }
+      ]
+    }
+  ]
+}

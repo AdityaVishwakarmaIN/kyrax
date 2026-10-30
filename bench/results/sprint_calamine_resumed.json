@@ -1,0 +1,240 @@
+{
+ "meta": {
+  "date_utc": "2026-10-29 04:10 UTC",
+  "git": "fe07016",
+  "package_root": "/workspace/kyrax/python",
+  "python": "3.12.14",
+  "platform": "Linux-6.18.55-x86_64-with-glibc2.41",
+  "cpus": 3,
+  "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+  "mode": "full",
+  "harness_runtime_s": 35.7,
+  "versions": {
+   "openpyxl": "3.1.5",
+   "XlsxWriter": "3.2.9",
+   "python-calamine": "0.9.0",
+   "pandas": "3.1.0",
+   "pyarrow": "26.0.0",
+   "numpy": "2.5.4",
+   "kyrax": "/workspace/kyrax/python/kyrax"
+  }
+ },
+ "rows": [
+  {
+   "task": "read_values",
+   "size": "small",
+   "rows": 1000,
+   "lib": "calamine",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.006655999999999999,
+    "min": 0.006506999999999999,
+    "max": 0.007113999999999999,
+    "n": 3,
+    "noise_pct": 9.119591346153847
+   },
+   "cpu_total_s": {
+    "median": 0.036307,
+    "min": 0.034340999999999997,
+    "max": 0.038281,
+    "n": 3,
+    "noise_pct": 10.851901837111317
+   },
+   "rss_mb": {
+    "median": 11.046875,
+    "min": 11.046875,
+    "max": 11.046875,
+    "n": 3,
+    "noise_pct": 0.0
+   },
+   "wall_task_s": {
+    "median": 0.006655866000073729,
+    "min": 0.006506843000011031,
+    "max": 0.0071155670000280224,
+    "n": 3,
+    "noise_pct": 9.14567691131775
+   },
+   "shape": [
+    1001,
+    8
+   ],
+   "read_types": {
+    "0": [
+     "float",
+     "str"
+    ],
+    "1": [
+     "float",
+     "str"
+    ],
+    "2": [
+     "str"
+    ],
+    "3": [
+     "str"
+    ],
+    "4": [
+     "date",
+     "str"
+    ],
+    "5": [
+     "bool",
+     "str"
+    ],
+    "6": [
+     "float",
+     "str"
+    ],
+    "7": [
+     "float",
+     "str"
+    ]
+   },
+   "verify": "ok (all values; bool/date/numeric types)"
+  },
+  {
+   "task": "read_values",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "calamine",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.49878,
+    "min": 0.488876,
+    "max": 0.5038860000000001,
+    "n": 3,
+    "noise_pct": 3.0093427964232884
+   },
+   "cpu_total_s": {
+    "median": 1.082577,
+    "min": 1.0741770000000002,
+    "max": 1.096964,
+    "n": 3,
+    "noise_pct": 2.104884918116669
+   },
+   "rss_mb": {
+    "median": 81.8359375,
+    "min": 81.828125,
+    "max": 81.9453125,
+    "n": 3,
+    "noise_pct": 0.1431980906921241
+   },
+   "wall_task_s": {
+    "median": 0.4988967040000034,
+    "min": 0.4893944410000586,
+    "max": 0.5039270699999179,
+    "n": 3,
+    "noise_pct": 2.912953499861005
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "read_types": {
+    "0": [
+     "float",
+     "str"
+    ],
+    "1": [
+     "float",
+     "str"
+    ],
+    "2": [
+     "str"
+    ],
+    "3": [
+     "str"
+    ],
+    "4": [
+     "date",
+     "str"
+    ],
+    "5": [
+     "bool",
+     "str"
+    ],
+    "6": [
+     "float",
+     "str"
+    ],
+    "7": [
+     "float",
+     "str"
+    ]
+   },
+   "verify": "ok (all values; bool/date/numeric types)"
+  },
+  {
+   "task": "read_values",
+   "size": "large",
+   "rows": 1000000,
+   "lib": "calamine",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 4.930166,
+    "min": 4.866609,
+    "max": 5.48916,
+    "n": 3,
+    "noise_pct": 12.627384148931286
+   },
+   "cpu_total_s": {
+    "median": 11.040064000000001,
+    "min": 10.172028000000001,
+    "max": 11.101661,
+    "n": 3,
+    "noise_pct": 8.420539953391565
+   },
+   "rss_mb": {
+    "median": 725.41796875,
+    "min": 725.41796875,
+    "max": 725.53125,
+    "n": 3,
+    "noise_pct": 0.015615997242968763
+   },
+   "wall_task_s": {
+    "median": 4.932180415999937,
+    "min": 4.867210497999963,
+    "max": 5.490080229,
+    "n": 3,
+    "noise_pct": 12.628689108359758
+   },
+   "shape": [
+    1000001,
+    8
+   ],
+   "read_types": {
+    "0": [
+     "float",
+     "str"
+    ],
+    "1": [
+     "float",
+     "str"
+    ],
+    "2": [
+     "str"
+    ],
+    "3": [
+     "str"
+    ],
+    "4": [
+     "date",
+     "str"
+    ],
+    "5": [
+     "bool",
+     "str"
+    ],
+    "6": [
+     "float",
+     "str"
+    ],
+    "7": [
+     "float",
+     "str"
+    ]
+   },
+   "verify": "ok (all values; bool/date/numeric types)"
+  }
+ ]
+}

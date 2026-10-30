@@ -133,9 +133,31 @@ kyrax.write_excel_turbo_stream(
 )
 ```
 
-### Openpyxl Drop-in Replacement
+For bounded cell memory, supply a row iterator and inline strings:
 
-`kyrax` provides a drop-in replacement for openpyxl workflows with full style objects, cell mutation, merge/unmerge, sheet controls, and 10x-50x speedups:
+```python
+rows = ([i, f"item-{i}"] for i in range(1_000_000))
+kyrax.write_excel_turbo_stream(
+    "large_output.xlsx", [{"name": "Data", "rows": rows}], string_mode="inline"
+)
+```
+
+This path consumes plain row iterables once and stages the archive before replacing
+its destination. Memory includes one row, compression buffers, and distinct styles;
+SST mode additionally retains unique strings. Feature-rich sheets use the model
+fallback. Lazy output omits the optional dimension, so readers may report unknown
+maximum row/column counts before scanning. Streamed worksheet XML uses level 1
+DEFLATE, which can produce larger files than the default level 5 writer path.
+
+Python dates and datetimes use the selected `date1904` epoch in all writer entry
+points. Low-level cell/range edits also preserve their date formats. ISO date output
+retains fractional seconds; Arrow datetime columns retain millisecond precision.
+
+### Familiar workbook API
+
+`kyrax` supports familiar openpyxl-style objects, cell mutation, merge/unmerge, and
+sheet controls. Coverage and performance depend on the workflow; see the
+[measured sprint results and remaining gaps](bench/results/sprint_report.md):
 
 ```python
 import kyrax
@@ -190,11 +212,13 @@ In read-only mode, `iter_rows(values_only=True)` and `cell(...).value` preserve
 individual cell values and types, including the first row. Use `data_only=True`
 for stored formula results; the default returns formula text. Reading does not
 calculate missing formula caches. The column-oriented Turbo/Arrow APIs continue
-to infer a shared column type for DataFrame workflows.
+to infer a shared column type for DataFrame workflows. Read-only mode loads
+shared strings, styles, and formula anchors into memory; worksheet headers and
+individual rows are limited to 16 MiB each.
 
 ## Key Features
 
-- **Openpyxl drop-in replacement**: `load_workbook`, `Workbook`, `Font`, `PatternFill`, `Border`, `Side`, `Alignment`, `Protection`, `Comment`, `merge_cells`, `freeze_panes`.
+- **Familiar workbook API**: `load_workbook`, `Workbook`, `Font`, `PatternFill`, `Border`, `Side`, `Alignment`, `Protection`, `Comment`, `merge_cells`, `freeze_panes`.
 - **Zero-copy data exchange** via [Arrow PyCapsule Interface](https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html) into Polars and Pandas.
 - **High-speed Turbo engine** - selective XLSX feature reading (`read_excel_turbo`), declarative writing (`write_excel_turbo`), and streaming (`write_excel_turbo_stream`).
 - **Byte-preserving edit mode** - edit cells while keeping original untouched XML parts, macros, and styles byte-for-byte intact.

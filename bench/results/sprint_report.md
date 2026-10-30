@@ -1,0 +1,11 @@
+# Practical Excel sprint delivery review
+
+**Plan and stops.** Establish verified baselines, prioritize typed streaming reads and binary inputs, fix date semantics, then stream generator writes. Keep performance changes only with correctness and measured benefit; reserve time for validation and delivery. Active time excludes usage outages.
+
+**Changes and checks.** Typed rows preserve values, formula selection and cached results; binary streams are staged and cleaned up. Date epochs and edits are corrected; eligible generators write with atomic replacement. Release Python: 746 passed, 1 skipped. Independent read corpus: 48 passed; generator output passed openpyxl and calamine across both epochs and string modes. Rust before the ZIP change: 1,321 passed, 8 missing-fixture failures, 3 ignored; six focused ZIP tests passed afterward. These checks do not establish complete Excel compatibility.
+
+**Measurements.** For 100k typed values, 0.361 CPU-s/58 MiB versus the original 0.532/72, whose output was incorrect. At 1m, 3.429/375 versus fresh calamine 4.930/725. First ten rows: 0.137/75.9 versus calamine 4.988/760, which eagerly loads the whole file. Medians of three; workload-specific. The wider [scoreboard](sprint_after.md) reused earlier competitor runs.
+
+The fresh 100k generator workload took 0.559 CPU-s/19 MiB with inline strings versus the original default SST path at 0.696/224 and XlsxWriter constant-memory at 3.511/15. Output was 7.04 MB, 4.76 MB and 5.22 MB respectively: the new output was 48% larger than baseline. String mode and compression both differ. All values were checked. At 1m, the new path took 5.424 CPU-s/19 MiB; validation checked row count and spot values. See [generator results](sprint_generator_final.md), [baseline](sprint_generator_baseline_final.md), and [XlsxWriter](sprint_generator_xlsxwriter_final.md).
+
+**Remaining priorities.** 1. Broaden Excel compatibility: editable loading can lose the active tab, and timezone-aware datetimes lose timezone information. 2. Reduce memory for shared strings, styles and formula anchors; rich sheets use the model fallback. Worksheet headers and rows each have a 16 MiB limit. 3. Test more workloads and improve partial-read latency.
