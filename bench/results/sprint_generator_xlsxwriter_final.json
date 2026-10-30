@@ -1,0 +1,72 @@
+{
+ "meta": {
+  "date_utc": "2026-10-30 05:05 UTC",
+  "git": "f13a5c8",
+  "package_root": "/workspace/kyrax/python",
+  "python": "3.12.14",
+  "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+  "cpus": 3,
+  "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+  "mode": "full",
+  "harness_runtime_s": 11.5,
+  "versions": {
+   "openpyxl": "3.1.5",
+   "XlsxWriter": "3.2.9",
+   "python-calamine": "0.9.0",
+   "pandas": "3.1.0",
+   "pyarrow": "26.0.0",
+   "numpy": "2.5.4",
+   "kyrax": "/workspace/kyrax/python/kyrax"
+  }
+ },
+ "rows": [
+  {
+   "task": "write_stream",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "xlsxwriter-cm",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 3.5106050000000004,
+    "min": 3.376884,
+    "max": 3.555892,
+    "n": 3,
+    "noise_pct": 5.099064121426364
+   },
+   "cpu_total_s": {
+    "median": 3.5416719999999997,
+    "min": 3.404089,
+    "max": 3.588328,
+    "n": 3,
+    "noise_pct": 5.202034519289202
+   },
+   "rss_mb": {
+    "median": 14.94140625,
+    "min": 14.94140625,
+    "max": 14.9453125,
+    "n": 3,
+    "noise_pct": 0.026143790849673203
+   },
+   "wall_task_s": {
+    "median": 3.5110437010000055,
+    "min": 3.3776972769999816,
+    "max": 3.562202280000008,
+    "n": 3,
+    "noise_pct": 5.254990216939664
+   },
+   "output_bytes": {
+    "median": 5223017,
+    "min": 5223017,
+    "max": 5223018,
+    "n": 3,
+    "noise_pct": 1.9146022308562274e-05
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "read_types": {},
+   "verify": "ok (reopens, all values)"
+  }
+ ]
+}

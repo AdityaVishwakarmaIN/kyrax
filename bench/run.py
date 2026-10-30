@@ -206,6 +206,10 @@ def run(args):
                     "cpu_total_s": summarize([x["cpu_total"] for x in ss]),
                     "rss_mb": summarize([x["rss_mb"] for x in ss]),
                     "wall_task_s": summarize([x["wall_task"] for x in ss]),
+                    "output_bytes": (
+                        summarize([x["output_bytes"] for x in ss])
+                        if all(x.get("output_bytes") is not None for x in ss) else None
+                    ),
                     "shape": ss[0]["shape"],
                     "read_types": ss[0].get("read_types", {}),
                     "verify": verdicts.get(lib, "n/a"),
@@ -294,18 +298,21 @@ def fmt_md(data):
         "  `noise` = (max-min)/median over the repeats. `RSS` = worker peak RSS (VmHWM).",
         "  `ratio` = kyrax median / best competitor median (>1 = kyrax worse).",
         "",
-        "| task | size | lib | CPU-s | CPU noise | proc CPU-s | peak RSS MB | RSS min-max | wall-s | n | ratio CPU (vs) | ratio RSS (vs) | verify | status |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|",
+        "| task | size | lib | CPU-s | CPU noise | proc CPU-s | peak RSS MB | RSS min-max | "
+        "wall-s | output bytes | n | ratio CPU (vs) | ratio RSS (vs) | verify | status |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|",
     ]
     for r in data["rows"]:
         c, t, rs, w = r["cpu_task_s"], r["cpu_total_s"], r["rss_mb"], r["wall_task_s"]
         rc = f"{r['vs_best_cpu']['ratio']:.2f} ({r['vs_best_cpu']['lib']})" if "vs_best_cpu" in r else ""
         rr = f"{r['vs_best_rss']['ratio']:.2f} ({r['vs_best_rss']['lib']})" if "vs_best_rss" in r else ""
         lib = f"**{r['lib']}**" if is_kyrax(r["lib"]) else r["lib"]
+        output_bytes = f"{r['output_bytes']['median']:,.0f}" if r.get("output_bytes") else ""
         lines.append(
             f"| {r['task']} | {r['size']} ({r['rows']:,}) | {lib} | {c['median']:.3f} | "
             f"{c['noise_pct']:.0f}% | {t['median']:.3f} | {rs['median']:.0f} | "
-            f"{rs['min']:.0f}-{rs['max']:.0f} | {w['median']:.3f} | {c['n']} | {rc} | {rr} | "
+            f"{rs['min']:.0f}-{rs['max']:.0f} | {w['median']:.3f} | {output_bytes} | "
+            f"{c['n']} | {rc} | {rr} | "
             f"{r['verify']} | {r['status']} |"
         )
     return "\n".join(lines) + "\n"

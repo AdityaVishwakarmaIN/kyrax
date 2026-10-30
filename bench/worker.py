@@ -180,6 +180,13 @@ def write_generator_kyrax(fx, out, rows):
     return int(os.environ["BENCH_NROWS"]) + 1, NCOLS
 
 
+def write_generator_kyrax_inline(fx, out, rows):
+    import kyrax
+
+    kyrax.write_excel_turbo_stream(out, [{"name": "Sheet1", "rows": rows}], string_mode="inline")
+    return int(os.environ["BENCH_NROWS"]) + 1, NCOLS
+
+
 def write_generator_xlsxwriter(fx, out, rows):
     import xlsxwriter
 
@@ -314,6 +321,7 @@ TASKS = {
     "write_stream": {
         "(data only)": write_generator_noop,
         "kyrax-stream": write_generator_kyrax,
+        "kyrax-stream-inline": write_generator_kyrax_inline,
         "xlsxwriter-cm": write_generator_xlsxwriter,
         "openpyxl-wo": write_generator_openpyxl,
     },
@@ -336,12 +344,13 @@ def main() -> None:
     c1, w1 = _cpu(), time.perf_counter()
     # Snapshot peak memory before untimed validation constructs expected rows.
     peak_rss = _vm_hwm_mb()
+    output_bytes = os.path.getsize(out) if os.path.isfile(out) else None
     verdict, value_types = verify_read(task, SIZES[size])
     with open(result, "w") as f:
         json.dump(
             {"cpu_task": c1 - c0, "wall_task": w1 - w0, "rss_mb": peak_rss,
              "verify_read": verdict, "read_types": value_types,
-             "shape": list(shape)},
+             "shape": list(shape), "output_bytes": output_bytes},
             f,
         )
 

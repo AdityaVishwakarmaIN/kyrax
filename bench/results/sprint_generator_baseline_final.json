@@ -1,0 +1,72 @@
+{
+ "meta": {
+  "date_utc": "2026-10-30 05:05 UTC",
+  "git": "fc0fcb07b2447288ab48e909b65e671c20f1725d",
+  "package_root": "/workspace/kyrax-baseline-package",
+  "python": "3.12.14",
+  "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+  "cpus": 3,
+  "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+  "mode": "full",
+  "harness_runtime_s": 3.2,
+  "versions": {
+   "openpyxl": "3.1.5",
+   "XlsxWriter": "3.2.9",
+   "python-calamine": "0.9.0",
+   "pandas": "3.1.0",
+   "pyarrow": "26.0.0",
+   "numpy": "2.5.4",
+   "kyrax": "/workspace/kyrax-baseline-package/kyrax"
+  }
+ },
+ "rows": [
+  {
+   "task": "write_stream",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "kyrax-stream-inline",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.6961459999999999,
+    "min": 0.6740579999999999,
+    "max": 0.71183,
+    "n": 3,
+    "noise_pct": 5.4258733081853565
+   },
+   "cpu_total_s": {
+    "median": 0.736164,
+    "min": 0.712926,
+    "max": 0.7514000000000001,
+    "n": 3,
+    "noise_pct": 5.2262811004069905
+   },
+   "rss_mb": {
+    "median": 223.51953125,
+    "min": 223.16796875,
+    "max": 223.6328125,
+    "n": 3,
+    "noise_pct": 0.2079656070323832
+   },
+   "wall_task_s": {
+    "median": 0.6971946049999929,
+    "min": 0.6743184670000346,
+    "max": 0.7166043230000128,
+    "n": 3,
+    "noise_pct": 6.065143891923629
+   },
+   "output_bytes": {
+    "median": 4755043,
+    "min": 4755043,
+    "max": 4755043,
+    "n": 3,
+    "noise_pct": 0.0
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "read_types": {},
+   "verify": "ok (reopens, all values)"
+  }
+ ]
+}

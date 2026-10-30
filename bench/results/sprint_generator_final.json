@@ -1,0 +1,168 @@
+{
+ "meta": {
+  "date_utc": "2026-10-30 05:04 UTC",
+  "git": "f13a5c8",
+  "package_root": "/workspace/kyrax/python",
+  "python": "3.12.14",
+  "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+  "cpus": 3,
+  "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+  "mode": "full",
+  "harness_runtime_s": 27.8,
+  "versions": {
+   "openpyxl": "3.1.5",
+   "XlsxWriter": "3.2.9",
+   "python-calamine": "0.9.0",
+   "pandas": "3.1.0",
+   "pyarrow": "26.0.0",
+   "numpy": "2.5.4",
+   "kyrax": "/workspace/kyrax/python/kyrax"
+  }
+ },
+ "rows": [
+  {
+   "task": "write_stream",
+   "size": "small",
+   "rows": 1000,
+   "lib": "kyrax-stream-inline",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.018364000000000002,
+    "min": 0.018035,
+    "max": 0.029748999999999994,
+    "n": 3,
+    "noise_pct": 63.787845785231944
+   },
+   "cpu_total_s": {
+    "median": 0.050806,
+    "min": 0.047914,
+    "max": 0.06482199999999999,
+    "n": 3,
+    "noise_pct": 33.27953391331731
+   },
+   "rss_mb": {
+    "median": 18.5859375,
+    "min": 18.4765625,
+    "max": 18.66796875,
+    "n": 3,
+    "noise_pct": 1.0298444724674234
+   },
+   "wall_task_s": {
+    "median": 0.018380711000020256,
+    "min": 0.01803635599998188,
+    "max": 0.02978892799995947,
+    "n": 3,
+    "noise_pct": 63.939702876372074
+   },
+   "output_bytes": {
+    "median": 74846,
+    "min": 74846,
+    "max": 74846,
+    "n": 3,
+    "noise_pct": 0.0
+   },
+   "shape": [
+    1001,
+    8
+   ],
+   "read_types": {},
+   "verify": "ok (reopens, all values)"
+  },
+  {
+   "task": "write_stream",
+   "size": "medium",
+   "rows": 100000,
+   "lib": "kyrax-stream-inline",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 0.559075,
+    "min": 0.552989,
+    "max": 0.5957569999999999,
+    "n": 3,
+    "noise_pct": 7.649778652238057
+   },
+   "cpu_total_s": {
+    "median": 0.584881,
+    "min": 0.5799639999999999,
+    "max": 0.622745,
+    "n": 3,
+    "noise_pct": 7.3144793556296195
+   },
+   "rss_mb": {
+    "median": 18.625,
+    "min": 18.55078125,
+    "max": 18.6484375,
+    "n": 3,
+    "noise_pct": 0.5243288590604027
+   },
+   "wall_task_s": {
+    "median": 0.5590951190000055,
+    "min": 0.5532035030000202,
+    "max": 0.596567298000025,
+    "n": 3,
+    "noise_pct": 7.756067532402179
+   },
+   "output_bytes": {
+    "median": 7043340,
+    "min": 7043340,
+    "max": 7043340,
+    "n": 3,
+    "noise_pct": 0.0
+   },
+   "shape": [
+    100001,
+    8
+   ],
+   "read_types": {},
+   "verify": "ok (reopens, all values)"
+  },
+  {
+   "task": "write_stream",
+   "size": "large",
+   "rows": 1000000,
+   "lib": "kyrax-stream-inline",
+   "status": "MEASURED",
+   "cpu_task_s": {
+    "median": 5.4235310000000005,
+    "min": 5.418803,
+    "max": 5.56398,
+    "n": 3,
+    "noise_pct": 2.676798565362682
+   },
+   "cpu_total_s": {
+    "median": 5.448796,
+    "min": 5.445575,
+    "max": 5.588809,
+    "n": 3,
+    "noise_pct": 2.628727520722019
+   },
+   "rss_mb": {
+    "median": 18.53125,
+    "min": 17.71484375,
+    "max": 18.671875,
+    "n": 3,
+    "noise_pct": 5.164418212478921
+   },
+   "wall_task_s": {
+    "median": 5.4310230669999555,
+    "min": 5.421128631000045,
+    "max": 5.571760652000023,
+    "n": 3,
+    "noise_pct": 2.7735478038244863
+   },
+   "output_bytes": {
+    "median": 71277519,
+    "min": 71277519,
+    "max": 71277519,
+    "n": 3,
+    "noise_pct": 0.0
+   },
+   "shape": [
+    1000001,
+    8
+   ],
+   "read_types": {},
+   "verify": "ok (reopens, spot rows)"
+  }
+ ]
+}
