@@ -315,3 +315,5 @@ mprof run -T 0.01 python python/tests/benchmarks/memory.py python/tests/benchmar
   no need to go fancy right from the start
 
 Turbo sheet dictionaries use either `rows`/`rows_iter` or `columns`/`data`/`table`, not both. Unknown sheet keys raise an error. `cell_styles` coordinates are zero-based in both the `(row, col)` map and the `{row, col, style}` list forms. If migrating a list that used one-based coordinates, subtract one from each row and column. Row dimensions use one-based `row` or zero-based `row_idx`; column dimensions use one-based `col` or `min`/`max`.
+
+Turbo image input detects PNG, JPEG, and GIF formats from their signatures. PNG inputs also require complete chunk framing, but image data is not decoded or fully validated. Supply valid images, since spreadsheet readers may discard malformed data.

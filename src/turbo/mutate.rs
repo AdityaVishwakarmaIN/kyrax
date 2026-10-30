@@ -2722,7 +2722,7 @@ fn fixup_conditional_formatting_move(
 }
 
 /// Translate every fully-contained range in a space-separated sqref value.
-fn shift_sqref_move(
+pub(crate) fn shift_sqref_move(
     val: &[u8],
     r1: u32,
     c1: u32,

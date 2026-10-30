@@ -27,8 +27,8 @@
 //! rows in *cell formulas*); formula text (DV/CF) still goes through `refshift`.
 //!
 //! Refusal contract (all-or-nothing): `None` means refuse the whole operation.
-//! Only table parts refuse — a delete that removes a table's header row (row
-//! axis) or empties a table (column axis) is corruption. Everything else is
+//! Only table parts refuse — deleting a table's header row or changing its
+//! column count would corrupt the table. Everything else is
 //! silently adjusted (dropped, shrunk, or clamped) per the element rules, because
 //! the user would not notice the loss: the deleted rows/cols held the affected
 //! data anyway.
@@ -182,8 +182,7 @@ pub fn fixup_sheet_xml<'a>(
 /// Shifts the table `ref` (and any `totalsRowRef` attribute and inner
 /// `<autoFilter ref>`), and zeroes `totalsRowCount` when the delete removes the
 /// totals row. Refuses — returns `None` — when the operation would corrupt the
-/// table: deleting the header row (row axis) or deleting every column (column
-/// axis).
+/// table: deleting the header row or changing the table's column count.
 pub fn fixup_table_part_xml<'a>(
     xml: &'a [u8],
     axis: Axis,
@@ -217,6 +216,14 @@ pub fn fixup_table_part_xml<'a>(
         Axis::Col => {
             let c0 = parts.iter().filter_map(part_col).min()?;
             let c1 = parts.iter().filter_map(part_col).max()?;
+            // Column definitions must match the table width. Until they can be
+            // updated, refuse edits that change that width.
+            if (delta > 0 && at > c0 && at <= c1)
+                || (delta < 0 && (at as u64) <= c1 as u64
+                    && (at as u64 + delta.unsigned_abs()) > c0 as u64)
+            {
+                return None;
+            }
             if shift_index(Axis::Col, c0, at, delta).is_none()
                 && shift_index(Axis::Col, c1, at, delta).is_none()
             {
@@ -1480,6 +1487,21 @@ fn shift_multi_ref(
     Some(out)
 }
 
+pub(crate) fn shift_pending_ref(value: &str, axis: Axis, at: u32, delta: i64) -> String {
+    shift_multi_ref(value.as_bytes(), axis, at, delta, BandPolicy::Drop, true)
+        .map(|v| String::from_utf8(v).expect("A1 references remain UTF-8"))
+        .unwrap_or_else(|| value.to_string())
+}
+
+pub(crate) fn shift_pending_merge(value: &str, axis: Axis, at: u32, delta: i64) -> String {
+    match shift_a1_range(value.as_bytes(), axis, at, delta, BandPolicy::Clamp) {
+        RangeShift::Unchanged => value.to_string(),
+        RangeShift::Dropped => String::new(),
+        RangeShift::Changed(v) if is_single_cell_text(&v) => String::new(),
+        RangeShift::Changed(v) => String::from_utf8(v).expect("A1 references remain UTF-8"),
+    }
+}
+
 /// Shift a view-state ref (pane topLeftCell, selection activeCell/sqref): clamp
 /// into the grid, never drop.
 fn shift_view_ref(v: &[u8], axis: Axis, at: u32, delta: i64) -> Option<Vec<u8>> {
@@ -2061,8 +2083,16 @@ mod tests {
         let t =
             r#"<table id="1" name="Table1" displayName="Table1" ref="A1:D10" headerRowCount="1"/>"#;
         assert!(fix_table(t, Axis::Col, 1, -4).is_none());
-        let ok = fix_table(t, Axis::Col, 3, -2).unwrap();
-        assert!(ok.contains(r#"ref="A1:B10""#), "{ok}");
+        assert!(fix_table(t, Axis::Col, 3, -2).is_none());
+    }
+
+    #[test]
+    fn table_column_count_changes_refuse() {
+        let t = r#"<table ref="A1:C2"/>"#;
+        assert!(fix_table(t, Axis::Col, 2, 1).is_none());
+        assert!(fix_table(t, Axis::Col, 2, -1).is_none());
+        assert!(fix_table(t, Axis::Col, 1, 1).is_some());
+        assert!(fix_table(t, Axis::Col, 4, -1).is_some());
     }
 
     // ------------------------------------------------------------------

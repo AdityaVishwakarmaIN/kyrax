@@ -603,6 +603,7 @@ pub fn csv_to_sheet(
     opts: &CsvOptions,
 ) -> TurboResult<()> {
     validate_opts(opts)?;
+    crate::turbo::write::model::validate_sheet_name(sheet_name, &[])?;
     let file = std::fs::File::open(csv_path)?;
     let mut reader = CsvReader::new(file, opts);
     let wb = build_workbook(&mut reader, sheet_name, opts)?;
@@ -618,6 +619,7 @@ pub fn csv_bytes_to_sheet(
     opts: &CsvOptions,
 ) -> TurboResult<()> {
     validate_opts(opts)?;
+    crate::turbo::write::model::validate_sheet_name(sheet_name, &[])?;
     let mut reader = CsvReader::new(std::io::Cursor::new(data), opts);
     let wb = build_workbook(&mut reader, sheet_name, opts)?;
     save_workbook(&wb, xlsx_out).map_err(TurboError::Io)?;

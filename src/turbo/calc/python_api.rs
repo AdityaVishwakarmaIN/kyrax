@@ -97,10 +97,13 @@ fn py_to_calc_value(obj: &Bound<'_, PyAny>) -> PyResult<CalcValue> {
     if obj.is_instance_of::<pyo3::types::PyBool>() {
         return Ok(CalcValue::Bool(obj.extract()?));
     }
-    if let Ok(i) = obj.extract::<i64>() {
-        return Ok(CalcValue::Number(i as f64));
-    }
     if let Ok(f) = obj.extract::<f64>() {
+        if !f.is_finite() {
+            return Err(PyValueError::new_err("formula context cannot contain NaN or infinity"));
+        }
+        if obj.is_instance_of::<pyo3::types::PyInt>() && !obj.eq(f)? {
+            return Err(PyValueError::new_err("formula context integer cannot be represented exactly; convert explicitly"));
+        }
         return Ok(CalcValue::Number(f));
     }
     if let Ok(s) = obj.extract::<String>() {

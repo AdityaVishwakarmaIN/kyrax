@@ -1100,9 +1100,14 @@ fn parse_align(obj: &Bound<'_, PyAny>) -> PyResult<AlignDesc> {
     let d = obj
         .cast::<PyDict>()
         .map_err(|_| PyValueError::new_err("alignment must be a dict"))?;
+    let horizontal = opt_str(d, "horizontal")?;
+    let vertical = opt_str(d, "vertical")?;
+    if horizontal.as_deref().is_some_and(|v| !["general", "left", "center", "right", "fill", "justify", "centerContinuous", "distributed"].contains(&v)) {
+        return Err(PyValueError::new_err("invalid alignment horizontal value"));
+    }
     Ok(AlignDesc {
-        horizontal: opt_str(d, "horizontal")?,
-        vertical: opt_str(d, "vertical")?,
+        horizontal,
+        vertical,
         text_rotation: opt_i32(d, "textRotation")?
             .or(opt_i32(d, "text_rotation")?)
             .unwrap_or(0),
@@ -1754,14 +1759,20 @@ pub(crate) fn parse_data_validations(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Dat
         let d = item
             .cast::<PyDict>()
             .map_err(|_| PyValueError::new_err("DV item must be a dict"))?;
+        let type_ = opt_str(d, "type")?.or(opt_str(d, "type_")?);
+        if type_.as_deref().is_some_and(|v| !["none", "whole", "decimal", "list", "date", "time", "textLength", "custom"].contains(&v)) {
+            return Err(PyValueError::new_err("invalid data validation type"));
+        }
+        let sqref = opt_str(d, "sqref")?.or(opt_str(d, "range")?).unwrap_or_default();
+        if !sqref.is_empty() && sqref.split_whitespace().any(|r| parse_ref_range_strict(r.as_bytes()).is_none()) {
+            return Err(PyValueError::new_err("invalid data validation sqref"));
+        }
         out.push(DataValidation {
-            type_: opt_str(d, "type")?.or(opt_str(d, "type_")?),
+            type_,
             operator: opt_str(d, "operator")?,
             formula1: opt_str(d, "formula1")?.or(opt_str(d, "formula")?),
             formula2: opt_str(d, "formula2")?,
-            sqref: opt_str(d, "sqref")?
-                .or(opt_str(d, "range")?)
-                .unwrap_or_default(),
+            sqref,
             allow_blank: opt_bool(d, "allow_blank")?
                 .or(opt_bool(d, "allowBlank")?)
                 .unwrap_or(true),
@@ -2045,6 +2056,12 @@ fn checked_cell_number(obj: &Bound<'_, PyAny>, value: f64) -> PyResult<CellValue
         && obj.get_type().getattr("__module__")?.extract::<String>()? == "decimal";
     if (is_int || is_decimal) && !obj.eq(value)? {
         return Err(PyValueError::new_err("numeric value cannot be represented exactly; write identifiers as text or convert explicitly"));
+    }
+    if !is_int && !is_decimal && obj.hasattr("__index__")? {
+        let integer = obj.call_method0("__index__")?;
+        if !integer.eq(value)? {
+            return Err(PyValueError::new_err("numeric value cannot be represented exactly; write identifiers as text or convert explicitly"));
+        }
     }
     Ok(CellValue::Number(value))
 }
@@ -2478,16 +2495,21 @@ fn columns_to_sheet(
     Ok(style_work)
 }
 
-fn arrow_array_to_cell_value(arr: &dyn arrow_array::Array, idx: usize) -> CellValue {
+fn arrow_array_to_cell_value(arr: &dyn arrow_array::Array, idx: usize) -> PyResult<CellValue> {
     if arr.is_null(idx) {
-        return CellValue::Empty;
+        return Ok(CellValue::Empty);
     }
-    if let Some(f64_arr) = arr.as_any().downcast_ref::<arrow_array::Float64Array>() {
+    let value = if let Some(f64_arr) = arr.as_any().downcast_ref::<arrow_array::Float64Array>() {
         CellValue::Number(f64_arr.value(idx))
     } else if let Some(f32_arr) = arr.as_any().downcast_ref::<arrow_array::Float32Array>() {
         CellValue::Number(f32_arr.value(idx) as f64)
     } else if let Some(i64_arr) = arr.as_any().downcast_ref::<arrow_array::Int64Array>() {
-        CellValue::Number(i64_arr.value(idx) as f64)
+        let integer = i64_arr.value(idx);
+        let number = integer as f64;
+        if number as i128 != integer as i128 {
+            return Err(PyValueError::new_err("numeric value cannot be represented exactly; write identifiers as text or convert explicitly"));
+        }
+        CellValue::Number(number)
     } else if let Some(i32_arr) = arr.as_any().downcast_ref::<arrow_array::Int32Array>() {
         CellValue::Number(i32_arr.value(idx) as f64)
     } else if let Some(b_arr) = arr.as_any().downcast_ref::<arrow_array::BooleanArray>() {
@@ -2497,8 +2519,14 @@ fn arrow_array_to_cell_value(arr: &dyn arrow_array::Array, idx: usize) -> CellVa
     } else if let Some(lstr_arr) = arr.as_any().downcast_ref::<arrow_array::LargeStringArray>() {
         CellValue::Str(lstr_arr.value(idx).to_string())
     } else {
-        CellValue::Empty
+        return Err(PyValueError::new_err("unsupported Arrow array type"));
+    };
+    if let CellValue::Number(number) = &value {
+        if !number.is_finite() {
+            return Err(PyValueError::new_err("Excel cells cannot contain NaN or infinity"));
+        }
     }
+    Ok(value)
 }
 
 fn arrow_like_to_sheet(
@@ -2517,7 +2545,16 @@ fn arrow_like_to_sheet(
     for c in 0..ncols {
         let col = table.call_method1("column", (c,))?;
         if let Ok(py_arr) = col.extract::<pyo3_arrow::PyArray>() {
-            arrow_cols.push(py_arr.into_inner().0);
+            let arr = py_arr.into_inner().0;
+            let a = arr.as_any();
+            if !(a.is::<arrow_array::Float64Array>() || a.is::<arrow_array::Float32Array>()
+                || a.is::<arrow_array::Int64Array>() || a.is::<arrow_array::Int32Array>()
+                || a.is::<arrow_array::BooleanArray>() || a.is::<arrow_array::StringArray>()
+                || a.is::<arrow_array::LargeStringArray>()) {
+                use_py_pylist = true;
+                break;
+            }
+            arrow_cols.push(arr);
         } else {
             use_py_pylist = true;
             break;
@@ -2529,7 +2566,7 @@ fn arrow_like_to_sheet(
         for r in 0..nrows {
             let mut row = Row::new((r as u32) + 1);
             for (ci, arr) in arrow_cols.iter().enumerate() {
-                let val = arrow_array_to_cell_value(arr.as_ref(), r);
+                let val = arrow_array_to_cell_value(arr.as_ref(), r)?;
                 if !matches!(val, CellValue::Empty) {
                     row.cells.push(Cell::new((ci as u32) + 1, val));
                 }
@@ -2702,44 +2739,28 @@ fn apply_col_dims(sheet: &mut Sheet, col_dims: Option<&Bound<'_, PyAny>>) -> PyR
     Ok(())
 }
 
-fn parse_sheet_dict(sheet_obj: &Bound<'_, PyAny>, opts: &WriteOptions) -> PyResult<Sheet> {
-    // Accept dict or object with attributes
-    let d = if let Ok(dict) = sheet_obj.cast::<PyDict>() {
-        dict.clone()
+const SHEET_KEYS: &[&str] = &["name", "visibility", "state", "columns", "data", "table", "rows", "rows_iter", "grid", "formulas", "row_dims", "col_dims", "freeze_panes", "freeze_cell", "cell_styles", "styles", "style_palette", "conditional_formatting", "cf", "data_validations", "validations", "dv", "tab_color", "tab_color_rgb", "auto_filter", "merges", "hyperlinks", "protection", "sheet_protection", "scenarios", "print_options", "page_margins", "page_setup", "header_footer", "row_breaks", "col_breaks", "tables", "comments", "charts", "images", "print_area", "print_titles", "pivots", "named_styles"];
+
+fn normalize_sheet_input<'py>(sheet_obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
+    // Normalize supported object attributes through the same parser as dictionaries.
+    if let Ok(dict) = sheet_obj.cast::<PyDict>() {
+        Ok(dict.clone())
     } else {
-        // build from attributes into a temp approach: use getattr
-        let name: String = sheet_obj
-            .getattr("name")
-            .and_then(|n| n.extract())
-            .unwrap_or_else(|_| "Sheet".into());
-        let mut sheet = Sheet::new(name);
-        if let Ok(vis) = sheet_obj
-            .getattr("visibility")
-            .or_else(|_| sheet_obj.getattr("state"))
-        {
-            if let Ok(s) = vis.extract::<String>() {
-                if let Some(st) = SheetState::parse(&s) {
-                    sheet.state = st;
+        let dict = PyDict::new(sheet_obj.py());
+        for &key in SHEET_KEYS {
+            if sheet_obj.hasattr(key)? {
+                let value = sheet_obj.getattr(key)?;
+                if !value.is_none() {
+                    dict.set_item(key, value)?;
                 }
             }
         }
-        if let Ok(cols) = sheet_obj
-            .getattr("columns")
-            .or_else(|_| sheet_obj.getattr("data"))
-        {
-            if !cols.is_none() {
-                columns_to_sheet(&mut sheet, &cols, opts.date1904)?;
-            }
-        }
-        if let Ok(f) = sheet_obj.getattr("formulas") {
-            if !f.is_none() {
-                apply_formulas(&mut sheet, Some(&f), opts.emit_cached_values)?;
-            }
-        }
-        return Ok(sheet);
-    };
+        Ok(dict)
+    }
+}
 
-    const SHEET_KEYS: &[&str] = &["name", "visibility", "state", "columns", "data", "table", "rows", "rows_iter", "grid", "formulas", "row_dims", "col_dims", "freeze_panes", "freeze_cell", "cell_styles", "styles", "style_palette", "conditional_formatting", "cf", "data_validations", "validations", "dv", "tab_color", "tab_color_rgb", "auto_filter", "merges", "hyperlinks", "protection", "sheet_protection", "scenarios", "print_options", "page_margins", "page_setup", "header_footer", "row_breaks", "col_breaks", "tables", "comments", "charts", "images", "print_area", "print_titles", "pivots", "named_styles"];
+fn parse_sheet_dict(d: &Bound<'_, PyDict>, opts: &WriteOptions) -> PyResult<Sheet> {
+
     for (key, _) in d.iter() {
         let key: String = key.extract().map_err(|_| PyValueError::new_err("sheet keys must be strings"))?;
         if !SHEET_KEYS.contains(&key.as_str()) {
@@ -2984,6 +3005,11 @@ fn apply_structural_sheet(sheet: &mut Sheet, d: &Bound<'_, PyDict>) -> PyResult<
     if let Some(m) = d.get_item("merges")? {
         if !m.is_none() {
             sheet.merges = m.extract()?;
+            for range in &sheet.merges {
+                if parse_ref_range_strict(range.as_bytes()).is_none() {
+                    return Err(PyValueError::new_err(format!("invalid merge range {range:?}")));
+                }
+            }
         }
     }
     if let Some(hl) = d.get_item("hyperlinks")? {
@@ -3086,7 +3112,10 @@ fn parse_hyperlinks(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Hyperlink>> {
             .or(d.get_item("ref_")?)
             .ok_or_else(|| PyValueError::new_err("hyperlink requires ref"))?
             .extract()?;
-        let target = d.get_item("target")?.map(|v| v.extract()).transpose()?;
+        if parse_ref_range_strict(ref_.as_bytes()).is_none() {
+            return Err(PyValueError::new_err(format!("invalid hyperlink ref {ref_:?}")));
+        }
+        let target: Option<String> = d.get_item("target")?.map(|v| v.extract()).transpose()?;
         let location = d.get_item("location")?.map(|v| v.extract()).transpose()?;
         let display = d.get_item("display")?.map(|v| v.extract()).transpose()?;
         out.push(Hyperlink {
@@ -3393,6 +3422,8 @@ pub(crate) fn parse_tables(obj: &Bound<'_, PyAny>) -> PyResult<Vec<TableDef>> {
             .or(d.get_item("ref_")?)
             .ok_or_else(|| PyValueError::new_err("table requires ref"))?
             .extract()?;
+        parse_ref_range_strict(ref_.as_bytes())
+            .ok_or_else(|| PyValueError::new_err(format!("invalid table ref {ref_:?}")))?;
         let columns: Vec<String> = d
             .get_item("columns")?
             .map(|v| v.extract())
@@ -3439,6 +3470,10 @@ fn parse_comments(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Comment>> {
             .or(d.get_item("ref_")?)
             .ok_or_else(|| PyValueError::new_err("comment requires ref"))?
             .extract()?;
+        match parse_ref_range_strict(ref_.as_bytes()) {
+            Some((r1, c1, r2, c2)) if r1 == r2 && c1 == c2 => {},
+            _ => return Err(PyValueError::new_err(format!("invalid comment ref {ref_:?}"))),
+        }
         let author: String = d
             .get_item("author")?
             .map(|v| v.extract())
@@ -3506,6 +3541,9 @@ fn parse_marker(d: &Bound<'_, PyDict>) -> PyResult<(Option<String>, Option<u8>)>
                 "unknown marker symbol {sym:?}; expected one of circle, dash, diamond, dot, none, plus, square, star, triangle, x, auto"
             )));
         }
+    }
+    if size.is_some_and(|v| !(2..=72).contains(&v)) {
+        return Err(PyValueError::new_err("marker size must be between 2 and 72"));
     }
     Ok((symbol, size))
 }
@@ -3741,7 +3779,10 @@ fn parse_charts(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Chart>> {
         } else {
             Anchor::default()
         };
-        let legend_pos = d.get_item("legend_pos")?.map(|v| v.extract()).transpose()?;
+        let legend_pos: Option<String> = d.get_item("legend_pos")?.map(|v| v.extract()).transpose()?;
+        if legend_pos.as_deref().is_some_and(|v| !["b", "l", "r", "t", "tr"].contains(&v)) {
+            return Err(PyValueError::new_err("invalid chart legend_pos"));
+        }
         let style = d.get_item("style")?.map(|v| v.extract()).transpose()?;
         let grouping = if let Some(g) = d.get_item("grouping")? {
             let gs: String = g.extract()?;
@@ -3761,6 +3802,33 @@ fn parse_charts(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Chart>> {
         });
     }
     Ok(out)
+}
+
+// Check PNG chunk framing so truncated images cannot be embedded as valid PNGs.
+// This does not decode image data or verify chunk CRCs.
+fn png_has_complete_chunks(bytes: &[u8]) -> bool {
+    let mut offset = 8usize;
+    let mut saw_header = false;
+    let mut saw_data = false;
+    while let Some(header_end) = offset.checked_add(8).filter(|&end| end <= bytes.len()) {
+        let len = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        let kind = &bytes[offset + 4..header_end];
+        let Some(end) = header_end.checked_add(len).and_then(|end| end.checked_add(4)).filter(|&end| end <= bytes.len()) else {
+            return false;
+        };
+        if !saw_header {
+            if kind != b"IHDR" || len != 13 || bytes[header_end..header_end + 4] == [0; 4] || bytes[header_end + 4..header_end + 8] == [0; 4] {
+                return false;
+            }
+            saw_header = true;
+        } else if kind == b"IDAT" {
+            saw_data |= len > 0;
+        } else if kind == b"IEND" {
+            return len == 0 && saw_data;
+        }
+        offset = end;
+    }
+    false
 }
 
 fn parse_images(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Image>> {
@@ -3802,6 +3870,9 @@ fn parse_images(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Image>> {
                 "unsupported image format: expected png, jpeg, or gif magic bytes",
             )
         })?;
+        if format == ImageFormat::Png && !png_has_complete_chunks(&bytes) {
+            return Err(PyValueError::new_err("invalid or truncated PNG image"));
+        }
         let anchor = if let Some(a) = d.get_item("anchor")? {
             if a.is_none() {
                 Anchor::default()
@@ -3951,6 +4022,12 @@ fn try_parse_numeric_grid(
                     let is_c_contiguous =
                         strides.is_none() || strides.as_ref().is_some_and(|s| s.is_none());
                     if shape.len() == 2 && is_c_contiguous {
+                        let native_order = typestr.starts_with('=')
+                            || (cfg!(target_endian = "little") && typestr.starts_with('<'))
+                            || (cfg!(target_endian = "big") && typestr.starts_with('>'));
+                        if (typestr.ends_with("f8") || typestr.ends_with("f4")) && !native_order {
+                            return Err(PyValueError::new_err("grid must use native byte order"));
+                        }
                         let nrows: usize = shape.get_item(0)?.extract()?;
                         let ncols: usize = shape.get_item(1)?.extract()?;
                         let ptr_val: usize = data.get_item(0)?.extract()?;
@@ -3960,6 +4037,9 @@ fn try_parse_numeric_grid(
                                     let slice = unsafe {
                                         std::slice::from_raw_parts(ptr_val as *const f64, total)
                                     };
+                                    if slice.iter().any(|x| x.is_infinite()) {
+                                        return Err(PyValueError::new_err("grid cannot contain infinity"));
+                                    }
                                     return Ok(Some(NumericGrid {
                                         sheet_name,
                                         nrows: nrows as u32,
@@ -3970,6 +4050,9 @@ fn try_parse_numeric_grid(
                                     let slice = unsafe {
                                         std::slice::from_raw_parts(ptr_val as *const f32, total)
                                     };
+                                    if slice.iter().any(|x| x.is_infinite()) {
+                                        return Err(PyValueError::new_err("grid cannot contain infinity"));
+                                    }
                                     let f64_values: Vec<f64> =
                                         slice.iter().map(|&x| x as f64).collect();
                                     return Ok(Some(NumericGrid {
@@ -4024,6 +4107,9 @@ fn build_workbook_from_py(
     if sheet_list.is_empty() {
         return Err(PyValueError::new_err("sheets must be non-empty"));
     }
+    let normalized_sheets: Vec<_> = sheet_list.iter()
+        .map(|sheet| normalize_sheet_input(&sheet))
+        .collect::<PyResult<_>>()?;
 
     let mut wb = Workbook {
         sheets: Vec::with_capacity(sheet_list.len()),
@@ -4060,10 +4146,7 @@ fn build_workbook_from_py(
     // `grid` is a write-only fast path: it is consumed here into `numeric_columns`
     // and never read by `parse_sheet_dict`, so any rejection must raise rather than
     // silently emit an empty sheet.
-    for s in sheet_list.iter() {
-        let Ok(dict) = s.cast::<PyDict>() else {
-            continue;
-        };
+    for dict in &normalized_sheets {
         if !dict.contains("grid")? {
             continue;
         }
@@ -4156,17 +4239,21 @@ fn build_workbook_from_py(
         }
     }
 
-    for s in sheet_list.iter() {
+    for d in &normalized_sheets {
         // per-sheet named_styles merge
-        if let Ok(d) = s.cast::<PyDict>() {
-            if let Some(ns) = d.get_item("named_styles")? {
-                if !ns.is_none() {
-                    wb.named_styles.extend(parse_named_styles(&ns)?);
-                    wb.style_work = true;
-                }
+        if let Some(ns) = d.get_item("named_styles")? {
+            if !ns.is_none() {
+                wb.named_styles.extend(parse_named_styles(&ns)?);
+                wb.style_work = true;
             }
         }
-        let sheet = parse_sheet_dict(&s, &opts)?;
+        let sheet = parse_sheet_dict(d, &opts)?;
+        for (i, table) in sheet.tables.iter().enumerate() {
+            if sheet.tables[..i].iter().chain(wb.sheets.iter().flat_map(|s| s.tables.iter()))
+                .any(|existing| existing.display_name.eq_ignore_ascii_case(&table.display_name)) {
+                return Err(PyValueError::new_err(format!("duplicate table name {:?}", table.display_name)));
+            }
+        }
         let existing: Vec<String> = wb.sheets.iter().map(|s| s.name.clone()).collect();
         validate_sheet_name(&sheet.name, &existing).map_err(turbo_err_to_py)?;
         if sheet.needs_style_work {

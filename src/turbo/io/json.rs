@@ -32,6 +32,7 @@
 //!     data corruption; a string is explicit.
 //!   - Import: a JSON integer whose magnitude exceeds 2^53 is kept as its raw
 //!     digit **string** rather than a lossy double.
+//!   - Decimal or exponent values outside the finite f64 range are rejected.
 //!   - `NaN` / `±Infinity` are not valid JSON; export emits `null` for them
 //!     (pandas behaviour; the loss is documented, never silent in output).
 //!   - Booleans and mixed-type columns: the turbo reader materialises `t="b"`
@@ -199,6 +200,7 @@ pub fn json_to_sheet(
     sheet_name: &str,
     opts: &JsonOptions,
 ) -> TurboResult<()> {
+    crate::turbo::write::model::validate_sheet_name(sheet_name, &[])?;
     let mut sheet = Sheet::new(sheet_name);
     match opts.shape {
         JsonShape::Records => {
@@ -230,6 +232,7 @@ pub fn json_to_sheet_from<R: BufRead + Copy>(
     sheet_name: &str,
     opts: &JsonOptions,
 ) -> TurboResult<()> {
+    crate::turbo::write::model::validate_sheet_name(sheet_name, &[])?;
     let mut sheet = Sheet::new(sheet_name);
     match opts.shape {
         JsonShape::Records => {
@@ -908,7 +911,7 @@ fn parse_number(b: &[u8], i: usize, capture: bool) -> Result<(usize, Option<JVal
         let digits = raw.strip_prefix(b"-").unwrap_or(raw);
         let mut mag: u128 = 0;
         for &d in digits {
-            mag = mag.wrapping_mul(10).wrapping_add((d - b'0') as u128);
+            mag = mag.saturating_mul(10).saturating_add((d - b'0') as u128);
         }
         if mag > 9_007_199_254_740_992u128 {
             // A JSON integer beyond 2^53 cannot survive as an f64: keep the
@@ -921,10 +924,12 @@ fn parse_number(b: &[u8], i: usize, capture: bool) -> Result<(usize, Option<JVal
             )
         }
     } else {
-        JVal::Num(
-            fast_float2::parse::<f64, _>(raw)
-                .map_err(|_| JsonErr::Format("invalid number".into()))?,
-        )
+        let number = fast_float2::parse::<f64, _>(raw)
+            .map_err(|_| JsonErr::Format("invalid number".into()))?;
+        if !number.is_finite() {
+            return Err(JsonErr::Format("number outside finite f64 range".into()));
+        }
+        JVal::Num(number)
     };
     Ok((j - i, Some(val)))
 }
@@ -1839,6 +1844,30 @@ mod tests {
         let (n, out) = parse_string(s, 0).unwrap();
         assert_eq!(n, s.len());
         assert_eq!(out, "a\"b\\c\u{1F600}\t");
+    }
+
+    #[test]
+    fn interchange_high_priority_regressions() {
+        let raw = b"340282366920938463463374607431768211456";
+        let (_, value) = parse_number(raw, 0, true).unwrap();
+        assert!(
+            matches!(value, Some(JVal::Str(ref s)) if s == std::str::from_utf8(raw).unwrap())
+        );
+        assert!(parse_number(b"1e309", 0, true).is_err());
+        assert!(parse_number(b"-1e309", 0, true).is_err());
+        assert!(matches!(
+            parse_number(b"1e308", 0, true), Ok((_, Some(JVal::Num(n)))) if n.is_finite()
+        ));
+
+        let opts = JsonOptions::default();
+        assert!(json_to_sheet_from(&b"[]"[..], "unused.xlsx", "Bad/Name", &opts).is_err());
+        assert!(json_to_sheet("nonexistent.json", "unused.xlsx", "Bad/Name", &opts)
+            .unwrap_err().to_string().contains("sheet name"));
+        let csv_opts = super::super::csv::CsvOptions::default();
+        assert!(super::super::csv::csv_bytes_to_sheet(b"a\n", "unused.xlsx", "Bad/Name", &csv_opts)
+            .is_err());
+        assert!(super::super::csv::csv_to_sheet("nonexistent.csv", "unused.xlsx", "Bad/Name", &csv_opts)
+            .unwrap_err().to_string().contains("sheet name"));
     }
 
     #[test]

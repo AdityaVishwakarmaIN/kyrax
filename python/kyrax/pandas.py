@@ -1,7 +1,7 @@
 """Pandas ExcelReader and ExcelWriter engine plugin for kyrax.
 
-Zero feature logic in Python: delegates read path to _TurboReader -> Arrow -> pandas
-and write path to write_excel_turbo.
+Delegates worksheet reading to kyrax and parsing to pandas, and writing to
+write_excel_turbo.
 """
 
 from __future__ import annotations
@@ -12,7 +12,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import pandas as pd
 
-from . import _TurboReader, read_excel_turbo, write_excel_turbo, write_excel_turbo_bytes
+from . import (
+    _TurboReader, read_excel_turbo, read_excel_turbo_iter_rows,
+    write_excel_turbo, write_excel_turbo_bytes,
+)
 
 try:
     from pandas.io.excel._base import BaseExcelReader, ExcelWriter
@@ -83,124 +86,32 @@ class KyraxExcelReader(BaseExcelReader):
             return read_excel_turbo(self._path).sheet_names
         return []
 
-    def parse(
-        self,
-        sheet_name: str | int | list[int | str] | None = 0,
-        header: int | list[int] | None = 0,
-        names: list[str] | None = None,
-        index_col: int | list[int] | None = None,
-        usecols: Any = None,
-        skiprows: Any = None,
-        nrows: int | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        if sheet_name is None:
-            names_list = self.sheet_names
-            return {
-                name: self.parse(
-                    sheet_name=name,
-                    header=header,
-                    names=names,
-                    index_col=index_col,
-                    usecols=usecols,
-                    skiprows=skiprows,
-                    nrows=nrows,
-                    **kwargs,
-                )
-                for name in names_list
-            }
+    def get_sheet_by_name(self, name: str) -> int:
+        return self.sheet_names.index(name)
 
-        if isinstance(sheet_name, list):
-            return {
-                name: self.parse(
-                    sheet_name=name,
-                    header=header,
-                    names=names,
-                    index_col=index_col,
-                    usecols=usecols,
-                    skiprows=skiprows,
-                    nrows=nrows,
-                    **kwargs,
-                )
-                for name in sheet_name
-            }
+    def get_sheet_by_index(self, index: int) -> int:
+        if index < 0 or index >= len(self.sheet_names):
+            raise ValueError(f"Worksheet index {index} is invalid")
+        return index
 
-        reader = getattr(self, "book", None)
-        if reader is None and self._path is not None:
-            reader = read_excel_turbo(self._path)
-
-        if reader is None:
-            raise ValueError("No valid workbook reader available")
-
-        if header is None:
-            header_row = None
-        elif isinstance(header, int):
-            header_row = header
-        else:
-            raise NotImplementedError("multi-row headers unsupported")
-
-        if isinstance(skiprows, int):
-            header_row = None
-        elif skiprows is not None:
-            raise NotImplementedError("callable/list skiprows unsupported")
-
-        sheet = reader.load_sheet(sheet_name, features="values", header_row=header_row)
-        arrow_table = sheet.to_arrow()
-        df = arrow_table.to_pandas()
-
-        if isinstance(skiprows, int) and skiprows > 0:
-            if header is not None:
-                if len(df) > skiprows:
-                    df.columns = df.iloc[skiprows - 1].tolist()
-                    df = df.iloc[skiprows:].reset_index(drop=True)
-                else:
-                    df = df.iloc[skiprows:].reset_index(drop=True)
-            else:
-                df = df.iloc[skiprows:].reset_index(drop=True)
-
-        if header is None and (skiprows is None or not isinstance(skiprows, int)):
-            import pandas as pd
-            df.columns = pd.RangeIndex(len(df.columns))
-
-        if usecols is not None:
-            if callable(usecols):
-                cols_to_keep = [c for c in df.columns if usecols(c)]
-                df = df[cols_to_keep]
-            elif isinstance(usecols, (list, tuple)):
-                if all(isinstance(c, int) for c in usecols):
-                    df = df.iloc[:, list(usecols)]
-                else:
-                    df = df[[c for c in usecols if c in df.columns]]
-            elif isinstance(usecols, str):
-                from .utils import column_index_from_string
-                selected_indices = []
-                for part in usecols.split(","):
-                    part = part.strip()
-                    if ":" in part:
-                        start_col, end_col = part.split(":", 1)
-                        c_start = column_index_from_string(start_col.strip()) - 1
-                        c_end = column_index_from_string(end_col.strip()) - 1
-                        selected_indices.extend(range(c_start, c_end + 1))
-                    else:
-                        selected_indices.append(column_index_from_string(part) - 1)
-                valid_indices = [i for i in selected_indices if 0 <= i < len(df.columns)]
-                df = df.iloc[:, valid_indices]
-
-        if names is not None:
-            df.columns = names
-
-        if nrows is not None:
-            df = df.iloc[:nrows]
-
-        if index_col is not None:
-            if isinstance(index_col, int):
-                col_name = df.columns[index_col]
-                df = df.set_index(col_name)
-            elif isinstance(index_col, (list, tuple)):
-                col_names = [df.columns[i] for i in index_col]
-                df = df.set_index(col_names)
-
-        return df
+    def get_sheet_data(self, sheet: int, file_rows_needed: int | None = None) -> list[list[Any]]:
+        if self._path is None:
+            raise ValueError("kyrax engine requires a file path for pandas parsing")
+        rows = read_excel_turbo_iter_rows(
+            self._path, sheet_idx=sheet, max_row=file_rows_needed, data_only=True
+        )
+        try:
+            data = []
+            for row in rows:
+                values = list(row)
+                while values and (values[-1] is None or values[-1] == ""):
+                    values.pop()
+                data.append(values)
+            while data and not data[-1]:
+                data.pop()
+            return data
+        finally:
+            rows.close()
 
     def close(self) -> None:
         pass
