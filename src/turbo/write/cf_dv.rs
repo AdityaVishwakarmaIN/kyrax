@@ -633,6 +633,8 @@ pub struct DataValidation {
     pub show_input_message: bool,
     pub show_drop_down: bool, // openpyxl: showDropDown True means HIDE dropdown (Excel inverted)
     pub error_title: Option<String>,
+    pub error_style: Option<String>,
+    pub ime_mode: Option<String>,
     pub error: Option<String>,
     pub prompt_title: Option<String>,
     pub prompt: Option<String>,
@@ -660,6 +662,16 @@ impl DataValidation {
         if let Some(ref op) = self.operator {
             push_str(out, " operator=\"");
             esc_attr(op, out);
+            out.push(b'"');
+        }
+        if let Some(ref e) = self.error_style {
+            push_str(out, " errorStyle=\"");
+            esc_attr(e, out);
+            out.push(b'"');
+        }
+        if let Some(ref e) = self.ime_mode {
+            push_str(out, " imeMode=\"");
+            esc_attr(e, out);
             out.push(b'"');
         }
         if let Some(ref e) = self.error_title {

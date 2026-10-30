@@ -13,6 +13,30 @@ from typing import Any
 class DataValidation:
     """openpyxl ``DataValidation``."""
 
+    _SYNC_FIELDS = frozenset(
+        {
+            "type",
+            "formula1",
+            "formula2",
+            "showErrorMessage",
+            "showInputMessage",
+            "showDropDown",
+            "allowBlank",
+            "promptTitle",
+            "errorStyle",
+            "error",
+            "prompt",
+            "errorTitle",
+            "imeMode",
+            "operator",
+        }
+    )
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        object.__setattr__(self, name, value)
+        if name in self._SYNC_FIELDS and getattr(self, "_kx_bound", None):
+            self._kx_sync()
+
     def __init__(
         self,
         type: str | None = None,
@@ -40,11 +64,11 @@ class DataValidation:
         self.showDropDown = showDropDown
         self.allowBlank = allowBlank if allow_blank is None else allow_blank
         self.promptTitle = promptTitle
-        self.errorStyle = errorStyle  # accepted for compatibility; not written
+        self.errorStyle = errorStyle
         self.error = error
         self.prompt = prompt
         self.errorTitle = errorTitle
-        self.imeMode = imeMode  # accepted for compatibility; not written
+        self.imeMode = imeMode
         self.operator = operator
         self._ranges: list[str] = []
         if isinstance(sqref, str):
@@ -88,10 +112,18 @@ class DataValidation:
             "show_input_message": bool(self.showInputMessage),
             "show_drop_down": bool(self.showDropDown),
         }
-        for key, val in (("type", self.type), ("formula1", self.formula1),
-                         ("formula2", self.formula2), ("operator", self.operator),
-                         ("error", self.error), ("errorTitle", self.errorTitle),
-                         ("prompt", self.prompt), ("promptTitle", self.promptTitle)):
+        for key, val in (
+            ("type", self.type),
+            ("formula1", self.formula1),
+            ("formula2", self.formula2),
+            ("operator", self.operator),
+            ("error", self.error),
+            ("errorTitle", self.errorTitle),
+            ("prompt", self.prompt),
+            ("promptTitle", self.promptTitle),
+            ("errorStyle", self.errorStyle),
+            ("imeMode", self.imeMode),
+        ):
             if val is not None:
                 spec[key] = str(val)
         return spec

@@ -1775,6 +1775,8 @@ pub(crate) fn parse_data_validations(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Dat
                 .or(opt_bool(d, "showDropDown")?)
                 .unwrap_or(false),
             error_title: opt_str(d, "errorTitle")?.or(opt_str(d, "error_title")?),
+            error_style: opt_str(d, "errorStyle")?.or(opt_str(d, "error_style")?),
+            ime_mode: opt_str(d, "imeMode")?.or(opt_str(d, "ime_mode")?),
             error: opt_str(d, "error")?,
             prompt_title: opt_str(d, "promptTitle")?.or(opt_str(d, "prompt_title")?),
             prompt: opt_str(d, "prompt")?,
@@ -1810,6 +1812,7 @@ fn apply_cell_styles(sheet: &mut Sheet, styles: &Bound<'_, PyAny>) -> PyResult<(
     if let Ok(dict) = styles.cast::<PyDict>() {
         for (key, val) in dict.iter() {
             let (row0, col0) = extract_row_col(&key)?;
+            validate_style_position(row0, col0)?;
             let desc = parse_style_desc(&val)?;
             set_cell_style(sheet, row0 + 1, col0 + 1, desc);
         }
@@ -1831,16 +1834,22 @@ fn apply_cell_styles(sheet: &mut Sheet, styles: &Bound<'_, PyAny>) -> PyResult<(
             let style_obj = d
                 .get_item("style")?
                 .ok_or_else(|| PyValueError::new_err("style needs style dict"))?;
+            validate_style_position(row0, col0)?;
             let desc = parse_style_desc(&style_obj)?;
-            let r = if row0 == 0 { 1 } else { row0 };
-            let c = if col0 == 0 { 1 } else { col0 };
-            set_cell_style(sheet, r, c, desc);
+            set_cell_style(sheet, row0 + 1, col0 + 1, desc);
         }
         return Ok(());
     }
     Err(PyValueError::new_err(
         "cell_styles must be dict{(r,c):style} or list of {row,col,style}",
     ))
+}
+
+fn validate_style_position(row: u32, col: u32) -> PyResult<()> {
+    if row >= 1_048_576 || col >= 16_384 {
+        return Err(PyValueError::new_err("cell_styles coordinates must be zero-based within Excel limits (row 0..1048575, col 0..16383)"));
+    }
+    Ok(())
 }
 
 fn set_cell_style(sheet: &mut Sheet, row: u32, col: u32, desc: StyleDesc) {
@@ -1913,11 +1922,11 @@ pub(super) fn py_to_cell_value_flagged(
     // (each failure builds a PyErr). Anything that does not match exactly, or whose
     // fast conversion fails, falls through to the generic chain unchanged.
     if let Ok(f) = obj.cast_exact::<pyo3::types::PyFloat>() {
-        return Ok(CellValue::Number(f.value()));
+        return checked_cell_number(obj, f.value());
     }
     if obj.is_exact_instance_of::<pyo3::types::PyInt>() {
         if let Ok(i) = obj.extract::<i64>() {
-            return Ok(CellValue::Number(i as f64));
+            return checked_cell_number(obj, i as f64);
         }
     } else if obj.is_exact_instance_of::<pyo3::types::PyString>() {
         if let Ok(s) = obj.extract::<String>() {
@@ -1928,6 +1937,7 @@ pub(super) fn py_to_cell_value_flagged(
             return Ok(CellValue::Bool(b));
         }
     } else if let Some(has_time) = exact_datetime_kind(obj) {
+        reject_timezone(obj)?;
         if let Some(v) = date_attrs_to_cell(obj, date1904, style_flag.as_deref_mut(), Some(has_time)) {
             return Ok(v);
         }
@@ -1940,10 +1950,10 @@ pub(super) fn py_to_cell_value_flagged(
         }
     }
     if let Ok(i) = obj.extract::<i64>() {
-        return Ok(CellValue::Number(i as f64));
+        return checked_cell_number(obj, i as f64);
     }
     if let Ok(f) = obj.extract::<f64>() {
-        return Ok(CellValue::Number(f));
+        return checked_cell_number(obj, f);
     }
     if let Ok(s) = obj.extract::<String>() {
         return str_to_cell_value(obj, s);
@@ -1962,6 +1972,9 @@ pub(super) fn py_to_cell_value_flagged(
         }
     }
     // datetime.date / datetime.datetime via attributes
+    if obj.hasattr("year")? && obj.hasattr("tzinfo")? {
+        reject_timezone(obj)?;
+    }
     if let Some(v) = date_attrs_to_cell(obj, date1904, style_flag.as_deref_mut(), None) {
         return Ok(v);
     }
@@ -1972,6 +1985,7 @@ pub(super) fn py_to_cell_value_flagged(
             obj.getattr("minute").and_then(|x| x.extract::<u32>()),
             obj.getattr("second").and_then(|x| x.extract::<u32>()),
         ) {
+            reject_timezone(obj)?;
             let micros = obj
                 .getattr("microsecond")
                 .and_then(|x| x.extract::<u32>())
@@ -2008,6 +2022,31 @@ pub(super) fn py_to_cell_value_flagged(
         "unsupported cell value type: {}",
         obj.get_type().name()?
     )))
+}
+
+fn reject_timezone(obj: &Bound<'_, PyAny>) -> PyResult<()> {
+    if let Ok(tz) = obj.getattr("tzinfo") {
+        if !tz.is_none() {
+            return Err(PyValueError::new_err("Excel does not support timezone-aware datetime or time values; convert explicitly first"));
+        }
+    }
+    Ok(())
+}
+
+fn checked_cell_number(obj: &Bound<'_, PyAny>, value: f64) -> PyResult<CellValue> {
+    if !value.is_finite() {
+        return Err(PyValueError::new_err("Excel cells cannot contain NaN or infinity"));
+    }
+    // Python integers and Decimal values can carry precision that a double cannot.
+    // Compare through Python so large integers and Decimal values are not rounded first.
+    let is_int = obj.is_instance_of::<pyo3::types::PyInt>();
+    let is_decimal = !is_int && !obj.is_instance_of::<pyo3::types::PyFloat>()
+        && obj.get_type().name()? == "Decimal"
+        && obj.get_type().getattr("__module__")?.extract::<String>()? == "decimal";
+    if (is_int || is_decimal) && !obj.eq(value)? {
+        return Err(PyValueError::new_err("numeric value cannot be represented exactly; write identifiers as text or convert explicitly"));
+    }
+    Ok(CellValue::Number(value))
 }
 
 /// Error-literal check + Excel's 32767-char limit (UserWarning + truncation) for a
@@ -2145,6 +2184,7 @@ fn apply_formulas(
     if let Ok(dict) = formulas.cast::<PyDict>() {
         for (key, val) in dict.iter() {
             let (row0, col0) = extract_row_col(&key)?;
+            validate_formula_position(row0, col0)?;
             let (text, kind, cached) = parse_formula_val(&val, emit_cached)?;
             set_cell(
                 sheet,
@@ -2168,6 +2208,7 @@ fn apply_formulas(
                 .get_item("col")?
                 .ok_or_else(|| PyValueError::new_err("formula missing col"))?
                 .extract()?;
+            validate_formula_position(row0, col0)?;
             let text: String = if let Some(t) = d.get_item("text")? {
                 t.extract()?
             } else if let Some(t) = d.get_item("formula")? {
@@ -2177,6 +2218,7 @@ fn apply_formulas(
             };
             let cached = if emit_cached {
                 d.get_item("cached")?
+                    .filter(|c| !c.is_none())
                     .map(|c| py_to_cached(&c))
                     .transpose()?
             } else {
@@ -2195,6 +2237,16 @@ fn apply_formulas(
     Err(PyValueError::new_err(
         "formulas must be a dict{(row,col): ...} or list of dicts",
     ))
+}
+
+fn validate_formula_position(row: u32, col: u32) -> PyResult<()> {
+    if row >= 1_048_576 {
+        return Err(PyValueError::new_err("formula row must be between 0 and 1048575"));
+    }
+    if col >= 16_384 {
+        return Err(PyValueError::new_err("formula col must be between 0 and 16383"));
+    }
+    Ok(())
 }
 
 fn extract_row_col(key: &Bound<'_, PyAny>) -> PyResult<(u32, u32)> {
@@ -2232,6 +2284,7 @@ fn parse_formula_val(
         };
         let cached = if emit_cached {
             d.get_item("cached")?
+                .filter(|c| !c.is_none())
                 .map(|c| py_to_cached(&c))
                 .transpose()?
         } else {
@@ -2305,9 +2358,6 @@ fn parse_formula_kind_from_dict(d: &Bound<'_, PyDict>) -> PyResult<FormulaKind> 
 }
 
 fn py_to_cached(obj: &Bound<'_, PyAny>) -> PyResult<CachedValue> {
-    if obj.is_none() {
-        return Ok(CachedValue::Number(0.0));
-    }
     if obj.is_instance_of::<pyo3::types::PyBool>() {
         return Ok(CachedValue::Bool(obj.extract()?));
     }
@@ -2551,10 +2601,17 @@ fn apply_row_dims(sheet: &mut Sheet, row_dims: Option<&Bound<'_, PyAny>>) -> PyR
         let row_num: u32 = if let Some(r) = d.get_item("row")? {
             r.extract()?
         } else if let Some(r) = d.get_item("row_idx")? {
-            r.extract::<u32>()? + 1
+            let idx: u32 = r.extract()?;
+            if idx >= 1_048_576 {
+                return Err(PyValueError::new_err("row_dim row_idx must be between 0 and 1048575"));
+            }
+            idx + 1
         } else {
             return Err(PyValueError::new_err("row_dim needs row or row_idx"));
         };
+        if !(1..=1_048_576).contains(&row_num) {
+            return Err(PyValueError::new_err("row_dim row must be between 1 and 1048576"));
+        }
         let height: Option<f64> = d.get_item("height")?.map(|h| h.extract()).transpose()?;
         let hidden: bool = d
             .get_item("hidden")?
@@ -2609,6 +2666,9 @@ fn apply_col_dims(sheet: &mut Sheet, col_dims: Option<&Bound<'_, PyAny>>) -> PyR
             .map(|m| m.extract())
             .transpose()?
             .unwrap_or(min);
+        if min == 0 || max > 16_384 || min > max {
+            return Err(PyValueError::new_err("col_dim requires 1 <= min <= max <= 16384"));
+        }
         let width: Option<f64> = d.get_item("width")?.map(|w| w.extract()).transpose()?;
         let hidden: bool = d
             .get_item("hidden")?
@@ -2678,6 +2738,23 @@ fn parse_sheet_dict(sheet_obj: &Bound<'_, PyAny>, opts: &WriteOptions) -> PyResu
         }
         return Ok(sheet);
     };
+
+    const SHEET_KEYS: &[&str] = &["name", "visibility", "state", "columns", "data", "table", "rows", "rows_iter", "grid", "formulas", "row_dims", "col_dims", "freeze_panes", "freeze_cell", "cell_styles", "styles", "style_palette", "conditional_formatting", "cf", "data_validations", "validations", "dv", "tab_color", "tab_color_rgb", "auto_filter", "merges", "hyperlinks", "protection", "sheet_protection", "scenarios", "print_options", "page_margins", "page_setup", "header_footer", "row_breaks", "col_breaks", "tables", "comments", "charts", "images", "print_area", "print_titles", "pivots", "named_styles"];
+    for (key, _) in d.iter() {
+        let key: String = key.extract().map_err(|_| PyValueError::new_err("sheet keys must be strings"))?;
+        if !SHEET_KEYS.contains(&key.as_str()) {
+            return Err(PyValueError::new_err(format!("unknown sheet key {key:?}")));
+        }
+    }
+    let mut sources = Vec::new();
+    for key in ["rows", "rows_iter", "columns", "data", "table"] {
+        if d.get_item(key)?.is_some_and(|v| !v.is_none()) {
+            sources.push(key);
+        }
+    }
+    if sources.len() > 1 {
+        return Err(PyValueError::new_err(format!("sheet data sources are mutually exclusive: {}", sources.join(", "))));
+    }
 
     let name: String = d
         .get_item("name")?
@@ -2758,6 +2835,8 @@ fn parse_sheet_dict(sheet_obj: &Bound<'_, PyAny>, opts: &WriteOptions) -> PyResu
     )?;
     apply_row_dims(&mut sheet, d.get_item("row_dims")?.as_ref())?;
     apply_col_dims(&mut sheet, d.get_item("col_dims")?.as_ref())?;
+    // Dimension-only rows may have been appended out of order.
+    sheet.rows.sort_by_key(|r| r.row);
 
     if let Some(fc) = d.get_item("freeze_panes")?.or(d.get_item("freeze_cell")?) {
         if !fc.is_none() {
@@ -3990,9 +4069,11 @@ fn build_workbook_from_py(
         }
         let name = opt_str(dict, "name")?.unwrap_or_else(|| "Sheet1".to_string());
 
-        if dict.contains("columns")? || dict.contains("data")? || dict.contains("rows")? {
+        if ["columns", "data", "table", "rows", "rows_iter"].iter().try_fold(false, |found, key| -> PyResult<bool> {
+            Ok(found || dict.get_item(*key)?.is_some_and(|v| !v.is_none()))
+        })? {
             return Err(PyValueError::new_err(
-                "'grid' key is mutually exclusive with 'columns' and 'rows'",
+                "'grid' key is mutually exclusive with rows/rows_iter and columns/data/table",
             ));
         }
         if sheet_list.len() != 1 {
@@ -4086,6 +4167,8 @@ fn build_workbook_from_py(
             }
         }
         let sheet = parse_sheet_dict(&s, &opts)?;
+        let existing: Vec<String> = wb.sheets.iter().map(|s| s.name.clone()).collect();
+        validate_sheet_name(&sheet.name, &existing).map_err(turbo_err_to_py)?;
         if sheet.needs_style_work {
             wb.style_work = true;
         }
@@ -5722,6 +5805,12 @@ impl PyEditableSheet {
                 d.set_item("allow_blank", dv.allow_blank)?;
                 d.set_item("show_input_message", dv.show_input_message)?;
                 d.set_item("show_error_message", dv.show_error_message)?;
+                if let Some(ref value) = dv.error_style {
+                    d.set_item("error_style", value)?;
+                }
+                if let Some(ref value) = dv.ime_mode {
+                    d.set_item("ime_mode", value)?;
+                }
                 if let Some(ref et) = dv.error_title {
                     d.set_item("error_title", et)?;
                 }

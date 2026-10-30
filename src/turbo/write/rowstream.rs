@@ -240,6 +240,12 @@ fn plan<'py>(
                 return Ok(None);
             }
         }
+        // Let the model path report conflicting aliases consistently.
+        if d.get_item("rows")?.is_some_and(|v| !v.is_none())
+            && d.get_item("rows_iter")?.is_some_and(|v| !v.is_none())
+        {
+            return Ok(None);
+        }
         let name = match d.get_item("name")? {
             None => "Sheet".to_string(),
             Some(n) => match n.cast::<PyString>().ok().and_then(|s| s.to_str().ok().map(str::to_owned)) {
@@ -247,6 +253,9 @@ fn plan<'py>(
                 None => return Ok(None),
             },
         };
+        let existing: Vec<String> = out.iter().map(|s: &SheetPlan<'_>| s.name.clone()).collect();
+        super::model::validate_sheet_name(&name, &existing)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let mut state = SheetState::Visible;
         // Same precedence as the model path: "visibility" first, then "state".
         if let Some(v) = d.get_item("visibility")?.or(d.get_item("state")?) {

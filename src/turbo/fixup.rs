@@ -133,8 +133,13 @@ pub fn fixup_sheet_xml<'a>(
 
     // Split at the sheetData block so the metadata passes never copy the grid.
     let sd = find_element(xml, b"sheetData", 0)?;
-    let sd_close = memchr::memmem::find(&xml[sd..], b"</sheetData>").map(|p| sd + p)?;
-    let sd_close_end = sd_close + b"</sheetData>".len();
+    let sd_gt = sd + memchr::memchr(b'>', &xml[sd..])?;
+    let sd_close_end = if sd_gt > sd && xml[sd_gt - 1] == b'/' {
+        sd_gt + 1
+    } else {
+        let sd_close = memchr::memmem::find(&xml[sd..], b"</sheetData>").map(|p| sd + p)?;
+        sd_close + b"</sheetData>".len()
+    };
     let header = &xml[..sd];
     let tail = &xml[sd_close_end..];
 

@@ -1171,6 +1171,7 @@ fn data_validation_to_dict<'py>(
     d.set_item("prompt_title", dv.prompt_title.as_deref())?;
     d.set_item("prompt", dv.prompt.as_deref())?;
     d.set_item("error_title", dv.error_title.as_deref())?;
+    d.set_item("ime_mode", dv.ime_mode.as_deref())?;
     d.set_item("error", dv.error.as_deref())?;
     Ok(d)
 }

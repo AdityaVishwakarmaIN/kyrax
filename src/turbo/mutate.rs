@@ -22,7 +22,7 @@
 //! `ref=` column ranges follow the cells.
 //!
 //! Refusal contract: `None` means the operation is refused rather than
-//! performed incorrectly. Refusal cases are a missing/empty `<sheetData>`, an
+//! performed incorrectly. Refusal cases are a missing `<sheetData>`, an
 //! implicit-numbered row (row splice) or cell (column splice) at or below the
 //! shift point, an insert that would push an existing row past row 1048576 or
 //! an existing cell/span past column 16384, a shared-formula `ref=` or the
@@ -63,12 +63,14 @@ pub fn shift_rows<'a>(xml: &'a [u8], at: u32, delta: i64) -> Option<Cow<'a, [u8]
     let gt = sd_start + memchr::memchr(b'>', &xml[sd_start..])?;
     let self_closing = gt > sd_start && xml[gt - 1] == b'/';
     if self_closing {
-        return None;
+        return Some(Cow::Borrowed(xml));
     }
     let body_start = gt + 1;
     let close = body_start + memchr::memmem::find(&xml[body_start..], b"</sheetData>")?;
     let body = &xml[body_start..close];
-    find_element(body, b"row", 0)?;
+    if find_element(body, b"row", 0).is_none() {
+        return Some(Cow::Borrowed(xml));
+    }
 
     if delta < 0
         && memchr::memmem::find(body, b"t=\"shared\"").is_some()
@@ -126,12 +128,14 @@ pub fn shift_cols<'a>(xml: &'a [u8], at: u32, delta: i64) -> Option<Cow<'a, [u8]
     let gt = sd_start + memchr::memchr(b'>', &xml[sd_start..])?;
     let self_closing = gt > sd_start && xml[gt - 1] == b'/';
     if self_closing {
-        return None;
+        return Some(Cow::Borrowed(xml));
     }
     let body_start = gt + 1;
     let close = body_start + memchr::memmem::find(&xml[body_start..], b"</sheetData>")?;
     let body = &xml[body_start..close];
-    find_element(body, b"row", 0)?;
+    if find_element(body, b"row", 0).is_none() {
+        return Some(Cow::Borrowed(xml));
+    }
 
     if delta < 0
         && memchr::memmem::find(body, b"t=\"shared\"").is_some()
@@ -1636,7 +1640,7 @@ fn rewrite_col_tag(out: &mut Vec<u8>, tag: &[u8], n0: u32, n1: u32) {
 // large sheet costs O(band), not O(sheet).
 //
 // Refusal contract: `None` means the move is refused rather than performed
-// incorrectly. Refusal cases are a missing/empty `<sheetData>`, an
+// incorrectly. Refusal cases are a missing `<sheetData>`, an
 // implicit-numbered row or cell whose position lies in the source or
 // destination rectangle, a destination corner that leaves the grid
 // (all-or-nothing: nothing is written), and a shared-formula `ref=` that would
@@ -1684,12 +1688,14 @@ pub fn move_range<'a>(
     let gt = sd_start + memchr::memchr(b'>', &xml[sd_start..])?;
     let self_closing = gt > sd_start && xml[gt - 1] == b'/';
     if self_closing {
-        return None;
+        return Some(Cow::Borrowed(xml));
     }
     let body_start = gt + 1;
     let close = body_start + memchr::memmem::find(&xml[body_start..], b"</sheetData>")?;
     let body = &xml[body_start..close];
-    find_element(body, b"row", 0)?;
+    if find_element(body, b"row", 0).is_none() {
+        return Some(Cow::Borrowed(xml));
+    }
 
     let rband_min = r1.min(dr1);
     let rband_max = r2.max(dr2);
@@ -2946,9 +2952,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_sheet_refuses() {
-        assert!(shift_rows(b"<worksheet><sheetData/></worksheet>", 1, 1).is_none());
-        assert!(shift_rows(b"<worksheet><sheetData></sheetData></worksheet>", 1, 1).is_none());
+    fn empty_sheet_is_noop() {
+        assert!(shift_rows(b"<worksheet><sheetData/></worksheet>", 1, 1).is_some());
+        assert!(shift_rows(b"<worksheet><sheetData></sheetData></worksheet>", 1, 1).is_some());
         assert!(shift_rows(b"<worksheet></worksheet>", 1, 1).is_none());
     }
 
@@ -3466,9 +3472,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_sheet_refuses_cols() {
-        assert!(shift_cols(b"<worksheet><sheetData/></worksheet>", 1, 1).is_none());
-        assert!(shift_cols(b"<worksheet><sheetData></sheetData></worksheet>", 1, 1).is_none());
+    fn empty_sheet_is_noop_cols() {
+        assert!(shift_cols(b"<worksheet><sheetData/></worksheet>", 1, 1).is_some());
+        assert!(shift_cols(b"<worksheet><sheetData></sheetData></worksheet>", 1, 1).is_some());
         assert!(shift_cols(b"<worksheet></worksheet>", 1, 1).is_none());
     }
 
@@ -4153,7 +4159,7 @@ mod tests {
     }
 
     #[test]
-    fn move_empty_sheet_refuses() {
+    fn move_empty_sheet_is_noop() {
         assert!(
             move_range(
                 b"<worksheet><sheetData/></worksheet>",
@@ -4165,7 +4171,7 @@ mod tests {
                 0,
                 false
             )
-            .is_none()
+            .is_some()
         );
         assert!(
             move_range(
@@ -4178,7 +4184,7 @@ mod tests {
                 0,
                 false
             )
-            .is_none()
+            .is_some()
         );
         assert!(move_range(b"<worksheet></worksheet>", 1, 1, 2, 2, 1, 0, false).is_none());
     }

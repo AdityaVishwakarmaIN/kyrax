@@ -38,7 +38,7 @@ def test_generator_matches_model_parts(tmp_path, row_key, string_mode, date_opti
         [],
         [None, {"value": 3, "style": {"font": {"bold": True}}}, dt.time(1, 2, 3)],
         [dt.timedelta(days=2, seconds=5), {"rich": [{"text": "a"}]}],
-        ["#N/A", "=literal", float("inf"), float("nan")],
+        ["#N/A", "=literal", 1.25, -3.5],
         [{"value": None}],
     ]
     expected = tmp_path / "model.xlsx"

@@ -603,6 +603,7 @@ pub fn emit_breaks(out: &mut Vec<u8>, row_breaks: &[u32], col_breaks: &[u32]) {
 pub fn sheet_needs_r_ns(sheet: &Sheet) -> bool {
     sheet.hyperlinks.iter().any(|h| h.target.is_some())
         || !sheet.charts.is_empty()
+        || !sheet.images.is_empty()
         || !sheet.comments.is_empty()
         || !sheet.tables.is_empty()
 }

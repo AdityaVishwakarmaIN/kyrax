@@ -322,6 +322,7 @@ pub struct DataValidationRec {
     pub prompt_title: Option<String>,
     pub prompt: Option<String>,
     pub error_title: Option<String>,
+    pub ime_mode: Option<String>,
     pub error: Option<String>,
 }
 
@@ -970,6 +971,7 @@ pub fn scan_data_validations(tail: &[u8]) -> Vec<DataValidationRec> {
             prompt_title: attr_owned(tag, b"promptTitle", &mut scratch),
             prompt: attr_owned(tag, b"prompt", &mut scratch),
             error_title: attr_owned(tag, b"errorTitle", &mut scratch),
+            ime_mode: attr_owned(tag, b"imeMode", &mut scratch),
             error: attr_owned(tag, b"error", &mut scratch),
         });
         i = end + 1;

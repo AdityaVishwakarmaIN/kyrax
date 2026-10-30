@@ -1085,6 +1085,12 @@ impl StyleEngine {
     pub fn borders(&self) -> &[BorderDesc] {
         &self.borders.items
     }
+    pub fn alignments(&self) -> &[AlignDesc] {
+        &self.alignments.items
+    }
+    pub fn protections(&self) -> &[ProtDesc] {
+        &self.protections.items
+    }
     pub fn cell_xfs(&self) -> &[StyleArray] {
         &self.cell_styles.items
     }

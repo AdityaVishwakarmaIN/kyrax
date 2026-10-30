@@ -1551,6 +1551,10 @@ def write_excel_turbo(
     :param features: ``core`` | ``all`` | ``styles`` or list of feature names
         (``merges``, ``hyperlinks``, ``comments``, ``tables``, ``charts``,
         ``defined_names``, ``props``, …). Content auto-enables flags.
+    :param emit_cached_values: write supplied formula cached values. A missing
+        ``cached`` field or ``cached=None`` means no cached value; numeric zero
+        is retained as a value. Formula row and column indices are zero-based
+        and must lie within Excel's 1,048,576 by 16,384 grid.
     :param recalculate: compute every formula cell in Rust and write the result
         as its cached value, so the saved file carries formula **and** value.
         Formulas kyrax cannot compute exactly (unsupported function, external

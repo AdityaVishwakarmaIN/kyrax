@@ -238,6 +238,7 @@ class KyraxExcelWriter(ExcelWriter):
             engine_kwargs=engine_kwargs,
         )
         self._sheets: dict[str, list[list[Any]]] = {}
+        self._freeze_panes: dict[str, str] = {}
 
     def _write_cells(
         self,
@@ -249,6 +250,13 @@ class KyraxExcelWriter(ExcelWriter):
         autofilter_range: str | None = None,
     ) -> None:
         sheet = sheet_name or "Sheet1"
+        if freeze_panes is not None:
+            row, col = freeze_panes
+            if not (0 <= row < 1048576 and 0 <= col < 16384):
+                raise ValueError("freeze_panes must be within the Excel worksheet grid")
+            from .utils import get_column_letter
+
+            self._freeze_panes[sheet] = f"{get_column_letter(col + 1)}{row + 1}"
         if sheet not in self._sheets:
             self._sheets[sheet] = []
 
@@ -271,7 +279,10 @@ class KyraxExcelWriter(ExcelWriter):
             return
         sheets_data = []
         for name, rows in self._sheets.items():
-            sheets_data.append({"name": name, "rows": rows})
+            sheet_data = {"name": name, "rows": rows}
+            if name in self._freeze_panes:
+                sheet_data["freeze_panes"] = self._freeze_panes[name]
+            sheets_data.append(sheet_data)
 
         data = write_excel_turbo_bytes(sheets_data)
 

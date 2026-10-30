@@ -37,6 +37,8 @@ pub struct SheetOverlay {
     /// Row/column insert-delete operations recorded in user order. Applied at
     /// save time, each as mutate-splice then fixup, BEFORE cell edits.
     pub ops: Vec<SheetOp>,
+    /// A pending edit was shifted outside the worksheet grid.
+    pub invalid_pending_shift: bool,
     pub merges: Vec<String>,
     pub deleted_merges: AHashSet<String>,
     pub merged_lookup: Option<AHashSet<(u32, u32)>>,
@@ -74,7 +76,9 @@ impl SheetOverlay {
         if amount == 0 {
             return;
         }
-        self.ops.push(SheetOp::InsertRows { at, amount });
+        let op = SheetOp::InsertRows { at, amount };
+        self.shift_pending(&op);
+        self.ops.push(op);
         self.is_dirty = true;
     }
 
@@ -83,7 +87,9 @@ impl SheetOverlay {
         if amount == 0 {
             return;
         }
-        self.ops.push(SheetOp::DeleteRows { at, amount });
+        let op = SheetOp::DeleteRows { at, amount };
+        self.shift_pending(&op);
+        self.ops.push(op);
         self.is_dirty = true;
     }
 
@@ -92,7 +98,9 @@ impl SheetOverlay {
         if amount == 0 {
             return;
         }
-        self.ops.push(SheetOp::InsertCols { at, amount });
+        let op = SheetOp::InsertCols { at, amount };
+        self.shift_pending(&op);
+        self.ops.push(op);
         self.is_dirty = true;
     }
 
@@ -101,7 +109,9 @@ impl SheetOverlay {
         if amount == 0 {
             return;
         }
-        self.ops.push(SheetOp::DeleteCols { at, amount });
+        let op = SheetOp::DeleteCols { at, amount };
+        self.shift_pending(&op);
+        self.ops.push(op);
         self.is_dirty = true;
     }
 
@@ -123,7 +133,7 @@ impl SheetOverlay {
         if rows == 0 && cols == 0 {
             return;
         }
-        self.ops.push(SheetOp::MoveRange {
+        let op = SheetOp::MoveRange {
             r1,
             c1,
             r2,
@@ -131,8 +141,71 @@ impl SheetOverlay {
             rows,
             cols,
             translate,
-        });
+        };
+        self.shift_pending(&op);
+        self.ops.push(op);
         self.is_dirty = true;
+    }
+
+    // Edits already recorded belong to the cells as they exist at this point
+    // in the operation sequence. Later edits still use final coordinates.
+    fn shift_pending(&mut self, op: &SheetOp) {
+        fn destination(pos: (u32, u32), op: &SheetOp) -> Result<Option<(u32, u32)>, ()> {
+            let (r, c) = pos;
+            let shift = |v: u32, at: u32, amount: u32, insert: bool| -> Option<i64> {
+                if v < at { Some(v as i64) }
+                else if insert { Some(v as i64 + amount as i64) }
+                else if (v as u64) < at as u64 + amount as u64 { None }
+                else { Some(v as i64 - amount as i64) }
+            };
+            let pair = match *op {
+                SheetOp::InsertRows { at, amount } => shift(r, at, amount, true).map(|v| (v, c as i64)),
+                SheetOp::DeleteRows { at, amount } => shift(r, at, amount, false).map(|v| (v, c as i64)),
+                SheetOp::InsertCols { at, amount } => shift(c, at, amount, true).map(|v| (r as i64, v)),
+                SheetOp::DeleteCols { at, amount } => shift(c, at, amount, false).map(|v| (r as i64, v)),
+                SheetOp::MoveRange { r1, c1, r2, c2, rows, cols, .. } => {
+                    if r >= r1 && r <= r2 && c >= c1 && c <= c2 {
+                        Some(((r as i64).saturating_add(rows), (c as i64).saturating_add(cols)))
+                    } else if (r as i64) >= (r1 as i64).saturating_add(rows) && (r as i64) <= (r2 as i64).saturating_add(rows)
+                        && (c as i64) >= (c1 as i64).saturating_add(cols) && (c as i64) <= (c2 as i64).saturating_add(cols) {
+                        None
+                    } else { Some((r as i64, c as i64)) }
+                }
+            };
+            match pair {
+                None => Ok(None),
+                Some((r, c)) if (1..=1_048_576).contains(&r) && (1..=16_384).contains(&c) => Ok(Some((r as u32, c as u32))),
+                _ => Err(()),
+            }
+        }
+        let mut cells = AHashMap::default();
+        for (pos, mut value) in std::mem::take(&mut self.modified_cells) {
+            match destination(pos, op) {
+                Ok(Some(target)) => {
+                    if let SheetOp::MoveRange { r1, c1, r2, c2, rows, cols, translate: true } = *op {
+                        if pos.0 >= r1 && pos.0 <= r2 && pos.1 >= c1 && pos.1 <= c2 {
+                            if let CellValue::Formula { ref mut text, ref mut cached, .. } = value {
+                                *text = crate::turbo::formula::translate_body(text, rows as i32, cols as i32);
+                                *cached = None;
+                            }
+                        }
+                    }
+                    cells.insert(target, value);
+                }
+                Ok(None) => {},
+                Err(()) => self.invalid_pending_shift = true,
+            }
+        }
+        self.modified_cells = cells;
+        let mut styles = AHashMap::default();
+        for (pos, style) in std::mem::take(&mut self.modified_styles) {
+            match destination(pos, op) {
+                Ok(Some(target)) => { styles.insert(target, style); },
+                Ok(None) => {},
+                Err(()) => self.invalid_pending_shift = true,
+            }
+        }
+        self.modified_styles = styles;
     }
 
     /// Record a merged range (1-based inclusive).
@@ -434,6 +507,8 @@ impl WorkbookOverlay {
                 show_error_message: r.show_error_message,
                 show_drop_down: r.show_drop_down,
                 error_title: r.error_title,
+                error_style: r.error_style,
+                ime_mode: r.ime_mode,
                 error: r.error,
                 prompt_title: r.prompt_title,
                 prompt: r.prompt,
@@ -1326,13 +1401,20 @@ impl WorkbookOverlay {
                 sheet_pivot_parts(&self.archive_map, &entry_name, &mut pivot_cache_map)?;
 
             let mut sheet_xml: Option<Vec<u8>> = original_xml;
+            if overlay.invalid_pending_shift {
+                return Err(TurboError::Refused(format!("cannot shift pending cells in sheet '{}': worksheet grid limit exceeded", sheet_name)));
+            }
             if !overlay.ops.is_empty() {
-                let Some(mut buf) = sheet_xml.take() else {
-                    return Err(TurboError::Refused(format!(
+                let mut buf = match sheet_xml.take() {
+                    Some(xml) => xml,
+                    None if self.new_sheets.iter().any(|s| s.name == *sheet_name) => {
+                        let mut sst = SstBuilder::new();
+                        write_worksheet(&Sheet::new(sheet_name), false, false, &mut sst)
+                    }
+                    None => return Err(TurboError::Refused(format!(
                         "cannot {} in sheet '{}': the sheet has no source XML to splice",
-                        overlay.ops[0].human(),
-                        sheet_name
-                    )));
+                        overlay.ops[0].human(), sheet_name
+                    ))),
                 };
                 let table_parts = sheet_table_parts(&self.archive_map, &entry_name, &buf);
 
@@ -1983,6 +2065,7 @@ impl WorkbookOverlay {
                         font_offset,
                         fill_offset,
                         border_offset,
+                        &style_engine,
                     );
                 }
 
@@ -3937,6 +4020,7 @@ fn emit_xf_with_offsets(
     font_offset: u32,
     fill_offset: u32,
     border_offset: u32,
+    style_engine: &crate::turbo::write::style_engine::StyleEngine,
 ) {
     push_str(out, "<xf numFmtId=\"");
     write_u32(out, st.num_fmt_id as u32);
@@ -3953,7 +4037,18 @@ fn emit_xf_with_offsets(
     if st.protection_id != 0 {
         push_str(out, " applyProtection=\"1\"");
     }
-    push_str(out, " />");
+    if st.alignment_id != 0 || st.protection_id != 0 {
+        push_str(out, ">");
+        if st.alignment_id != 0 {
+            style_engine.alignments()[st.alignment_id as usize].emit(out);
+        }
+        if st.protection_id != 0 {
+            style_engine.protections()[st.protection_id as usize].emit(out);
+        }
+        push_str(out, "</xf>");
+    } else {
+        push_str(out, " />");
+    }
 }
 
 /// Splice new records into each pool of an existing styles.xml.
@@ -4472,6 +4567,8 @@ mod tests {
                 show_input_message: false,
                 show_drop_down: false,
                 error_title: None,
+                error_style: None,
+                ime_mode: None,
                 error: None,
                 prompt_title: None,
                 prompt: None,

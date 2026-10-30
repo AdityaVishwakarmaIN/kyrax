@@ -3,11 +3,12 @@
 These classes only record what the user set; the Rust engine turns them into
 series references and writes the chart parts. Supported: bar/column, line,
 pie, scatter and area charts with a title, style, size, grouping and legend
-position. Axis titles are accepted but not rendered yet.
+position. Axis titles are not rendered yet; assigning one emits a warning.
 """
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 
@@ -52,7 +53,17 @@ class Series:
 
 class _Axis:
     def __init__(self) -> None:
-        self.title: str | None = None  # accepted; not rendered yet
+        self._title: str | None = None
+
+    @property
+    def title(self) -> str | None:
+        return self._title
+
+    @title.setter
+    def title(self, value: str | None) -> None:
+        if value is not None:
+            warnings.warn("Chart axis titles are not rendered by Kyrax", UserWarning, stacklevel=2)
+        self._title = value
 
 
 class _Legend:

@@ -152,6 +152,9 @@ DEFLATE, which can produce larger files than the default level 5 writer path.
 Python dates and datetimes use the selected `date1904` epoch in all writer entry
 points. Low-level cell/range edits also preserve their date formats. ISO date output
 retains fractional seconds; Arrow datetime columns retain millisecond precision.
+For Python cell values, non-finite numbers, integers or Decimals that cannot be
+represented exactly as a double, and timezone-aware datetimes and times are
+rejected. Convert timezones explicitly and write numeric identifiers as text.
 
 ### Familiar workbook API
 
@@ -310,3 +313,5 @@ mprof run -T 0.01 python python/tests/benchmarks/memory.py python/tests/benchmar
 * Careful with arrow constructors, they tend to allocate a lot
 * [`mprof`](https://github.com/pythonprofilers/memory_profiler) and `time` go a long way for perf checks,
   no need to go fancy right from the start
+
+Turbo sheet dictionaries use either `rows`/`rows_iter` or `columns`/`data`/`table`, not both. Unknown sheet keys raise an error. `cell_styles` coordinates are zero-based in both the `(row, col)` map and the `{row, col, style}` list forms. If migrating a list that used one-based coordinates, subtract one from each row and column. Row dimensions use one-based `row` or zero-based `row_idx`; column dimensions use one-based `col` or `min`/`max`.
