@@ -21,6 +21,17 @@ notebooks
 .zed
 dist
 
+# Local test, coverage, and packaging output
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+*.egg-info/
+perf.data*
+
 # local working docs, not part of the shipped package
 experiments/
 plans/
