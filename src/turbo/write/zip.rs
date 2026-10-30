@@ -340,14 +340,18 @@ struct ActiveEntry {
     uncomp_size: u64,
     comp_size: u64,
     buf: Vec<u8>,
+    incremental: Option<Box<miniz_oxide::deflate::core::CompressorOxide>>,
 }
 
-/// Seekable streaming ZIP writer.
+/// Seekable ZIP writer. The default retains an entry for libdeflate; the
+/// incremental constructor bounds compression memory independently of entry size.
 pub struct StreamingZipWriter<W: Write + Seek> {
     w: W,
     entries: Vec<Entry>,
     current: Option<ActiveEntry>,
     level: CompressionLvl,
+    incremental: bool,
+    deflate_buf: Vec<u8>,
 }
 
 // `with_level` and `add_precompressed` mirror the in-memory `ZipWriter` API.
@@ -363,7 +367,19 @@ impl<W: Write + Seek> StreamingZipWriter<W> {
             current: None,
             level: CompressionLvl::new(DEFAULT_DEFLATE_LEVEL)
                 .unwrap_or_else(|_| CompressionLvl::default()),
+            incremental: false,
+            deflate_buf: Vec::new(),
         }
+    }
+
+    /// Raw-DEFLATE level 1 with a persistent compressor and 64 KiB output
+    /// buffer. This trades compression ratio for single-pass bounded memory;
+    /// compressed bytes may differ from the default libdeflate level 5 path.
+    pub fn new_incremental(w: W) -> Self {
+        let mut writer = Self::new(w);
+        writer.incremental = true;
+        writer.deflate_buf = vec![0; 64 * 1024];
+        writer
     }
 
     pub fn with_level(w: W, level: i32) -> Self {
@@ -373,6 +389,8 @@ impl<W: Write + Seek> StreamingZipWriter<W> {
             entries: Vec::new(),
             current: None,
             level,
+            incremental: false,
+            deflate_buf: Vec::new(),
         }
     }
 
@@ -413,6 +431,15 @@ impl<W: Write + Seek> StreamingZipWriter<W> {
             uncomp_size: 0,
             comp_size: 0,
             buf: Vec::new(),
+            incremental: if self.incremental && method == METHOD_DEFLATE {
+                let flags =
+                    miniz_oxide::deflate::core::create_comp_flags_from_zip_params(1, -15, 0);
+                Some(Box::new(miniz_oxide::deflate::core::CompressorOxide::new(
+                    flags,
+                )))
+            } else {
+                None
+            },
         });
 
         Ok(())
@@ -430,6 +457,10 @@ impl<W: Write + Seek> StreamingZipWriter<W> {
         if entry.method == METHOD_STORE {
             entry.comp_size += chunk.len() as u64;
             self.w.write_all(chunk)?;
+        } else if entry.incremental.is_some() {
+            if !chunk.is_empty() {
+                compress_incremental(&mut self.w, entry, chunk, &mut self.deflate_buf, false)?;
+            }
         } else {
             entry.buf.extend_from_slice(chunk);
         }
@@ -445,10 +476,14 @@ impl<W: Write + Seek> StreamingZipWriter<W> {
 
         let start_method = entry.method;
         if entry.method == METHOD_DEFLATE {
-            let (final_method, payload) = deflate_or_store_level(&entry.buf, self.level);
-            entry.method = final_method;
-            entry.comp_size = payload.len() as u64;
-            self.w.write_all(&payload)?;
+            if entry.incremental.is_some() {
+                compress_incremental(&mut self.w, &mut entry, &[], &mut self.deflate_buf, true)?;
+            } else {
+                let (final_method, payload) = deflate_or_store_level(&entry.buf, self.level);
+                entry.method = final_method;
+                entry.comp_size = payload.len() as u64;
+                self.w.write_all(&payload)?;
+            }
         }
 
         let final_crc = entry.crc32 ^ 0xFFFF_FFFF;
@@ -582,6 +617,48 @@ impl<W: Write + Seek> StreamingZipWriter<W> {
         self.w.write_all(&0u16.to_le_bytes())?;
 
         Ok(self.w)
+    }
+}
+
+/// Feed one input window, or drain the final DEFLATE trailer. Only the
+/// compressor's fixed dictionary and the caller's output window are retained.
+fn compress_incremental(
+    sink: &mut impl Write,
+    entry: &mut ActiveEntry,
+    mut input: &[u8],
+    output: &mut [u8],
+    finish: bool,
+) -> io::Result<()> {
+    use miniz_oxide::{MZFlush, MZStatus};
+    let compressor = entry.incremental.as_mut().expect("incremental compressor");
+    let flush = if finish {
+        MZFlush::Finish
+    } else {
+        MZFlush::None
+    };
+    loop {
+        let result = miniz_oxide::deflate::stream::deflate(compressor, input, output, flush);
+        let status = result
+            .status
+            .map_err(|err| io::Error::other(format!("incremental DEFLATE failed: {err:?}")))?;
+        sink.write_all(&output[..result.bytes_written])?;
+        entry.comp_size += result.bytes_written as u64;
+        input = &input[result.bytes_consumed..];
+        if status == MZStatus::StreamEnd {
+            return if finish && input.is_empty() {
+                Ok(())
+            } else {
+                Err(io::Error::other(
+                    "incremental DEFLATE ended before final input",
+                ))
+            };
+        }
+        if !finish && input.is_empty() {
+            return Ok(());
+        }
+        if result.bytes_consumed == 0 && result.bytes_written == 0 {
+            return Err(io::Error::other("incremental DEFLATE made no progress"));
+        }
     }
 }
 
@@ -775,6 +852,53 @@ mod tests {
 
         let read_pre = crate::turbo::zipmin::read_entry(&zip_bytes, "pre.txt").unwrap();
         assert_eq!(read_pre, Some(b"precompressed content".to_vec()));
+    }
+
+    #[test]
+    fn incremental_zip_writes_before_finish_and_roundtrips() {
+        use std::io::{Cursor, Read};
+        let mut writer = StreamingZipWriter::new_incremental(Cursor::new(Vec::new()));
+        writer.start_entry("large.bin", METHOD_DEFLATE).unwrap();
+        let header_end = writer.w.position();
+        let mut expected = Vec::new();
+        let mut state = 0x1234_5678_u32;
+        for _ in 0..80 {
+            let mut chunk = vec![0u8; 64 * 1024];
+            for value in &mut chunk {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                *value = state as u8;
+            }
+            writer.write_chunk(&chunk).unwrap();
+            writer.write_chunk(&[]).unwrap();
+            expected.extend_from_slice(&chunk);
+            assert_eq!(writer.current.as_ref().unwrap().buf.capacity(), 0);
+        }
+        assert!(writer.w.position() > header_end + 1024 * 1024);
+        writer.finish_entry().unwrap();
+        writer.start_entry("empty.txt", METHOD_DEFLATE).unwrap();
+        writer.finish_entry().unwrap();
+        writer.start_entry("stored.txt", METHOD_STORE).unwrap();
+        writer.write_chunk(b"stored").unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        // The independent zip crate validates the DEFLATE payload and CRC.
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut actual = Vec::new();
+        archive
+            .by_name("large.bin")
+            .unwrap()
+            .read_to_end(&mut actual)
+            .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(archive.by_name("empty.txt").unwrap().size(), 0);
+        let mut stored = String::new();
+        archive
+            .by_name("stored.txt")
+            .unwrap()
+            .read_to_string(&mut stored)
+            .unwrap();
+        assert_eq!(stored, "stored");
     }
 
     #[test]

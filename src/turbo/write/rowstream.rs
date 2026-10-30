@@ -316,7 +316,11 @@ fn stream<'py, W: Write + Seek + Send>(
 
     let (use_sst, emit_cache) = (plan.use_sst, kw.emit_cached_values);
     let (date_iso, date1904) = (kw.date_iso, kw.date1904);
-    let mut zip = StreamingZipWriter::new(w);
+    let mut zip = if plan.iterable_rows {
+        StreamingZipWriter::new_incremental(w)
+    } else {
+        StreamingZipWriter::new(w)
+    };
 
     // Same content as save_workbook_stream for a workbook with no props.
     let titles: Vec<&str> = wb.sheets.iter().map(|s| s.name.as_str()).collect();
