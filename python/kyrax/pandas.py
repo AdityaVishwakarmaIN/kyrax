@@ -170,6 +170,7 @@ class KyraxExcelWriter(ExcelWriter):
         )
         self._sheets: dict[str, list[list[Any]]] = {}
         self._freeze_panes: dict[str, str] = {}
+        self._autofilters: dict[str, str] = {}
 
     def _write_cells(
         self,
@@ -188,6 +189,10 @@ class KyraxExcelWriter(ExcelWriter):
             from .utils import get_column_letter
 
             self._freeze_panes[sheet] = f"{get_column_letter(col + 1)}{row + 1}"
+        if autofilter_range is not None:
+            # pandas 3.0+ computes this range in absolute sheet coordinates,
+            # already accounting for startrow/startcol.
+            self._autofilters[sheet] = autofilter_range
         if sheet not in self._sheets:
             self._sheets[sheet] = []
 
@@ -213,6 +218,8 @@ class KyraxExcelWriter(ExcelWriter):
             sheet_data = {"name": name, "rows": rows}
             if name in self._freeze_panes:
                 sheet_data["freeze_panes"] = self._freeze_panes[name]
+            if name in self._autofilters:
+                sheet_data["auto_filter"] = self._autofilters[name]
             sheets_data.append(sheet_data)
 
         data = write_excel_turbo_bytes(sheets_data)

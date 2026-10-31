@@ -1,18 +1,29 @@
 # `kyrax`
 
-A fast excel file reader for Python and Rust.
+A fast Excel file reader and writer for Python and Rust.
 
-Docs:
- * Python API types: [`python/kyrax/_kyrax.pyi`](./python/kyrax/_kyrax.pyi)
- * Rust (local: `cargo doc --open -p kyrax`)
+Kyrax reads, writes, and edits Excel workbooks from Python. The core is Rust;
+the public interface is Python-only. There is no CLI, no console script, and
+`python -m kyrax` does not work.
+
+## Documentation
+
+- [Documentation home](docs/README.md)
+- [Quickstart](docs/quickstart.md)
+- [Input guide](docs/input-guide.md)
+- [API reference](docs/api-reference.md)
+- [Limitations](docs/limitations.md)
+- [Migration from openpyxl](docs/migration-from-openpyxl.md)
+- [Coverage](docs/coverage.md)
+- [Runnable examples](examples/README.md)
+- Python API types: [`python/kyrax/_kyrax.pyi`](./python/kyrax/_kyrax.pyi)
+- Rust: `cargo doc --open -p kyrax`
 
 ## Stability
 
-The Python API is mostly stable, and we avoid breaking changes as much as possible.
-
-> ⚠️ The free-threaded build is still considered experimental
-
-The Rust crate is still experimental, and breaking changes are to be expected.
+The Python API is mostly stable, and we avoid breaking changes as much as
+possible. The free-threaded build is still considered experimental. The Rust
+crate is still experimental, and breaking changes are to be expected.
 
 ## Installation
 
@@ -33,211 +44,205 @@ pip install kyrax[pyarrow]
 pip install kyrax[pandas,polars]
 ```
 
-## Quick Start
+## Quick start
 
-### Modern usage (recommended)
+The snippets below build on each other: they create the files they read and
+write their output to the current directory.
 
-kyrax supports the [Arrow PyCapsule Interface](https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html) for zero-copy data exchange with libraries like Polars, without requiring pyarrow as a dependency.
-Use kyrax with any Arrow-compatible library without requiring pyarrow.
-
-```python
-import kyrax
-
-# Load an Excel file
-reader = kyrax.read_excel("data.xlsx")
-sheet = reader.load_sheet(0)  # Load first sheet
-
-# Use with Polars (zero-copy, no pyarrow needed)
-import polars as pl
-df = pl.DataFrame(sheet)  # Direct PyCapsule interface
-print(df)
-
-# Or use the to_polars() method (also via PyCapsule)
-df = sheet.to_polars()
-print(df)
-
-# Or access the raw Arrow data via PyCapsule interface
-schema = sheet.__arrow_c_schema__()
-array_data = sheet.__arrow_c_array__()
-```
-
-### Traditional usage (with pandas/pyarrow)
+### Create, edit, and read a workbook
 
 ```python
 import kyrax
 
-reader = kyrax.read_excel("data.xlsx")
-sheet = reader.load_sheet(0)
-
-# Convert to pandas (requires `pandas` extra)
-df = sheet.to_pandas()
-
-# Or get pyarrow RecordBatch directly
-record_batch = sheet.to_arrow()
-```
-
-### Working with tables
-
-```python
-reader = kyrax.read_excel("data.xlsx")
-
-# List available tables
-tables = reader.table_names()
-print(f"Available tables: {tables}")
-
-# Load a specific table
-table = reader.load_table("MyTable")
-df = pl.DataFrame(table)  # Zero-copy via PyCapsule, no pyarrow needed
-```
-
-### Turbo Read (high-performance XLSX reader)
-
-`read_excel_turbo` provides selective feature parsing for high-throughput XLSX loading:
-
-```python
-import kyrax
-
-# Open workbook for turbo reading
-reader = kyrax.read_excel_turbo("data.xlsx")
-
-# Selective loading: values, formulas, styles, merges, comments, etc.
-sheet = reader.load_sheet("Sheet1", features=["values", "styles", "formulas"])
-
-# Access Arrow columns, cell errors, style indices, formulas
-arrow_data = sheet.to_arrow()
-styles = sheet.style_indices()
-formulas = sheet.formulas()
-```
-
-### Turbo Write & Streaming Export
-
-Declarative, high-speed XLSX writing and streaming export:
-
-```python
-import kyrax
-import numpy as np
-
-# Declarative write from sheet dicts or NumPy float grid fast lane
-arr = np.array([[1.0, 2.5], [3.0, 4.25]], dtype=np.float64)
-kyrax.write_excel_turbo("output.xlsx", [{"name": "Data", "grid": arr}])
-
-# Streaming write for large datasets.
-# NOTE: "columns" takes columnar DATA — a list of column arrays, not header
-# names. Headers go in the first entry of "rows".
-kyrax.write_excel_turbo_stream(
-    "large_output.xlsx",
-    [{"name": "Sheet1", "columns": [[1.0, 2.0, 3.0], ["a", "b", "c"]]}]
-)
-```
-
-For bounded cell memory, supply a row iterator and inline strings:
-
-```python
-rows = ([i, f"item-{i}"] for i in range(1_000_000))
-kyrax.write_excel_turbo_stream(
-    "large_output.xlsx", [{"name": "Data", "rows": rows}], string_mode="inline"
-)
-```
-
-This path consumes plain row iterables once and stages the archive before replacing
-its destination. Memory includes one row, compression buffers, and distinct styles;
-SST mode additionally retains unique strings. Feature-rich sheets use the model
-fallback. Lazy output omits the optional dimension, so readers may report unknown
-maximum row/column counts before scanning. Streamed worksheet XML uses level 1
-DEFLATE, which can produce larger files than the default level 5 writer path.
-
-Python dates and datetimes use the selected `date1904` epoch in all writer entry
-points. Low-level cell/range edits also preserve their date formats. ISO date output
-retains fractional seconds; Arrow datetime columns retain millisecond precision.
-For Python cell values, non-finite numbers, integers or Decimals that cannot be
-represented exactly as a double, and timezone-aware datetimes and times are
-rejected. Convert timezones explicitly and write numeric identifiers as text.
-
-### Familiar workbook API
-
-`kyrax` supports familiar openpyxl-style objects, cell mutation, merge/unmerge, and
-sheet controls. Coverage and performance depend on the workflow; see the
-[measured sprint results and remaining gaps](bench/results/sprint_report.md):
-
-```python
-import kyrax
-from kyrax.styles import Font, PatternFill, Side, Border, Alignment
-
-# Create or load workbook
-wb = kyrax.Workbook()  # or kyrax.load_workbook("financials.xlsx")
+wb = kyrax.Workbook()
 ws = wb.active
-ws.title = "Summary"
-
-# Cell assignment and 2D slicing
-ws["A1"] = "Quarterly Revenue"
-ws["A1":"C1"] = [["Quarterly Revenue", 10500.5, True]]
-
-# Styling with standard openpyxl classes
-ws["A1"].font = Font(name="Calibri", size=14, bold=True, color="0070C0")
-ws["A1"].fill = PatternFill(fill_type="solid", start_color="FFFFE0")
-ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
-
-thin = Side(style="thin", color="000000")
-ws["A1"].border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-# Merging and sheet controls
-ws.merge_cells("A1:C1")
+ws.title = "Sales"
+ws.append(["Item", "Price"])
+ws.append(["Apple", 2.5])
+ws["A3"] = "Pear"
+ws["B3"] = 3
+ws["C2"] = "=B2*2"
 ws.freeze_panes = "A2"
-ws.tab_color = "0070C0"
+wb.save("sales.xlsx")
 
-# Save with byte-preservation
-wb.save("summary.xlsx")
+loaded = kyrax.load_workbook("sales.xlsx")
+print(loaded["Sales"]["A2"].value)  # Apple
+print(loaded["Sales"]["C2"].value)  # =B2*2
+loaded.close()
 ```
 
-### High-Throughput Read-Only Ingestion
+Saving does not calculate formulas. Use `data_only=True` to read cached formula
+results, or `recalculate=True` with the turbo writer to compute supported
+formulas while writing.
+
+### Read tabular data
 
 ```python
 import kyrax
 
-# Fast read-only iterator backed by Rust turbo engine
-wb = kyrax.load_workbook("huge_dataset.xlsx", read_only=True)
-ws = wb.active
-
-for row in ws.iter_rows(values_only=True):
-    pass
+reader = kyrax.read_excel("sales.xlsx")
+print(reader.sheet_names)  # ['Sales']
+sheet = reader.load_sheet("Sales", use_columns="A:B", n_rows=10)
+print(sheet.height, sheet.width)
+print([column.name for column in sheet.selected_columns])
 ```
 
-`load_workbook` also accepts workbook `bytes`, `bytearray`, `memoryview`, and binary
-file-like objects such as `io.BytesIO`. Streams are consumed from their current
-position and remain open. Read-only inputs supplied in memory are staged to a
-temporary file with bounded reads; use a context manager or call `close()` to
-remove that file promptly. Path inputs stream directly from the source file.
+`read_excel` accepts a path or bytes and is calamine-backed; tests exercise
+XLSX, legacy XLS, and ODS fixtures. The turbo reader, turbo writer, and editable
+API target XLSX/XLSM.
 
-In read-only mode, `iter_rows(values_only=True)` and `cell(...).value` preserve
-individual cell values and types, including the first row. Use `data_only=True`
-for stored formula results; the default returns formula text. Reading does not
-calculate missing formula caches. The column-oriented Turbo/Arrow APIs continue
-to infer a shared column type for DataFrame workflows. Read-only mode loads
-shared strings, styles, and formula anchors into memory; worksheet headers and
+### Write with the turbo writer
+
+```python
+import kyrax
+
+sheets = [
+    {
+        "name": "Sales",
+        "rows": [["Item", "Price"], ["Apple", 2.5], ["Pear", 3.0]],
+        "freeze_panes": "A2",
+        "auto_filter": "A1:B3",
+    }
+]
+kyrax.write_excel_turbo("turbo.xlsx", sheets)
+
+data = kyrax.write_excel_turbo_bytes(sheets)
+with open("turbo_bytes.xlsx", "wb") as output:
+    output.write(data)
+```
+
+`rows` includes any header row. Do not mix `rows` with `columns`/`data`/`table`
+or `grid` in the same sheet. See the
+[input guide](docs/input-guide.md#turbo-writer-sheet-dictionaries) for the sheet
+dictionary schema.
+
+### Stream rows
+
+```python
+import kyrax
+
+def rows():
+    yield ["Index", "Square"]
+    for index in range(100_000):
+        yield [index, index * index]
+
+kyrax.write_excel_turbo_stream(
+    "streamed.xlsx",
+    [{"name": "Squares", "rows": rows()}],
+    string_mode="inline",
+)
+```
+
+The streaming writer consumes a plain row generator once. Inline strings use
+bounded row/chunk cell memory; `string_mode="sst"` retains unique strings.
+Feature-rich sheets may use an eager fallback. Lazy output omits the optional
+worksheet dimension, so some readers may not know the row count until scanning.
+
+### Read-only streaming
+
+```python
+import kyrax
+
+with kyrax.load_workbook("streamed.xlsx", read_only=True) as wb:
+    ws = wb.active
+    for row in ws.iter_rows(values_only=True):
+        print(row)
+```
+
+Read-only mode is forward streaming. `iter_rows(values_only=True)` is the
+supported row API; cell proxies are not available. Read-only mode loads shared
+strings, styles, and formula anchors into memory; worksheet headers and
 individual rows are limited to 16 MiB each.
 
-## Key Features
+### pandas and Arrow
 
-- **Familiar workbook API**: `load_workbook`, `Workbook`, `Font`, `PatternFill`, `Border`, `Side`, `Alignment`, `Protection`, `Comment`, `merge_cells`, `freeze_panes`.
-- **Zero-copy data exchange** via [Arrow PyCapsule Interface](https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html) into Polars and Pandas.
-- **High-speed Turbo engine** - selective XLSX feature reading (`read_excel_turbo`), declarative writing (`write_excel_turbo`), and streaming (`write_excel_turbo_stream`).
-- **Byte-preserving edit mode** - edit cells while keeping original untouched XML parts, macros, and styles byte-for-byte intact.
-- **Standalone formula evaluation** - evaluate formulas, track dependencies, and recalculate spreadsheets with `kyrax.formulas`.
-- **Validation & repair** - inspect corrupted spreadsheets and fix repairable findings with `validate_excel` and `repair_excel`.
-- **High performance** - Rust core with Python bindings and thin adapters.
+```python
+import pandas as pd
+import kyrax
+
+frame = pd.DataFrame({"item": ["Apple"], "price": [2.5]})
+frame.to_excel("pandas.xlsx", engine="kyrax", index=False)
+print(pd.read_excel("pandas.xlsx", engine="kyrax"))
+
+reader = kyrax.read_excel("pandas.xlsx")
+sheet = reader.load_sheet(0)
+print(sheet.to_pandas())  # requires the pandas/pyarrow extra
+```
+
+The pandas writer buffers cells and supports `mode="w"` only. Error cells are
+surfaced as error-code strings; use the turbo `cell_errors()` API when you need
+to distinguish a real error from a literal string.
+
+### CSV, JSON, and formulas
+
+```python
+from kyrax.io import csv_bytes_to_sheet, json_bytes_to_sheet
+from kyrax import formulas
+
+csv_bytes_to_sheet(b"name,count\nApple,2\n", "from_csv.xlsx", infer_types=True)
+json_bytes_to_sheet(b'[{"name":"Apple","count":2}]', "from_json.xlsx")
+
+print(formulas.evaluate("=SUM(1,2)"))          # 3.0
+print(formulas.evaluate("A1*2", {"A1": 21}))   # 42.0
+print(formulas.dependencies("=SUM(A1:B2)+C5"))
+```
+
+## Feature overview
+
+| Area | What you can do | Entry points |
+|---|---|---|
+| Read | Standard tabular read, selective turbo feature read, read-only streaming | `read_excel`, `read_excel_turbo`, `load_workbook(read_only=True)` |
+| Write | Rows, columns, NumPy grid, bytes, streaming | `write_excel_turbo`, `write_excel_turbo_bytes`, `write_excel_turbo_stream` |
+| Edit | openpyxl-style workbook, cells, styles, merges, tables, validation, conditional formatting, charts, images | `Workbook`, `load_workbook`, `edit_excel` |
+| pandas | `engine="kyrax"` reader and writer | `kyrax[pandas]` |
+| CSV/JSON | Import and export | `kyrax.io` |
+| Formulas | Evaluate, inspect dependencies, recalculate | `kyrax.formulas` |
+| Validate/repair | Structured reports and conservative repair | `validate_excel`, `repair_excel` |
+| Encryption | Detect encrypted workbooks; inspect/read when built with the encryption feature | `is_encrypted`, `encryption_info`, `read_excel_turbo` |
+
+## Key features
+
+- **Familiar workbook API**: `load_workbook`, `Workbook`, `Font`,
+  `PatternFill`, `Border`, `Side`, `Alignment`, `Protection`, `Comment`,
+  `merge_cells`, `freeze_panes`, tables, data validation, conditional
+  formatting, charts, and images.
+- **Zero-copy data exchange** via the
+  [Arrow PyCapsule Interface](https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html)
+  into Polars and other Arrow-compatible libraries.
+- **Turbo engine**: selective XLSX feature reading (`read_excel_turbo`),
+  declarative writing (`write_excel_turbo`), and streaming
+  (`write_excel_turbo_stream`).
+- **Byte-preserving edit mode** for untouched package parts, macros, and styles.
+- **Standalone formula evaluation** with `kyrax.formulas`.
+- **Validation and repair** with `validate_excel` and `repair_excel`.
+- **Rust core** with Python bindings and thin adapters.
+
+## Limitations
+
+Kyrax is not a complete openpyxl replacement and does not claim exhaustive
+nested-schema or Microsoft Excel interoperability. Verified limitations include
+pandas error cells as strings, pandas `mode="w"` only, structural metadata
+refusals, external-link/property/named-style gaps, Arrow `value` struct
+unwrapping, `Fraction`/custom `__float__` coercion, JSON underflow, table
+header/name rules, and the absence of a CLI. See
+[Limitations](docs/limitations.md) for the full list and
+[Coverage](docs/coverage.md) for test evidence.
 
 ## Contributing & Development
 
 ### Prerequisites
 
 You'll need:
+
 1. **[Rust](https://rustup.rs/)** - Rust stable or nightly
 2. **[uv](https://docs.astral.sh/uv/getting-started/installation/)** - Fast Python package manager (will install Python 3.10+ automatically)
 3. **[git](https://git-scm.com/)** - For version control
 4. **[make](https://www.gnu.org/software/make/)** - For running development commands
 
 **Python Version Management:**
+
 uv handles Python installation automatically. To use a specific Python version:
+
 ```bash
 uv python install 3.13  # Install Python 3.13
 uv python pin 3.13      # Pin project to Python 3.13
@@ -260,7 +265,7 @@ Verify your installation by running:
 make
 ```
 
-This runs a full development cycle: formatting, building, linting, and testing
+This runs a full development cycle: formatting, building, linting, and testing.
 
 ### Development Commands
 
@@ -277,20 +282,24 @@ make format       # to format python and rust code
 
 ### Useful Resources
 
-* [`python/kyrax/_kyrax.pyi`](./python/kyrax/_kyrax.pyi) - Python API types
-* [`python/tests/`](./python/tests) - Comprehensive usage examples
+- [`python/kyrax/_kyrax.pyi`](./python/kyrax/_kyrax.pyi) - Python API types
+- [`python/tests/`](./python/tests) - Comprehensive usage examples
+- [`docs/`](./docs) - User documentation
+- [`examples/`](./examples) - Self-contained runnable examples
 
 ## Benchmarking
 
-For benchmarking, use `make benchmarks` which automatically builds an optimised wheel.
-This is required for profiling, as dev mode builds are much slower.
+For benchmarking, use `make benchmarks` which automatically builds an optimised
+wheel. This is required for profiling, as dev mode builds are much slower.
 
 ### Speed benchmarks
+
 ```bash
 make benchmarks
 ```
 
 ### Memory profiling
+
 ```bash
 mprof run -T 0.01 python python/tests/benchmarks/memory.py python/tests/benchmarks/fixtures/plain_data.xls
 ```
@@ -304,12 +313,22 @@ mprof run -T 0.01 python python/tests/benchmarks/memory.py python/tests/benchmar
 
 ## Dev tips
 
-* Use `cargo check` to verify that your rust code compiles, no need to go through `maturin` every time
-* `cargo clippy` = 💖
-* Careful with arrow constructors, they tend to allocate a lot
-* [`mprof`](https://github.com/pythonprofilers/memory_profiler) and `time` go a long way for perf checks,
-  no need to go fancy right from the start
+- Use `cargo check` to verify that your Rust code compiles; no need to go
+  through `maturin` every time.
+- `cargo clippy` is useful for linting.
+- Careful with Arrow constructors; they tend to allocate a lot.
+- [`mprof`](https://github.com/pythonprofilers/memory_profiler) and `time` go a
+  long way for perf checks; no need to go fancy right from the start.
 
-Turbo sheet dictionaries use either `rows`/`rows_iter` or `columns`/`data`/`table`, not both. Unknown sheet keys raise an error. `cell_styles` coordinates are zero-based in both the `(row, col)` map and the `{row, col, style}` list forms. If migrating a list that used one-based coordinates, subtract one from each row and column. Row dimensions use one-based `row` or zero-based `row_idx`; column dimensions use one-based `col` or `min`/`max`.
+Turbo sheet dictionaries use either `rows`/`rows_iter` or
+`columns`/`data`/`table`, not both. Unknown sheet keys raise an error.
+`cell_styles` coordinates are zero-based in both the `(row, col)` map and the
+`{row, col, style}` list forms. If migrating a list that used one-based
+coordinates, subtract one from each row and column. Row dimensions use one-based
+`row` or zero-based `row_idx`; column dimensions use one-based `col` or
+`min`/`max`.
 
-Turbo image input detects PNG, JPEG, and GIF formats from their signatures. PNG inputs also require complete chunk framing, but image data is not decoded or fully validated. Supply valid images, since spreadsheet readers may discard malformed data.
+Turbo image input detects PNG, JPEG, and GIF formats from their signatures. PNG
+inputs also require complete chunk framing, but image data is not decoded or
+fully validated. Supply valid images, since spreadsheet readers may discard
+malformed data.

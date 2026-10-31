@@ -75,12 +75,82 @@ fn get_python_version() -> String {
     version.replace("-alpha", "a").replace("-beta", "b")
 }
 
+/// Rust `log` records are bridged to Python's `logging` lazily: the bridge is
+/// installed at import time without touching Python, and `logging` is imported
+/// only when the first Rust record is emitted. Set `KYRAX_LOG` to a truthy value
+/// (anything except empty, `0`, `false`, `off`, or `no`) to initialize the
+/// bridge eagerly instead, e.g. to capture records emitted during module init.
+#[cfg(feature = "python")]
+fn eager_log_bridge_enabled() -> bool {
+    match std::env::var("KYRAX_LOG") {
+        Ok(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "off" | "no"
+        ),
+        Err(_) => false,
+    }
+}
+
+/// Installs the Python logging bridge on first use. `pyo3_log::init()` imports
+/// `logging` (and `inspect` through it), so doing that at module init would make
+/// every `import kyrax` pay for a feature most programs never use.
+#[cfg(feature = "python")]
+struct LazyPythonLogger {
+    inner: std::sync::OnceLock<Option<pyo3_log::Logger>>,
+}
+
+#[cfg(feature = "python")]
+impl LazyPythonLogger {
+    fn inner(&self) -> Option<&pyo3_log::Logger> {
+        self.inner
+            .get_or_init(|| {
+                Python::attach(|py| {
+                    pyo3_log::Logger::new(py, pyo3_log::Caching::LoggersAndLevels).ok()
+                })
+            })
+            .as_ref()
+    }
+}
+
+#[cfg(feature = "python")]
+impl log::Log for LazyPythonLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        self.inner().is_some_and(|inner| inner.enabled(metadata))
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if let Some(inner) = self.inner() {
+            inner.log(record);
+        }
+    }
+
+    fn flush(&self) {
+        if let Some(inner) = self.inner() {
+            inner.flush();
+        }
+    }
+}
+
+#[cfg(feature = "python")]
+static LAZY_PYTHON_LOGGER: LazyPythonLogger = LazyPythonLogger {
+    inner: std::sync::OnceLock::new(),
+};
+
+#[cfg(feature = "python")]
+fn init_logging() {
+    if eager_log_bridge_enabled() {
+        pyo3_log::init();
+    } else if log::set_logger(&LAZY_PYTHON_LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Debug);
+    }
+}
+
 #[cfg(feature = "python")]
 #[pymodule(gil_used = false)]
 fn _kyrax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     use crate::types::excelsheet::column_info::{ColumnInfo, ColumnInfoNoDtype};
 
-    pyo3_log::init();
+    init_logging();
 
     let py = m.py();
     m.add_function(wrap_pyfunction!(py_read_excel, m)?)?;

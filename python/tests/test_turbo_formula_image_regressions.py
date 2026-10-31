@@ -8,7 +8,7 @@ import pytest
 
 NS = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aQAAAABJRU5ErkJggg=="
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNgYGBgAAAABQABeqhXUAAAAABJRU5ErkJggg=="
 )
 
 
@@ -53,3 +53,12 @@ def test_image_only_sheet_is_valid_xml_and_loadable(tmp_path):
     kyrax.write_excel_turbo(path, [{"name": "S", "rows": [["a"]], "images": [{"data": PNG}]}])
     sheet_xml(path)
     assert len(openpyxl.load_workbook(path).active._images) == 1
+
+
+@pytest.mark.parametrize("cut", [8, 20, len(PNG) - 1], ids=["signature", "header", "missing-iend"])
+def test_truncated_png_rejected(tmp_path, cut):
+    with pytest.raises(ValueError, match="truncated PNG"):
+        kyrax.write_excel_turbo(
+            tmp_path / "bad.xlsx",
+            [{"name": "S", "rows": [["a"]], "images": [{"data": PNG[:cut]}]}],
+        )

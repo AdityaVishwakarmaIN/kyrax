@@ -4034,6 +4034,11 @@ pub(crate) fn parse_tables(obj: &Bound<'_, PyAny>) -> PyResult<Vec<TableDef>> {
             .extract()?;
         let (r1, c1, r2, c2) = parse_ref_range_strict(ref_.as_bytes())
             .ok_or_else(|| PyValueError::new_err(format!("invalid table ref {ref_:?}")))?;
+        if r2 <= r1 {
+            return Err(PyValueError::new_err(format!(
+                "table ref {ref_:?} needs a header row and at least one data row"
+            )));
+        }
         validate_table_name(&display_name).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let columns: Vec<String> = d
             .get_item("columns")?
@@ -4057,7 +4062,6 @@ pub(crate) fn parse_tables(obj: &Bound<'_, PyAny>) -> PyResult<Vec<TableDef>> {
                 display_name
             )));
         }
-        let _ = (r1, r2);
         let style_name = d
             .get_item("style_name")?
             .or(d.get_item("style")?)
@@ -6334,6 +6338,7 @@ impl PyEditableSheet {
         Ok(format!("{c1}{min_r}:{c2}{max_r}"))
     }
 
+    /// Append a row of values below the last used row.
     fn append(&self, iterable: &Bound<'_, PyAny>) -> PyResult<()> {
         let hint = {
             let ov = self
@@ -6400,6 +6405,7 @@ impl PyEditableSheet {
         Ok(())
     }
 
+    /// Return the cell at 1-based `row`/`column`, writing `value` when given.
     #[pyo3(signature = (row, column, value = None))]
     fn cell(&self, row: u32, column: u32, value: Option<&Bound<'_, PyAny>>) -> PyResult<PyCell> {
         if row == 0 || column == 0 || row > MAX_GRID_ROWS || column > MAX_GRID_COLS {
@@ -6430,6 +6436,7 @@ impl PyEditableSheet {
         })
     }
 
+    /// Iterate rows in the requested bounds as tuples of cells or values.
     #[pyo3(signature = (min_row = None, max_row = None, min_col = None, max_col = None, values_only = false))]
     fn iter_rows(
         &self,
@@ -6512,30 +6519,35 @@ impl PyEditableSheet {
         Ok(())
     }
 
+    /// Insert `amount` blank rows before 1-based row `idx`.
     #[pyo3(name = "insert_rows", signature = (idx, amount = 1))]
     fn py_insert_rows(&self, idx: u32, amount: u32) -> PyResult<()> {
         validate_structural_index("insert_rows", idx, amount, MAX_GRID_ROWS, true)?;
         self.record(|ov| ov.insert_rows(&self.sheet_name, idx, amount))
     }
 
+    /// Delete `amount` rows starting at 1-based row `idx`.
     #[pyo3(name = "delete_rows", signature = (idx, amount = 1))]
     fn py_delete_rows(&self, idx: u32, amount: u32) -> PyResult<()> {
         validate_structural_index("delete_rows", idx, amount, MAX_GRID_ROWS, false)?;
         self.record(|ov| ov.delete_rows(&self.sheet_name, idx, amount))
     }
 
+    /// Insert `amount` blank columns before 1-based column `idx`.
     #[pyo3(name = "insert_cols", signature = (idx, amount = 1))]
     fn py_insert_cols(&self, idx: u32, amount: u32) -> PyResult<()> {
         validate_structural_index("insert_cols", idx, amount, MAX_GRID_COLS, true)?;
         self.record(|ov| ov.insert_cols(&self.sheet_name, idx, amount))
     }
 
+    /// Delete `amount` columns starting at 1-based column `idx`.
     #[pyo3(name = "delete_cols", signature = (idx, amount = 1))]
     fn py_delete_cols(&self, idx: u32, amount: u32) -> PyResult<()> {
         validate_structural_index("delete_cols", idx, amount, MAX_GRID_COLS, false)?;
         self.record(|ov| ov.delete_cols(&self.sheet_name, idx, amount))
     }
 
+    /// Move a range by `rows`/`cols`, optionally translating formulas.
     #[pyo3(name = "move_range", signature = (range_string, rows = 0, cols = 0, translate = false))]
     fn py_move_range(
         &self,
@@ -6589,6 +6601,7 @@ impl PyEditableSheet {
         Ok(())
     }
 
+    /// Merge a range given as `range_string` or explicit start/end coordinates.
     #[pyo3(signature = (range_string = None, start_row = None, start_column = None, end_row = None, end_column = None))]
     fn merge_cells(
         &self,
@@ -7086,6 +7099,30 @@ impl PyEditableSheet {
     ) -> PyResult<Bound<'py, PyAny>> {
         use pyo3::types::PySlice;
         use pyo3::IntoPyObjectExt;
+        if key.is_instance_of::<pyo3::types::PyInt>() {
+            let row = key.extract::<i64>().map_err(|_| {
+                PyValueError::new_err(format!(
+                    "row index is out of grid (rows 1..={MAX_GRID_ROWS})"
+                ))
+            })?;
+            if row < 1 || row > MAX_GRID_ROWS as i64 {
+                return Err(PyValueError::new_err(format!(
+                    "row index {row} is out of grid (rows 1..={MAX_GRID_ROWS})"
+                )));
+            }
+            let (_, _, min_c, max_c) = self.compute_bounds()?;
+            let mut items = Vec::with_capacity((max_c.saturating_sub(min_c) + 1) as usize);
+            for col in min_c..=max_c {
+                let cell = PyCell {
+                    sheet_name: self.sheet_name.clone(),
+                    overlay: Arc::clone(&self.overlay),
+                    row: row as u32,
+                    col,
+                };
+                items.push(cell.into_bound_py_any(py)?);
+            }
+            return Ok(PyTuple::new(py, items)?.into_any());
+        }
         let (r1, c1, r2, c2) = parse_sheet_key_bounds(key)?;
         let is_slice = key.cast::<PySlice>().is_ok();
         if !is_slice && r1 == r2 && c1 == c2 {
@@ -7506,6 +7543,7 @@ impl PyEditableWorkbook {
         }
     }
 
+    /// Create a worksheet and return it; `index` sets its position.
     #[pyo3(signature = (title = None, index = None))]
     fn create_sheet(&self, title: Option<&str>, index: Option<usize>) -> PyResult<PyEditableSheet> {
         let mut ov = self

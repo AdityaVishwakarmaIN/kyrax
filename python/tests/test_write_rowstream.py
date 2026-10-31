@@ -16,21 +16,30 @@ import warnings
 import zipfile
 from pathlib import Path
 
-import pytest
-
 import kyrax
+import pytest
 
 BIG = 2**70
 LONG = "x" * 40000
 
 ROWS_ALL = [
-    [1, -2, 0, BIG, 2**63, -(2**63) - 1],
-    [1.5, -0.0, 1e300, float("nan"), float("inf"), float("-inf")],
+    [1, -2, 0, 2**53, 2**62, -(2**62)],
+    [1.5, -0.0, 1e300, 1e-300, -1.25, 3.141592653589793],
     [True, False, None, "", " lead", "trail "],
     ["#N/A", "#DIV/0!", "=SUM(A1:A2)", "+1", "-1", "@x"],
     ["a<b>&\"c'", "tab\there", "new\nline", "unié中\U0001f600", "ctl", "dup"],
-    [dt.datetime(2024, 2, 29, 13, 45, 59), dt.datetime(2024, 1, 1), dt.date(2024, 3, 1), dt.datetime(1899, 12, 30, 1)],
-    [dt.datetime(2024, 1, 1, 0, 0, 0, 500000), dt.date(1900, 1, 1), dt.date(1900, 3, 1), dt.date(2999, 12, 31)],
+    [
+        dt.datetime(2024, 2, 29, 13, 45, 59),
+        dt.datetime(2024, 1, 1),
+        dt.date(2024, 3, 1),
+        dt.datetime(1899, 12, 30, 1),
+    ],
+    [
+        dt.datetime(2024, 1, 1, 0, 0, 0, 500000),
+        dt.date(1900, 1, 1),
+        dt.date(1900, 3, 1),
+        dt.date(2999, 12, 31),
+    ],
     [],
     [None, None],
     [None, None, "lead-empty-cols", None],
@@ -56,7 +65,9 @@ def _write(entry: str, tmp_path: Path, sheets, **kw) -> bytes:
     if entry == "bytes":
         return kyrax.write_excel_turbo_bytes(sheets, **kw)
     p = tmp_path / f"{entry}.xlsx"
-    getattr(kyrax, f"write_excel_turbo{'_stream' if entry == 'stream' else ''}")(str(p), sheets, **kw)
+    getattr(kyrax, f"write_excel_turbo{'_stream' if entry == 'stream' else ''}")(
+        str(p), sheets, **kw
+    )
     return p.read_bytes()
 
 
@@ -78,13 +89,23 @@ ENTRIES = ["path", "stream", "bytes"]
 @pytest.mark.parametrize("string_mode", ["inline", "sst"])
 @pytest.mark.parametrize(
     "opts",
-    [{}, {"date_iso": True}, {"date1904": True}, {"emit_cached_values": False}, {"active_tab": 1, "creator": "me"}],
+    [
+        {},
+        {"date_iso": True},
+        {"date1904": True},
+        {"emit_cached_values": False},
+        {"active_tab": 1, "creator": "me"},
+    ],
     ids=["default", "date_iso", "date1904", "nocache", "tab_creator"],
 )
 def test_identical_parts(entry, string_mode, opts, tmp_path):
     sheets = [
         {"name": "Data", "rows": ROWS_ALL},
-        {"name": "Hidden & <x>", "rows": [["h", 1], [None, dt.date(2021, 5, 5)]], "visibility": "hidden"},
+        {
+            "name": "Hidden & <x>",
+            "rows": [["h", 1], [None, dt.date(2021, 5, 5)]],
+            "visibility": "hidden",
+        },
         {"name": "Empty", "rows": []},
         {"name": "Very", "rows": [[1]], "state": "veryHidden"},
         {"rows": [[None]]},
@@ -232,7 +253,9 @@ def test_errors_still_raised(entry, tmp_path):
     with pytest.raises(Exception):
         _write(entry, tmp_path, [{"name": "S", "rows": [[1] * 16385]}])
     with pytest.raises(Exception):
-        _write(entry, tmp_path, [{"name": "S", "rows": [[1]], "state": "visible"}], string_mode="nope")
+        _write(
+            entry, tmp_path, [{"name": "S", "rows": [[1]], "state": "visible"}], string_mode="nope"
+        )
 
 
 # --------------------------------------------------------------- error path
@@ -241,7 +264,9 @@ def test_errors_still_raised(entry, tmp_path):
 @pytest.mark.parametrize("entry", ["path", "stream"])
 def test_midwrite_error_removes_new_file(entry, tmp_path):
     p = tmp_path / "new.xlsx"
-    rows = [[1, 2]] * 10 + [[BIG * BIG * BIG * 10**400]]  # exact int too large for f64 -> mid-write error
+    rows = [[1, 2]] * 10 + [
+        [BIG * BIG * BIG * 10**400]
+    ]  # exact int too large for f64 -> mid-write error
     fn = kyrax.write_excel_turbo_stream if entry == "stream" else kyrax.write_excel_turbo
     with pytest.raises(Exception):
         fn(str(p), [{"name": "S", "rows": rows}])
@@ -298,24 +323,43 @@ def _took_fast_path(data: bytes) -> bool:
 
 
 @pytest.mark.parametrize("entry", ENTRIES)
-def test_fast_path_taken_and_identical_without_unsafe_cells(entry, tmp_path):
-    rows = ROWS_ALL[1:]  # drop the >i64 ints row
-    sheets = [{"name": "S", "rows": rows}]
+def test_fast_path_taken_and_identical(entry, tmp_path):
+    sheets = [{"name": "S", "rows": ROWS_ALL}]
     assert _took_fast_path(_write(entry, tmp_path, sheets))
     _assert_identical(entry, tmp_path, sheets)
 
 
 @pytest.mark.parametrize("entry", ENTRIES)
-@pytest.mark.parametrize(
-    "cell", [2**63, -(2**63) - 1, BIG, LONG], ids=["above-i64", "below-i64", "big", "long"]
-)
-def test_cells_that_can_fail_midstream_use_model_path(entry, cell, tmp_path):
+@pytest.mark.parametrize("cell", [2**63, BIG, LONG], ids=["above-i64", "big", "long"])
+def test_ineligible_large_values_use_model_path(entry, cell, tmp_path):
     """Master condition 3: ints outside i64 and > 32767-char strings are
-    ineligible, so fast-path mid-write errors can only be I/O errors."""
+    ineligible, so fast-path mid-write errors can only be I/O errors.
+    Exactly representable big ints still write via the model path; values
+    that cannot be represented exactly are rejected (see below)."""
     sheets = [{"name": "S", "rows": [[1, "a"], [cell]]}]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         data = _write(entry, tmp_path, sheets)
     assert not _took_fast_path(data)
-    ok = [{"name": "S", "rows": [[1, "a"], [2**63 - 1, "x" * 32767]]}]
+    ok = [{"name": "S", "rows": [[1, "a"], [2**62, "x" * 32767]]}]
     assert _took_fast_path(_write(entry, tmp_path, ok))
+
+
+UNSAFE_NUMBERS = [
+    pytest.param(2**63 - 1, id="i64-max-not-exact"),
+    pytest.param(-(2**63) - 1, id="below-i64-not-exact"),
+    pytest.param(2**53 + 1, id="above-f64-integer-range"),
+    pytest.param(float("nan"), id="nan"),
+    pytest.param(float("inf"), id="inf"),
+    pytest.param(float("-inf"), id="-inf"),
+    pytest.param(decimal.Decimal("9007199254740993"), id="decimal-not-exact"),
+]
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+@pytest.mark.parametrize("cell", UNSAFE_NUMBERS)
+def test_unsafe_numbers_rejected(entry, cell, tmp_path):
+    """Non-finite and non-exactly-representable numbers must fail on every
+    entry point instead of silently rounding or writing invalid XML."""
+    with pytest.raises(ValueError, match="NaN or infinity|represented exactly"):
+        _write(entry, tmp_path, [{"name": "S", "rows": [[1, "a"], [cell]]}])

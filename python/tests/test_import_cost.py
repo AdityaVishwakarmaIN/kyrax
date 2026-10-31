@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import subprocess
 import sys
 import textwrap
@@ -11,15 +12,16 @@ from pathlib import Path
 import kyrax
 import pytest
 
-_HEAVY = ("importlib.util", "importlib.resources", "inspect", "pathlib")
+_HEAVY = ("importlib.util", "importlib.resources", "inspect", "logging", "pathlib")
 
 
-def _run(code: str) -> subprocess.CompletedProcess[str]:
+def _run(code: str, env=None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-c", textwrap.dedent(code)],
         capture_output=True,
         text=True,
         check=False,
+        env=env,
     )
 
 
@@ -35,6 +37,19 @@ def test_import_does_not_pull_heavy_modules():
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "[]", proc.stdout
+
+
+def test_rust_log_bridge_is_opt_in():
+    proc = _run(
+        """
+        import sys
+        import kyrax
+        print("logging" in sys.modules, "inspect" in sys.modules)
+        """,
+        env={**os.environ, "KYRAX_LOG": "1"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "True True"
 
 
 def test_pyarrow_available_in_normal_env():
