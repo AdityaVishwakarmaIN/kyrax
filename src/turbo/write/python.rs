@@ -1,18 +1,21 @@
 //! PyO3 bindings for the turbo write path.
 
 use pyo3::{
-    Bound, PyAny, PyResult, Python,
     exceptions::{PyTypeError, PyValueError},
     prelude::*,
     types::{PyBytes, PyDict, PyList, PyString, PyTuple},
+    Bound, PyAny, PyResult, Python,
 };
+use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use super::cf_dv::{CfRule, CfRuleKind, CfVo, ConditionalFormatting, DataValidation};
 use super::charts::{Anchor, Chart, ChartType, ChartsheetSpec, Grouping, Series};
 use super::model::*;
 use super::pivot::{PivotAgg, PivotDataField, PivotField, PivotTableSpec};
+use super::readback;
 use super::rich_text::{RichRun, RichText, RunFont};
+use super::rowstream;
 use super::style_engine::{
     AlignDesc, BorderDesc, ColorSpec, DxfDesc, FillDesc, FontDesc, GradientKind, GradientStop,
     ProtDesc, SideDesc, StyleDesc,
@@ -24,13 +27,12 @@ use super::writer::{
 use crate::error::{KyraxError, KyraxErrorKind};
 use crate::turbo::error::{TurboError, TurboResult};
 use crate::turbo::meta::{AutoFilterMeta, FilterColumnMeta};
-use crate::turbo::overlay::{WorkbookOverlay, hydrate_sheet_from_xml};
+use crate::turbo::overlay::{hydrate_sheet_from_xml, WorkbookOverlay};
+use crate::turbo::overlay_cf_tables::{ranges_overlap, validate_table_name};
 use crate::turbo::overlay_layout::py as layout_py;
-use super::readback;
-use super::rowstream;
-use crate::turbo::scan::{MAX_GRID_COLS, MAX_GRID_ROWS, parse_ref_range_strict};
-use crate::turbo::structural::parse_range;
-use crate::turbo::zipmin::{ArchiveMap, read_entry};
+use crate::turbo::scan::{parse_ref_range_strict, MAX_GRID_COLS, MAX_GRID_ROWS};
+use crate::turbo::structural::CellRange;
+use crate::turbo::zipmin::{read_entry, ArchiveMap};
 
 pub(super) fn write_err_to_py(err: std::io::Error) -> PyErr {
     let fe: KyraxError = KyraxErrorKind::Internal(format!("write error: {err}")).into();
@@ -57,6 +59,184 @@ pub(super) fn parse_string_mode(s: &str) -> PyResult<StringMode> {
             "string_mode must be 'inline', 'sst', or 'auto'; got {other:?}"
         ))),
     }
+}
+
+fn has_illegal_xml_control(s: &str) -> bool {
+    s.chars()
+        .any(|c| c < '\u{20}' && c != '\t' && c != '\n' && c != '\r')
+}
+
+fn validate_single_cell_ref(value: &str, what: &str) -> PyResult<()> {
+    match parse_ref_range_strict(value.as_bytes()) {
+        Some((r1, c1, r2, c2)) if r1 == r2 && c1 == c2 => Ok(()),
+        _ => Err(PyValueError::new_err(format!(
+            "{what} must be a single A1 cell reference; got {value:?}"
+        ))),
+    }
+}
+
+fn validate_hex_color(value: &str, what: &str) -> PyResult<()> {
+    let hex = value.strip_prefix('#').unwrap_or(value);
+    if (hex.len() == 6 || hex.len() == 8) && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(PyValueError::new_err(format!(
+            "{what} must be a 6- or 8-digit hex color; got {value:?}"
+        )))
+    }
+}
+
+fn validate_tab_color(value: &str) -> PyResult<()> {
+    if let Some(theme) = value.strip_prefix("theme:") {
+        if theme.parse::<u32>().is_ok() {
+            return Ok(());
+        }
+    }
+    validate_hex_color(value, "tab color")
+}
+
+fn validate_vertical_alignment(value: &str) -> PyResult<()> {
+    if ["top", "center", "bottom", "justify", "distributed"].contains(&value) {
+        Ok(())
+    } else {
+        Err(PyValueError::new_err(format!(
+            "invalid alignment vertical value {value:?}"
+        )))
+    }
+}
+
+fn validate_dv_operator(value: &str) -> PyResult<()> {
+    if [
+        "between",
+        "notBetween",
+        "equal",
+        "notEqual",
+        "lessThan",
+        "lessThanOrEqual",
+        "greaterThan",
+        "greaterThanOrEqual",
+    ]
+    .contains(&value)
+    {
+        Ok(())
+    } else {
+        Err(PyValueError::new_err(format!(
+            "invalid data validation operator {value:?}"
+        )))
+    }
+}
+
+fn validate_dv_error_style(value: &str) -> PyResult<()> {
+    if ["stop", "warning", "information"].contains(&value) {
+        Ok(())
+    } else {
+        Err(PyValueError::new_err(format!(
+            "invalid data validation errorStyle {value:?}"
+        )))
+    }
+}
+
+fn validate_dv_ime_mode(value: &str) -> PyResult<()> {
+    if [
+        "noControl",
+        "off",
+        "on",
+        "disabled",
+        "hiragana",
+        "fullKatakana",
+        "halfKatakana",
+        "fullHiragana",
+        "fullKana",
+    ]
+    .contains(&value)
+    {
+        Ok(())
+    } else {
+        Err(PyValueError::new_err(format!(
+            "invalid data validation imeMode {value:?}"
+        )))
+    }
+}
+
+fn validate_page_setup_fields(
+    orientation: Option<&str>,
+    paper_size: Option<i32>,
+    scale: Option<i32>,
+    fit_to_width: Option<i32>,
+    fit_to_height: Option<i32>,
+) -> PyResult<()> {
+    if let Some(value) = orientation {
+        if !["default", "portrait", "landscape"].contains(&value) {
+            return Err(PyValueError::new_err(format!(
+                "invalid page setup orientation {value:?}"
+            )));
+        }
+    }
+    if let Some(value) = paper_size {
+        if !(1..=118).contains(&value) {
+            return Err(PyValueError::new_err(format!(
+                "invalid page setup paper_size {value}; expected 1..=118"
+            )));
+        }
+    }
+    if let Some(value) = scale {
+        if !(10..=400).contains(&value) {
+            return Err(PyValueError::new_err(format!(
+                "invalid page setup scale {value}; expected 10..=400"
+            )));
+        }
+    }
+    for (name, value) in [
+        ("fit_to_width", fit_to_width),
+        ("fit_to_height", fit_to_height),
+    ] {
+        if value.is_some_and(|v| v < 0) {
+            return Err(PyValueError::new_err(format!(
+                "invalid page setup {name}; expected a non-negative integer"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_defined_name(name: &str) -> PyResult<()> {
+    let mut chars = name.chars();
+    let ok_first = matches!(chars.next(), Some(c) if c.is_alphabetic() || c == '_' || c == '\\');
+    let ok_rest = chars.all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '\\');
+    let looks_like_ref = parse_ref_range_strict(name.as_bytes()).is_some();
+    if !ok_first
+        || !ok_rest
+        || looks_like_ref
+        || name.eq_ignore_ascii_case("R")
+        || name.eq_ignore_ascii_case("C")
+    {
+        return Err(PyValueError::new_err(format!(
+            "invalid defined name {name:?}: use letters, digits, '_', '.' or '\\', starting with a letter or '_'"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_jpeg(bytes: &[u8]) -> bool {
+    bytes.len() >= 4 && bytes.starts_with(&[0xFF, 0xD8, 0xFF]) && bytes.ends_with(&[0xFF, 0xD9])
+}
+
+fn validate_gif(bytes: &[u8]) -> bool {
+    (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"))
+        && bytes.len() >= 14
+        && bytes.last() == Some(&0x3B)
+}
+
+fn reject_bare_row(value: &Bound<'_, PyAny>) -> PyResult<()> {
+    if value.is_instance_of::<PyString>()
+        || value.is_instance_of::<PyBytes>()
+        || value.cast::<PyDict>().is_ok()
+    {
+        return Err(PyValueError::new_err(
+            "each row must be a sequence of cell values, not a string, bytes, or mapping",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_write_features(features: Option<&Bound<'_, PyAny>>) -> PyResult<WriteFeatures> {
@@ -199,7 +379,10 @@ impl PyFont {
             if let Ok(s) = c.extract::<String>() {
                 Some(s)
             } else if let Ok(d) = c.cast::<PyDict>() {
-                d.get_item("rgb").ok().flatten().and_then(|v| v.extract::<String>().ok())
+                d.get_item("rgb")
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.extract::<String>().ok())
             } else {
                 None
             }
@@ -216,59 +399,103 @@ impl PyFont {
     }
 
     #[getter]
-    fn name(&self) -> Option<String> { self.name.clone() }
+    fn name(&self) -> Option<String> {
+        self.name.clone()
+    }
     #[setter]
-    fn set_name(&mut self, val: Option<String>) { self.name = val; }
+    fn set_name(&mut self, val: Option<String>) {
+        self.name = val;
+    }
 
     #[getter]
-    fn size(&self) -> Option<f64> { self.size }
+    fn size(&self) -> Option<f64> {
+        self.size
+    }
     #[setter]
-    fn set_size(&mut self, val: Option<f64>) { self.size = val; }
+    fn set_size(&mut self, val: Option<f64>) {
+        self.size = val;
+    }
 
     #[getter]
-    fn sz(&self) -> Option<f64> { self.size }
+    fn sz(&self) -> Option<f64> {
+        self.size
+    }
     #[setter]
-    fn set_sz(&mut self, val: Option<f64>) { self.size = val; }
+    fn set_sz(&mut self, val: Option<f64>) {
+        self.size = val;
+    }
 
     #[getter]
-    fn bold(&self) -> Option<bool> { self.bold }
+    fn bold(&self) -> Option<bool> {
+        self.bold
+    }
     #[setter]
-    fn set_bold(&mut self, val: Option<bool>) { self.bold = val; }
+    fn set_bold(&mut self, val: Option<bool>) {
+        self.bold = val;
+    }
 
     #[getter]
-    fn b(&self) -> Option<bool> { self.bold }
+    fn b(&self) -> Option<bool> {
+        self.bold
+    }
     #[setter]
-    fn set_b(&mut self, val: Option<bool>) { self.bold = val; }
+    fn set_b(&mut self, val: Option<bool>) {
+        self.bold = val;
+    }
 
     #[getter]
-    fn italic(&self) -> Option<bool> { self.italic }
+    fn italic(&self) -> Option<bool> {
+        self.italic
+    }
     #[setter]
-    fn set_italic(&mut self, val: Option<bool>) { self.italic = val; }
+    fn set_italic(&mut self, val: Option<bool>) {
+        self.italic = val;
+    }
 
     #[getter]
-    fn i(&self) -> Option<bool> { self.italic }
+    fn i(&self) -> Option<bool> {
+        self.italic
+    }
     #[setter]
-    fn set_i(&mut self, val: Option<bool>) { self.italic = val; }
+    fn set_i(&mut self, val: Option<bool>) {
+        self.italic = val;
+    }
 
     #[getter]
-    fn strike(&self) -> Option<bool> { self.strike }
+    fn strike(&self) -> Option<bool> {
+        self.strike
+    }
     #[setter]
-    fn set_strike(&mut self, val: Option<bool>) { self.strike = val; }
+    fn set_strike(&mut self, val: Option<bool>) {
+        self.strike = val;
+    }
 
     #[getter]
-    fn underline(&self) -> Option<String> { self.underline.clone() }
+    fn underline(&self) -> Option<String> {
+        self.underline.clone()
+    }
     #[setter]
-    fn set_underline(&mut self, val: Option<String>) { self.underline = val; }
+    fn set_underline(&mut self, val: Option<String>) {
+        self.underline = val;
+    }
 
     #[getter]
-    fn u(&self) -> Option<String> { self.underline.clone() }
+    fn u(&self) -> Option<String> {
+        self.underline.clone()
+    }
     #[setter]
-    fn set_u(&mut self, val: Option<String>) { self.underline = val; }
+    fn set_u(&mut self, val: Option<String>) {
+        self.underline = val;
+    }
 
     #[getter]
-    fn color(&self) -> Option<String> { self.color.clone() }
+    fn color(&self) -> Option<String> {
+        self.color.clone()
+    }
     #[setter]
-    fn set_color(&mut self, val: Option<String>) { self.color = val; }
+    fn set_color(&mut self, val: Option<String>) {
+        self.color = val;
+    }
 
     fn __repr__(&self) -> String {
         format!(
@@ -340,7 +567,10 @@ impl PyPatternFill {
             if let Ok(s) = b.extract::<String>() {
                 Some(s)
             } else if let Ok(d) = b.cast::<PyDict>() {
-                d.get_item("rgb").ok().flatten().and_then(|v| v.extract::<String>().ok())
+                d.get_item("rgb")
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.extract::<String>().ok())
             } else {
                 None
             }
@@ -357,17 +587,27 @@ impl PyPatternFill {
     }
 
     #[getter]
-    fn fill_type(&self) -> Option<String> { self.fill_type.clone() }
+    fn fill_type(&self) -> Option<String> {
+        self.fill_type.clone()
+    }
     #[setter]
-    fn set_fill_type(&mut self, val: Option<String>) { self.fill_type = val; }
+    fn set_fill_type(&mut self, val: Option<String>) {
+        self.fill_type = val;
+    }
 
     #[getter]
-    fn patternType(&self) -> Option<String> { self.fill_type.clone() }
+    fn patternType(&self) -> Option<String> {
+        self.fill_type.clone()
+    }
     #[setter]
-    fn set_patternType(&mut self, val: Option<String>) { self.fill_type = val; }
+    fn set_patternType(&mut self, val: Option<String>) {
+        self.fill_type = val;
+    }
 
     #[getter]
-    fn start_color(&self) -> Option<String> { self.start_color.clone() }
+    fn start_color(&self) -> Option<String> {
+        self.start_color.clone()
+    }
     #[setter]
     fn set_start_color(&mut self, val: Option<String>) {
         self.start_color = val.clone();
@@ -375,7 +615,9 @@ impl PyPatternFill {
     }
 
     #[getter]
-    fn end_color(&self) -> Option<String> { self.end_color.clone() }
+    fn end_color(&self) -> Option<String> {
+        self.end_color.clone()
+    }
     #[setter]
     fn set_end_color(&mut self, val: Option<String>) {
         self.end_color = val.clone();
@@ -383,7 +625,9 @@ impl PyPatternFill {
     }
 
     #[getter]
-    fn fgColor(&self) -> Option<String> { self.fg_color.clone() }
+    fn fgColor(&self) -> Option<String> {
+        self.fg_color.clone()
+    }
     #[setter]
     fn set_fgColor(&mut self, val: Option<String>) {
         self.fg_color = val.clone();
@@ -391,7 +635,9 @@ impl PyPatternFill {
     }
 
     #[getter]
-    fn bgColor(&self) -> Option<String> { self.bg_color.clone() }
+    fn bgColor(&self) -> Option<String> {
+        self.bg_color.clone()
+    }
     #[setter]
     fn set_bgColor(&mut self, val: Option<String>) {
         self.bg_color = val.clone();
@@ -419,7 +665,11 @@ impl PyPatternFill {
     }
     pub fn from_desc(desc: &FillDesc) -> Self {
         match desc {
-            FillDesc::Pattern { pattern_type, fg, bg } => {
+            FillDesc::Pattern {
+                pattern_type,
+                fg,
+                bg,
+            } => {
                 let fg_hex = fg.as_ref().map(|c| match c {
                     ColorSpec::Rgb(v) => format!("{:08X}", v),
                     ColorSpec::Theme(t, _) => format!("theme:{t}"),
@@ -468,7 +718,10 @@ impl PySide {
             if let Ok(s) = c.extract::<String>() {
                 Some(s)
             } else if let Ok(d) = c.cast::<PyDict>() {
-                d.get_item("rgb").ok().flatten().and_then(|v| v.extract::<String>().ok())
+                d.get_item("rgb")
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.extract::<String>().ok())
             } else {
                 None
             }
@@ -480,19 +733,31 @@ impl PySide {
     }
 
     #[getter]
-    fn style(&self) -> Option<String> { self.style.clone() }
+    fn style(&self) -> Option<String> {
+        self.style.clone()
+    }
     #[setter]
-    fn set_style(&mut self, val: Option<String>) { self.style = val; }
+    fn set_style(&mut self, val: Option<String>) {
+        self.style = val;
+    }
 
     #[getter]
-    fn border_style(&self) -> Option<String> { self.style.clone() }
+    fn border_style(&self) -> Option<String> {
+        self.style.clone()
+    }
     #[setter]
-    fn set_border_style(&mut self, val: Option<String>) { self.style = val; }
+    fn set_border_style(&mut self, val: Option<String>) {
+        self.style = val;
+    }
 
     #[getter]
-    fn color(&self) -> Option<String> { self.color.clone() }
+    fn color(&self) -> Option<String> {
+        self.color.clone()
+    }
     #[setter]
-    fn set_color(&mut self, val: Option<String>) { self.color = val; }
+    fn set_color(&mut self, val: Option<String>) {
+        self.color = val;
+    }
 
     fn __repr__(&self) -> String {
         format!("Side(style={:?}, color={:?})", self.style, self.color)
@@ -562,44 +827,76 @@ impl PyBorder {
     }
 
     #[getter]
-    fn left(&self) -> Option<PySide> { self.left.clone() }
+    fn left(&self) -> Option<PySide> {
+        self.left.clone()
+    }
     #[setter]
-    fn set_left(&mut self, val: Option<PySide>) { self.left = val; }
+    fn set_left(&mut self, val: Option<PySide>) {
+        self.left = val;
+    }
 
     #[getter]
-    fn right(&self) -> Option<PySide> { self.right.clone() }
+    fn right(&self) -> Option<PySide> {
+        self.right.clone()
+    }
     #[setter]
-    fn set_right(&mut self, val: Option<PySide>) { self.right = val; }
+    fn set_right(&mut self, val: Option<PySide>) {
+        self.right = val;
+    }
 
     #[getter]
-    fn top(&self) -> Option<PySide> { self.top.clone() }
+    fn top(&self) -> Option<PySide> {
+        self.top.clone()
+    }
     #[setter]
-    fn set_top(&mut self, val: Option<PySide>) { self.top = val; }
+    fn set_top(&mut self, val: Option<PySide>) {
+        self.top = val;
+    }
 
     #[getter]
-    fn bottom(&self) -> Option<PySide> { self.bottom.clone() }
+    fn bottom(&self) -> Option<PySide> {
+        self.bottom.clone()
+    }
     #[setter]
-    fn set_bottom(&mut self, val: Option<PySide>) { self.bottom = val; }
+    fn set_bottom(&mut self, val: Option<PySide>) {
+        self.bottom = val;
+    }
 
     #[getter]
-    fn diagonal(&self) -> Option<PySide> { self.diagonal.clone() }
+    fn diagonal(&self) -> Option<PySide> {
+        self.diagonal.clone()
+    }
     #[setter]
-    fn set_diagonal(&mut self, val: Option<PySide>) { self.diagonal = val; }
+    fn set_diagonal(&mut self, val: Option<PySide>) {
+        self.diagonal = val;
+    }
 
     #[getter]
-    fn diagonal_up(&self) -> bool { self.diagonal_up }
+    fn diagonal_up(&self) -> bool {
+        self.diagonal_up
+    }
     #[setter]
-    fn set_diagonal_up(&mut self, val: bool) { self.diagonal_up = val; }
+    fn set_diagonal_up(&mut self, val: bool) {
+        self.diagonal_up = val;
+    }
 
     #[getter]
-    fn diagonal_down(&self) -> bool { self.diagonal_down }
+    fn diagonal_down(&self) -> bool {
+        self.diagonal_down
+    }
     #[setter]
-    fn set_diagonal_down(&mut self, val: bool) { self.diagonal_down = val; }
+    fn set_diagonal_down(&mut self, val: bool) {
+        self.diagonal_down = val;
+    }
 
     #[getter]
-    fn outline(&self) -> bool { self.outline }
+    fn outline(&self) -> bool {
+        self.outline
+    }
     #[setter]
-    fn set_outline(&mut self, val: bool) { self.outline = val; }
+    fn set_outline(&mut self, val: bool) {
+        self.outline = val;
+    }
 
     fn __repr__(&self) -> String {
         format!(
@@ -686,34 +983,58 @@ impl PyAlignment {
     }
 
     #[getter]
-    fn horizontal(&self) -> Option<String> { self.horizontal.clone() }
+    fn horizontal(&self) -> Option<String> {
+        self.horizontal.clone()
+    }
     #[setter]
-    fn set_horizontal(&mut self, val: Option<String>) { self.horizontal = val; }
+    fn set_horizontal(&mut self, val: Option<String>) {
+        self.horizontal = val;
+    }
 
     #[getter]
-    fn vertical(&self) -> Option<String> { self.vertical.clone() }
+    fn vertical(&self) -> Option<String> {
+        self.vertical.clone()
+    }
     #[setter]
-    fn set_vertical(&mut self, val: Option<String>) { self.vertical = val; }
+    fn set_vertical(&mut self, val: Option<String>) {
+        self.vertical = val;
+    }
 
     #[getter]
-    fn text_rotation(&self) -> i32 { self.text_rotation }
+    fn text_rotation(&self) -> i32 {
+        self.text_rotation
+    }
     #[setter]
-    fn set_text_rotation(&mut self, val: i32) { self.text_rotation = val; }
+    fn set_text_rotation(&mut self, val: i32) {
+        self.text_rotation = val;
+    }
 
     #[getter]
-    fn wrap_text(&self) -> Option<bool> { self.wrap_text }
+    fn wrap_text(&self) -> Option<bool> {
+        self.wrap_text
+    }
     #[setter]
-    fn set_wrap_text(&mut self, val: Option<bool>) { self.wrap_text = val; }
+    fn set_wrap_text(&mut self, val: Option<bool>) {
+        self.wrap_text = val;
+    }
 
     #[getter]
-    fn shrink_to_fit(&self) -> Option<bool> { self.shrink_to_fit }
+    fn shrink_to_fit(&self) -> Option<bool> {
+        self.shrink_to_fit
+    }
     #[setter]
-    fn set_shrink_to_fit(&mut self, val: Option<bool>) { self.shrink_to_fit = val; }
+    fn set_shrink_to_fit(&mut self, val: Option<bool>) {
+        self.shrink_to_fit = val;
+    }
 
     #[getter]
-    fn indent(&self) -> i32 { self.indent }
+    fn indent(&self) -> i32 {
+        self.indent
+    }
     #[setter]
-    fn set_indent(&mut self, val: i32) { self.indent = val; }
+    fn set_indent(&mut self, val: i32) {
+        self.indent = val;
+    }
 
     fn __repr__(&self) -> String {
         format!(
@@ -761,7 +1082,10 @@ pub struct PyProtection {
 
 impl Default for PyProtection {
     fn default() -> Self {
-        Self { locked: true, hidden: false }
+        Self {
+            locked: true,
+            hidden: false,
+        }
     }
 }
 
@@ -774,17 +1098,28 @@ impl PyProtection {
     }
 
     #[getter]
-    fn locked(&self) -> bool { self.locked }
+    fn locked(&self) -> bool {
+        self.locked
+    }
     #[setter]
-    fn set_locked(&mut self, val: bool) { self.locked = val; }
+    fn set_locked(&mut self, val: bool) {
+        self.locked = val;
+    }
 
     #[getter]
-    fn hidden(&self) -> bool { self.hidden }
+    fn hidden(&self) -> bool {
+        self.hidden
+    }
     #[setter]
-    fn set_hidden(&mut self, val: bool) { self.hidden = val; }
+    fn set_hidden(&mut self, val: bool) {
+        self.hidden = val;
+    }
 
     fn __repr__(&self) -> String {
-        format!("Protection(locked={:?}, hidden={:?})", self.locked, self.hidden)
+        format!(
+            "Protection(locked={:?}, hidden={:?})",
+            self.locked, self.hidden
+        )
     }
 }
 
@@ -819,19 +1154,31 @@ impl PyComment {
     }
 
     #[getter]
-    fn text(&self) -> String { self.text.clone() }
+    fn text(&self) -> String {
+        self.text.clone()
+    }
     #[setter]
-    fn set_text(&mut self, val: String) { self.text = val; }
+    fn set_text(&mut self, val: String) {
+        self.text = val;
+    }
 
     #[getter]
-    fn author(&self) -> String { self.author.clone() }
+    fn author(&self) -> String {
+        self.author.clone()
+    }
     #[setter]
-    fn set_author(&mut self, val: String) { self.author = val; }
+    fn set_author(&mut self, val: String) {
+        self.author = val;
+    }
 
     #[getter]
-    fn content(&self) -> String { self.text.clone() }
+    fn content(&self) -> String {
+        self.text.clone()
+    }
     #[setter]
-    fn set_content(&mut self, val: String) { self.text = val; }
+    fn set_content(&mut self, val: String) {
+        self.text = val;
+    }
 
     fn __repr__(&self) -> String {
         format!("Comment(text={:?}, author={:?})", self.text, self.author)
@@ -951,6 +1298,11 @@ fn parse_gradient_fill(d: &Bound<'_, PyDict>) -> PyResult<FillDesc> {
     match kind_s.as_str() {
         "linear" => {
             let degree = opt_f64(d, "degree")?.unwrap_or(0.0);
+            if !(0.0..=360.0).contains(&degree) {
+                return Err(PyValueError::new_err(
+                    "gradient degree must be between 0 and 360",
+                ));
+            }
             Ok(FillDesc::Gradient {
                 kind: GradientKind::linear(degree),
                 stops,
@@ -958,8 +1310,17 @@ fn parse_gradient_fill(d: &Bound<'_, PyDict>) -> PyResult<FillDesc> {
         }
         "path" => {
             let val = |key: &str| -> f64 { opt_f64(d, key).ok().flatten().unwrap_or(0.0) };
+            let (left, right, top, bottom) = (val("left"), val("right"), val("top"), val("bottom"));
+            if [left, right, top, bottom]
+                .iter()
+                .any(|v| !(0.0..=1.0).contains(v))
+            {
+                return Err(PyValueError::new_err(
+                    "gradient path offsets must be between 0 and 1",
+                ));
+            }
             Ok(FillDesc::Gradient {
-                kind: GradientKind::path(val("left"), val("right"), val("top"), val("bottom")),
+                kind: GradientKind::path(left, right, top, bottom),
                 stops,
             })
         }
@@ -1010,6 +1371,11 @@ fn parse_gradient_stops(d: &Bound<'_, PyDict>) -> PyResult<Vec<GradientStop>> {
                 .map(|p| p.extract())
                 .transpose()?
                 .unwrap_or(0.0);
+            if !(0.0..=1.0).contains(&position) {
+                return Err(PyValueError::new_err(
+                    "gradient stop position must be between 0 and 1",
+                ));
+            }
             let color_obj = sd
                 .get_item("color")?
                 .ok_or_else(|| PyValueError::new_err("gradient stop missing 'color'"))?;
@@ -1102,8 +1468,23 @@ fn parse_align(obj: &Bound<'_, PyAny>) -> PyResult<AlignDesc> {
         .map_err(|_| PyValueError::new_err("alignment must be a dict"))?;
     let horizontal = opt_str(d, "horizontal")?;
     let vertical = opt_str(d, "vertical")?;
-    if horizontal.as_deref().is_some_and(|v| !["general", "left", "center", "right", "fill", "justify", "centerContinuous", "distributed"].contains(&v)) {
+    if horizontal.as_deref().is_some_and(|v| {
+        ![
+            "general",
+            "left",
+            "center",
+            "right",
+            "fill",
+            "justify",
+            "centerContinuous",
+            "distributed",
+        ]
+        .contains(&v)
+    }) {
         return Err(PyValueError::new_err("invalid alignment horizontal value"));
+    }
+    if let Some(value) = vertical.as_deref() {
+        validate_vertical_alignment(value)?;
     }
     Ok(AlignDesc {
         horizontal,
@@ -1275,11 +1656,17 @@ fn parse_cf_rule(obj: &Bound<'_, PyAny>, priority: u32) -> PyResult<CfRule> {
     let type_ = opt_str(d, "type")?
         .or(opt_str(d, "type_")?)
         .unwrap_or_else(|| "cellIs".into());
-    let prio = d
-        .get_item("priority")?
+    let explicit_priority = d.get_item("priority")?;
+    let prio = explicit_priority
+        .as_ref()
         .map(|x| x.extract::<u32>())
         .transpose()?
         .unwrap_or(priority);
+    if prio == 0 {
+        return Err(PyValueError::new_err(
+            "conditional formatting priority must be >= 1",
+        ));
+    }
     let kind = match type_.as_str() {
         "colorScale" | "color_scale" => {
             let mut cfvos = Vec::new();
@@ -1640,6 +2027,7 @@ fn parse_cf_rule(obj: &Bound<'_, PyAny>, priority: u32) -> PyResult<CfRule> {
     Ok(CfRule {
         kind,
         priority: prio,
+        priority_explicit: explicit_priority.is_some(),
         dxf_id: None,
     })
 }
@@ -1697,21 +2085,41 @@ fn fill_implied_formulas(sqref: &str, rules: &mut [CfRule]) -> PyResult<()> {
                     formulas.push(format!("NOT(ISERROR({cell_ref}))"));
                 }
             }
-            CfRuleKind::TimePeriod { time_period, formulas, .. } => {
+            CfRuleKind::TimePeriod {
+                time_period,
+                formulas,
+                ..
+            } => {
                 if formulas.is_empty() {
                     let f = match time_period.to_ascii_lowercase().as_str() {
                         "yesterday" => format!("FLOOR({cell_ref},1)=TODAY()-1"),
                         "today" => format!("FLOOR({cell_ref},1)=TODAY()"),
                         "tomorrow" => format!("FLOOR({cell_ref},1)=TODAY()+1"),
-                        "last7days" => format!("AND(TODAY()-FLOOR({cell_ref},1)<=6,FLOOR({cell_ref},1)<=TODAY())"),
-                        "lastweek" => format!("AND(TODAY()-ROUNDDOWN({cell_ref},0)>=WEEKDAY(TODAY()),TODAY()-ROUNDDOWN({cell_ref},0)<WEEKDAY(TODAY())+7)"),
-                        "thisweek" => format!("AND(TODAY()-ROUNDDOWN({cell_ref},0)<=WEEKDAY(TODAY())-1,TODAY()-ROUNDDOWN({cell_ref},0)>=1-WEEKDAY(TODAY()))"),
-                        "nextweek" => format!("AND(TODAY()-ROUNDDOWN({cell_ref},0)<=9-WEEKDAY(TODAY()),TODAY()-ROUNDDOWN({cell_ref},0)>=2-WEEKDAY(TODAY()))"),
-                        "lastmonth" => format!("AND(MONTH(ROUNDDOWN({cell_ref},0))=MONTH(EDATE(TODAY(),-1)),YEAR(ROUNDDOWN({cell_ref},0))=YEAR(EDATE(TODAY(),-1)))"),
-                        "thismonth" => format!("AND(MONTH(ROUNDDOWN({cell_ref},0))=MONTH(TODAY()),YEAR(ROUNDDOWN({cell_ref},0))=YEAR(TODAY()))"),
-                        "nextmonth" => format!("AND(MONTH(ROUNDDOWN({cell_ref},0))=MONTH(EDATE(TODAY(),1)),YEAR(ROUNDDOWN({cell_ref},0))=YEAR(EDATE(TODAY(),1)))"),
+                        "last7days" => format!(
+                            "AND(TODAY()-FLOOR({cell_ref},1)<=6,FLOOR({cell_ref},1)<=TODAY())"
+                        ),
+                        "lastweek" => format!(
+                            "AND(TODAY()-ROUNDDOWN({cell_ref},0)>=WEEKDAY(TODAY()),TODAY()-ROUNDDOWN({cell_ref},0)<WEEKDAY(TODAY())+7)"
+                        ),
+                        "thisweek" => format!(
+                            "AND(TODAY()-ROUNDDOWN({cell_ref},0)<=WEEKDAY(TODAY())-1,TODAY()-ROUNDDOWN({cell_ref},0)>=1-WEEKDAY(TODAY()))"
+                        ),
+                        "nextweek" => format!(
+                            "AND(TODAY()-ROUNDDOWN({cell_ref},0)<=9-WEEKDAY(TODAY()),TODAY()-ROUNDDOWN({cell_ref},0)>=2-WEEKDAY(TODAY()))"
+                        ),
+                        "lastmonth" => format!(
+                            "AND(MONTH(ROUNDDOWN({cell_ref},0))=MONTH(EDATE(TODAY(),-1)),YEAR(ROUNDDOWN({cell_ref},0))=YEAR(EDATE(TODAY(),-1)))"
+                        ),
+                        "thismonth" => format!(
+                            "AND(MONTH(ROUNDDOWN({cell_ref},0))=MONTH(TODAY()),YEAR(ROUNDDOWN({cell_ref},0))=YEAR(TODAY()))"
+                        ),
+                        "nextmonth" => format!(
+                            "AND(MONTH(ROUNDDOWN({cell_ref},0))=MONTH(EDATE(TODAY(),1)),YEAR(ROUNDDOWN({cell_ref},0))=YEAR(EDATE(TODAY(),1)))"
+                        ),
                         unknown => {
-                            return Err(PyValueError::new_err(format!("unknown time_period: {unknown}")));
+                            return Err(PyValueError::new_err(format!(
+                                "unknown time_period: {unknown}"
+                            )));
                         }
                     };
                     formulas.push(f);
@@ -1723,7 +2131,9 @@ fn fill_implied_formulas(sqref: &str, rules: &mut [CfRule]) -> PyResult<()> {
     Ok(())
 }
 
-pub(crate) fn parse_conditional_formatting(obj: &Bound<'_, PyAny>) -> PyResult<Vec<ConditionalFormatting>> {
+pub(crate) fn parse_conditional_formatting(
+    obj: &Bound<'_, PyAny>,
+) -> PyResult<Vec<ConditionalFormatting>> {
     let list = obj
         .cast::<PyList>()
         .map_err(|_| PyValueError::new_err("conditional_formatting must be a list"))?;
@@ -1760,16 +2170,46 @@ pub(crate) fn parse_data_validations(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Dat
             .cast::<PyDict>()
             .map_err(|_| PyValueError::new_err("DV item must be a dict"))?;
         let type_ = opt_str(d, "type")?.or(opt_str(d, "type_")?);
-        if type_.as_deref().is_some_and(|v| !["none", "whole", "decimal", "list", "date", "time", "textLength", "custom"].contains(&v)) {
+        if type_.as_deref().is_some_and(|v| {
+            ![
+                "none",
+                "whole",
+                "decimal",
+                "list",
+                "date",
+                "time",
+                "textLength",
+                "custom",
+            ]
+            .contains(&v)
+        }) {
             return Err(PyValueError::new_err("invalid data validation type"));
         }
-        let sqref = opt_str(d, "sqref")?.or(opt_str(d, "range")?).unwrap_or_default();
-        if !sqref.is_empty() && sqref.split_whitespace().any(|r| parse_ref_range_strict(r.as_bytes()).is_none()) {
+        let sqref = opt_str(d, "sqref")?
+            .or(opt_str(d, "range")?)
+            .unwrap_or_default();
+        if !sqref.is_empty()
+            && sqref
+                .split_whitespace()
+                .any(|r| parse_ref_range_strict(r.as_bytes()).is_none())
+        {
             return Err(PyValueError::new_err("invalid data validation sqref"));
+        }
+        let operator = opt_str(d, "operator")?;
+        if let Some(value) = operator.as_deref() {
+            validate_dv_operator(value)?;
+        }
+        let error_style = opt_str(d, "errorStyle")?.or(opt_str(d, "error_style")?);
+        if let Some(value) = error_style.as_deref() {
+            validate_dv_error_style(value)?;
+        }
+        let ime_mode = opt_str(d, "imeMode")?.or(opt_str(d, "ime_mode")?);
+        if let Some(value) = ime_mode.as_deref() {
+            validate_dv_ime_mode(value)?;
         }
         out.push(DataValidation {
             type_,
-            operator: opt_str(d, "operator")?,
+            operator,
             formula1: opt_str(d, "formula1")?.or(opt_str(d, "formula")?),
             formula2: opt_str(d, "formula2")?,
             sqref,
@@ -1786,8 +2226,8 @@ pub(crate) fn parse_data_validations(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Dat
                 .or(opt_bool(d, "showDropDown")?)
                 .unwrap_or(false),
             error_title: opt_str(d, "errorTitle")?.or(opt_str(d, "error_title")?),
-            error_style: opt_str(d, "errorStyle")?.or(opt_str(d, "error_style")?),
-            ime_mode: opt_str(d, "imeMode")?.or(opt_str(d, "ime_mode")?),
+            error_style,
+            ime_mode,
             error: opt_str(d, "error")?,
             prompt_title: opt_str(d, "promptTitle")?.or(opt_str(d, "prompt_title")?),
             prompt: opt_str(d, "prompt")?,
@@ -1858,7 +2298,9 @@ fn apply_cell_styles(sheet: &mut Sheet, styles: &Bound<'_, PyAny>) -> PyResult<(
 
 fn validate_style_position(row: u32, col: u32) -> PyResult<()> {
     if row >= 1_048_576 || col >= 16_384 {
-        return Err(PyValueError::new_err("cell_styles coordinates must be zero-based within Excel limits (row 0..1048575, col 0..16383)"));
+        return Err(PyValueError::new_err(
+            "cell_styles coordinates must be zero-based within Excel limits (row 0..1048575, col 0..16383)",
+        ));
     }
     Ok(())
 }
@@ -1949,7 +2391,9 @@ pub(super) fn py_to_cell_value_flagged(
         }
     } else if let Some(has_time) = exact_datetime_kind(obj) {
         reject_timezone(obj)?;
-        if let Some(v) = date_attrs_to_cell(obj, date1904, style_flag.as_deref_mut(), Some(has_time)) {
+        if let Some(v) =
+            date_attrs_to_cell(obj, date1904, style_flag.as_deref_mut(), Some(has_time))
+        {
             return Ok(v);
         }
     }
@@ -2038,7 +2482,9 @@ pub(super) fn py_to_cell_value_flagged(
 fn reject_timezone(obj: &Bound<'_, PyAny>) -> PyResult<()> {
     if let Ok(tz) = obj.getattr("tzinfo") {
         if !tz.is_none() {
-            return Err(PyValueError::new_err("Excel does not support timezone-aware datetime or time values; convert explicitly first"));
+            return Err(PyValueError::new_err(
+                "Excel does not support timezone-aware datetime or time values; convert explicitly first",
+            ));
         }
     }
     Ok(())
@@ -2046,21 +2492,28 @@ fn reject_timezone(obj: &Bound<'_, PyAny>) -> PyResult<()> {
 
 fn checked_cell_number(obj: &Bound<'_, PyAny>, value: f64) -> PyResult<CellValue> {
     if !value.is_finite() {
-        return Err(PyValueError::new_err("Excel cells cannot contain NaN or infinity"));
+        return Err(PyValueError::new_err(
+            "Excel cells cannot contain NaN or infinity",
+        ));
     }
     // Python integers and Decimal values can carry precision that a double cannot.
     // Compare through Python so large integers and Decimal values are not rounded first.
     let is_int = obj.is_instance_of::<pyo3::types::PyInt>();
-    let is_decimal = !is_int && !obj.is_instance_of::<pyo3::types::PyFloat>()
+    let is_decimal = !is_int
+        && !obj.is_instance_of::<pyo3::types::PyFloat>()
         && obj.get_type().name()? == "Decimal"
         && obj.get_type().getattr("__module__")?.extract::<String>()? == "decimal";
     if (is_int || is_decimal) && !obj.eq(value)? {
-        return Err(PyValueError::new_err("numeric value cannot be represented exactly; write identifiers as text or convert explicitly"));
+        return Err(PyValueError::new_err(
+            "numeric value cannot be represented exactly; write identifiers as text or convert explicitly",
+        ));
     }
     if !is_int && !is_decimal && obj.hasattr("__index__")? {
         let integer = obj.call_method0("__index__")?;
         if !integer.eq(value)? {
-            return Err(PyValueError::new_err("numeric value cannot be represented exactly; write identifiers as text or convert explicitly"));
+            return Err(PyValueError::new_err(
+                "numeric value cannot be represented exactly; write identifiers as text or convert explicitly",
+            ));
         }
     }
     Ok(CellValue::Number(value))
@@ -2069,6 +2522,11 @@ fn checked_cell_number(obj: &Bound<'_, PyAny>, value: f64) -> PyResult<CellValue
 /// Error-literal check + Excel's 32767-char limit (UserWarning + truncation) for a
 /// string cell. Shared by the exact-`str` fast path and the generic chain.
 fn str_to_cell_value(obj: &Bound<'_, PyAny>, mut s: String) -> PyResult<CellValue> {
+    if has_illegal_xml_control(&s) {
+        return Err(PyValueError::new_err(
+            "cell text contains an illegal XML control character",
+        ));
+    }
     if s.starts_with('#') && is_excel_error(&s) {
         return Ok(CellValue::Error(s));
     }
@@ -2104,7 +2562,12 @@ fn exact_datetime_kind(obj: &Bound<'_, PyAny>) -> Option<bool> {
     static DATE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
     let py = obj.py();
     let ty = obj.get_type_ptr();
-    if ty == DATETIME.import(py, "datetime", "datetime").ok()?.as_type_ptr() {
+    if ty
+        == DATETIME
+            .import(py, "datetime", "datetime")
+            .ok()?
+            .as_type_ptr()
+    {
         Some(true)
     } else if ty == DATE.import(py, "datetime", "date").ok()?.as_type_ptr() {
         Some(false)
@@ -2258,10 +2721,14 @@ fn apply_formulas(
 
 fn validate_formula_position(row: u32, col: u32) -> PyResult<()> {
     if row >= 1_048_576 {
-        return Err(PyValueError::new_err("formula row must be between 0 and 1048575"));
+        return Err(PyValueError::new_err(
+            "formula row must be between 0 and 1048575",
+        ));
     }
     if col >= 16_384 {
-        return Err(PyValueError::new_err("formula col must be between 0 and 16383"));
+        return Err(PyValueError::new_err(
+            "formula col must be between 0 and 16383",
+        ));
     }
     Ok(())
 }
@@ -2507,7 +2974,9 @@ fn arrow_array_to_cell_value(arr: &dyn arrow_array::Array, idx: usize) -> PyResu
         let integer = i64_arr.value(idx);
         let number = integer as f64;
         if number as i128 != integer as i128 {
-            return Err(PyValueError::new_err("numeric value cannot be represented exactly; write identifiers as text or convert explicitly"));
+            return Err(PyValueError::new_err(
+                "numeric value cannot be represented exactly; write identifiers as text or convert explicitly",
+            ));
         }
         CellValue::Number(number)
     } else if let Some(i32_arr) = arr.as_any().downcast_ref::<arrow_array::Int32Array>() {
@@ -2523,7 +2992,9 @@ fn arrow_array_to_cell_value(arr: &dyn arrow_array::Array, idx: usize) -> PyResu
     };
     if let CellValue::Number(number) = &value {
         if !number.is_finite() {
-            return Err(PyValueError::new_err("Excel cells cannot contain NaN or infinity"));
+            return Err(PyValueError::new_err(
+                "Excel cells cannot contain NaN or infinity",
+            ));
         }
     }
     Ok(value)
@@ -2539,6 +3010,11 @@ fn arrow_like_to_sheet(
     if ncols == 0 || nrows == 0 {
         return Ok(false);
     }
+    if nrows > MAX_GRID_ROWS as usize || ncols > MAX_GRID_COLS as usize {
+        return Err(PyValueError::new_err(format!(
+            "Arrow table dimensions {nrows}x{ncols} exceed Excel's {MAX_GRID_ROWS}x{MAX_GRID_COLS} limit"
+        )));
+    }
     let mut arrow_cols: Vec<arrow_array::ArrayRef> = Vec::with_capacity(ncols);
     let mut use_py_pylist = false;
 
@@ -2547,10 +3023,14 @@ fn arrow_like_to_sheet(
         if let Ok(py_arr) = col.extract::<pyo3_arrow::PyArray>() {
             let arr = py_arr.into_inner().0;
             let a = arr.as_any();
-            if !(a.is::<arrow_array::Float64Array>() || a.is::<arrow_array::Float32Array>()
-                || a.is::<arrow_array::Int64Array>() || a.is::<arrow_array::Int32Array>()
-                || a.is::<arrow_array::BooleanArray>() || a.is::<arrow_array::StringArray>()
-                || a.is::<arrow_array::LargeStringArray>()) {
+            if !(a.is::<arrow_array::Float64Array>()
+                || a.is::<arrow_array::Float32Array>()
+                || a.is::<arrow_array::Int64Array>()
+                || a.is::<arrow_array::Int32Array>()
+                || a.is::<arrow_array::BooleanArray>()
+                || a.is::<arrow_array::StringArray>()
+                || a.is::<arrow_array::LargeStringArray>())
+            {
                 use_py_pylist = true;
                 break;
             }
@@ -2640,14 +3120,18 @@ fn apply_row_dims(sheet: &mut Sheet, row_dims: Option<&Bound<'_, PyAny>>) -> PyR
         } else if let Some(r) = d.get_item("row_idx")? {
             let idx: u32 = r.extract()?;
             if idx >= 1_048_576 {
-                return Err(PyValueError::new_err("row_dim row_idx must be between 0 and 1048575"));
+                return Err(PyValueError::new_err(
+                    "row_dim row_idx must be between 0 and 1048575",
+                ));
             }
             idx + 1
         } else {
             return Err(PyValueError::new_err("row_dim needs row or row_idx"));
         };
         if !(1..=1_048_576).contains(&row_num) {
-            return Err(PyValueError::new_err("row_dim row must be between 1 and 1048576"));
+            return Err(PyValueError::new_err(
+                "row_dim row must be between 1 and 1048576",
+            ));
         }
         let height: Option<f64> = d.get_item("height")?.map(|h| h.extract()).transpose()?;
         let hidden: bool = d
@@ -2704,7 +3188,9 @@ fn apply_col_dims(sheet: &mut Sheet, col_dims: Option<&Bound<'_, PyAny>>) -> PyR
             .transpose()?
             .unwrap_or(min);
         if min == 0 || max > 16_384 || min > max {
-            return Err(PyValueError::new_err("col_dim requires 1 <= min <= max <= 16384"));
+            return Err(PyValueError::new_err(
+                "col_dim requires 1 <= min <= max <= 16384",
+            ));
         }
         let width: Option<f64> = d.get_item("width")?.map(|w| w.extract()).transpose()?;
         let hidden: bool = d
@@ -2739,7 +3225,52 @@ fn apply_col_dims(sheet: &mut Sheet, col_dims: Option<&Bound<'_, PyAny>>) -> PyR
     Ok(())
 }
 
-const SHEET_KEYS: &[&str] = &["name", "visibility", "state", "columns", "data", "table", "rows", "rows_iter", "grid", "formulas", "row_dims", "col_dims", "freeze_panes", "freeze_cell", "cell_styles", "styles", "style_palette", "conditional_formatting", "cf", "data_validations", "validations", "dv", "tab_color", "tab_color_rgb", "auto_filter", "merges", "hyperlinks", "protection", "sheet_protection", "scenarios", "print_options", "page_margins", "page_setup", "header_footer", "row_breaks", "col_breaks", "tables", "comments", "charts", "images", "print_area", "print_titles", "pivots", "named_styles"];
+const SHEET_KEYS: &[&str] = &[
+    "name",
+    "visibility",
+    "state",
+    "columns",
+    "data",
+    "table",
+    "rows",
+    "rows_iter",
+    "grid",
+    "formulas",
+    "row_dims",
+    "col_dims",
+    "freeze_panes",
+    "freeze_cell",
+    "cell_styles",
+    "styles",
+    "style_palette",
+    "conditional_formatting",
+    "cf",
+    "data_validations",
+    "validations",
+    "dv",
+    "tab_color",
+    "tab_color_rgb",
+    "auto_filter",
+    "merges",
+    "hyperlinks",
+    "protection",
+    "sheet_protection",
+    "scenarios",
+    "print_options",
+    "page_margins",
+    "page_setup",
+    "header_footer",
+    "row_breaks",
+    "col_breaks",
+    "tables",
+    "comments",
+    "charts",
+    "images",
+    "print_area",
+    "print_titles",
+    "pivots",
+    "named_styles",
+];
 
 fn normalize_sheet_input<'py>(sheet_obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
     // Normalize supported object attributes through the same parser as dictionaries.
@@ -2760,9 +3291,10 @@ fn normalize_sheet_input<'py>(sheet_obj: &Bound<'py, PyAny>) -> PyResult<Bound<'
 }
 
 fn parse_sheet_dict(d: &Bound<'_, PyDict>, opts: &WriteOptions) -> PyResult<Sheet> {
-
     for (key, _) in d.iter() {
-        let key: String = key.extract().map_err(|_| PyValueError::new_err("sheet keys must be strings"))?;
+        let key: String = key
+            .extract()
+            .map_err(|_| PyValueError::new_err("sheet keys must be strings"))?;
         if !SHEET_KEYS.contains(&key.as_str()) {
             return Err(PyValueError::new_err(format!("unknown sheet key {key:?}")));
         }
@@ -2774,7 +3306,10 @@ fn parse_sheet_dict(d: &Bound<'_, PyDict>, opts: &WriteOptions) -> PyResult<Shee
         }
     }
     if sources.len() > 1 {
-        return Err(PyValueError::new_err(format!("sheet data sources are mutually exclusive: {}", sources.join(", "))));
+        return Err(PyValueError::new_err(format!(
+            "sheet data sources are mutually exclusive: {}",
+            sources.join(", ")
+        )));
     }
 
     let name: String = d
@@ -2813,6 +3348,7 @@ fn parse_sheet_dict(d: &Bound<'_, PyDict>, opts: &WriteOptions) -> PyResult<Shee
             })?;
             for row_obj in iter {
                 let row_item = row_obj?;
+                reject_bare_row(&row_item)?;
                 if ri > 1048576 {
                     return Err(PyValueError::new_err(
                         "row count exceeds Excel limit of 1048576",
@@ -2861,7 +3397,9 @@ fn parse_sheet_dict(d: &Bound<'_, PyDict>, opts: &WriteOptions) -> PyResult<Shee
 
     if let Some(fc) = d.get_item("freeze_panes")?.or(d.get_item("freeze_cell")?) {
         if !fc.is_none() {
-            sheet.view.freeze_cell = Some(fc.extract()?);
+            let value: String = fc.extract()?;
+            validate_single_cell_ref(&value, "freeze_panes")?;
+            sheet.view.freeze_cell = Some(value);
         }
     }
 
@@ -2915,13 +3453,24 @@ fn parse_sheet_dict(d: &Bound<'_, PyDict>, opts: &WriteOptions) -> PyResult<Shee
     Ok(sheet)
 }
 
+fn parse_auto_filter_range(value: &str) -> PyResult<CellRange> {
+    let (r1, c1, r2, c2) = parse_ref_range_strict(value.as_bytes())
+        .ok_or_else(|| PyValueError::new_err(format!("invalid auto_filter ref {value:?}")))?;
+    Ok(CellRange {
+        r0: r1 - 1,
+        c0: c1 - 1,
+        r1: r2 - 1,
+        c1: c2 - 1,
+    })
+}
+
 fn parse_auto_filter(obj: &Bound<'_, PyAny>) -> PyResult<AutoFilterMeta> {
     // Accept a plain ref string (back-compat) or a dict like the read surface emits:
     //   {"ref": "A1:C10", "columns": [{"col_id": 0, "hidden_button": false,
     //                                  "show_button": true, "values": [...], "blank": false}]}
     if let Ok(ref_) = obj.extract::<String>() {
         return Ok(AutoFilterMeta {
-            ref_: parse_range(ref_.as_bytes()),
+            ref_: parse_auto_filter_range(&ref_)?,
             columns: Vec::new(),
         });
     }
@@ -2932,6 +3481,8 @@ fn parse_auto_filter(obj: &Bound<'_, PyAny>) -> PyResult<AutoFilterMeta> {
         .get_item("ref")?
         .ok_or_else(|| PyValueError::new_err("auto_filter dict needs a 'ref'"))?
         .extract::<String>()?;
+    let range = parse_auto_filter_range(&ref_)?;
+    let width = range.c1 - range.c0 + 1;
     let mut columns = Vec::new();
     if let Some(cols) = d.get_item("columns")? {
         if !cols.is_none() {
@@ -2939,12 +3490,28 @@ fn parse_auto_filter(obj: &Bound<'_, PyAny>) -> PyResult<AutoFilterMeta> {
                 PyValueError::new_err("auto_filter 'columns' must be a list of dicts")
             })?;
             for item in list.iter() {
-                columns.push(parse_filter_column(&item)?);
+                let column = parse_filter_column(&item)?;
+                if column.col_id >= width {
+                    return Err(PyValueError::new_err(format!(
+                        "auto_filter col_id {} is outside the filter range width {}",
+                        column.col_id, width
+                    )));
+                }
+                if columns
+                    .iter()
+                    .any(|existing: &FilterColumnMeta| existing.col_id == column.col_id)
+                {
+                    return Err(PyValueError::new_err(format!(
+                        "duplicate auto_filter col_id {}",
+                        column.col_id
+                    )));
+                }
+                columns.push(column);
             }
         }
     }
     Ok(AutoFilterMeta {
-        ref_: parse_range(ref_.as_bytes()),
+        ref_: range,
         columns,
     })
 }
@@ -2994,7 +3561,9 @@ fn parse_filter_column(obj: &Bound<'_, PyAny>) -> PyResult<FilterColumnMeta> {
 fn apply_structural_sheet(sheet: &mut Sheet, d: &Bound<'_, PyDict>) -> PyResult<()> {
     if let Some(tc) = d.get_item("tab_color")?.or(d.get_item("tab_color_rgb")?) {
         if !tc.is_none() {
-            sheet.tab_color_rgb = Some(tc.extract()?);
+            let value: String = tc.extract()?;
+            validate_tab_color(&value)?;
+            sheet.tab_color_rgb = Some(value);
         }
     }
     if let Some(af) = d.get_item("auto_filter")? {
@@ -3007,7 +3576,19 @@ fn apply_structural_sheet(sheet: &mut Sheet, d: &Bound<'_, PyDict>) -> PyResult<
             sheet.merges = m.extract()?;
             for range in &sheet.merges {
                 if parse_ref_range_strict(range.as_bytes()).is_none() {
-                    return Err(PyValueError::new_err(format!("invalid merge range {range:?}")));
+                    return Err(PyValueError::new_err(format!(
+                        "invalid merge range {range:?}"
+                    )));
+                }
+            }
+            for (i, range) in sheet.merges.iter().enumerate() {
+                if sheet.merges[..i]
+                    .iter()
+                    .any(|existing| ranges_overlap(existing, range))
+                {
+                    return Err(PyValueError::new_err(format!(
+                        "merge range {range:?} overlaps another merge"
+                    )));
                 }
             }
         }
@@ -3107,17 +3688,34 @@ fn parse_hyperlinks(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Hyperlink>> {
         let d = item
             .cast::<PyDict>()
             .map_err(|_| PyValueError::new_err("each hyperlink must be a dict"))?;
+        for (key, _) in d.iter() {
+            let key: String = key
+                .extract()
+                .map_err(|_| PyValueError::new_err("hyperlink keys must be strings"))?;
+            if !["ref", "ref_", "target", "location", "display"].contains(&key.as_str()) {
+                return Err(PyValueError::new_err(format!(
+                    "unknown hyperlink key {key:?}"
+                )));
+            }
+        }
         let ref_: String = d
             .get_item("ref")?
             .or(d.get_item("ref_")?)
             .ok_or_else(|| PyValueError::new_err("hyperlink requires ref"))?
             .extract()?;
         if parse_ref_range_strict(ref_.as_bytes()).is_none() {
-            return Err(PyValueError::new_err(format!("invalid hyperlink ref {ref_:?}")));
+            return Err(PyValueError::new_err(format!(
+                "invalid hyperlink ref {ref_:?}"
+            )));
         }
         let target: Option<String> = d.get_item("target")?.map(|v| v.extract()).transpose()?;
         let location = d.get_item("location")?.map(|v| v.extract()).transpose()?;
         let display = d.get_item("display")?.map(|v| v.extract()).transpose()?;
+        if target.is_none() && location.is_none() {
+            return Err(PyValueError::new_err(
+                "hyperlink requires a target or location",
+            ));
+        }
         out.push(Hyperlink {
             ref_,
             target,
@@ -3248,26 +3846,38 @@ fn parse_page_setup(obj: &Bound<'_, PyAny>) -> PyResult<PageSetup> {
     let d = obj
         .cast::<PyDict>()
         .map_err(|_| PyValueError::new_err("page_setup must be a dict"))?;
+    let orientation: Option<String> = d
+        .get_item("orientation")?
+        .map(|v| v.extract())
+        .transpose()?;
+    let paper_size: Option<i32> = d.get_item("paper_size")?.map(|v| v.extract()).transpose()?;
+    let fit_to_width: Option<i32> = d
+        .get_item("fit_to_width")?
+        .map(|v| v.extract())
+        .transpose()?;
+    let fit_to_height: Option<i32> = d
+        .get_item("fit_to_height")?
+        .map(|v| v.extract())
+        .transpose()?;
+    let scale: Option<i32> = d.get_item("scale")?.map(|v| v.extract()).transpose()?;
+    validate_page_setup_fields(
+        orientation.as_deref(),
+        paper_size,
+        scale,
+        fit_to_width,
+        fit_to_height,
+    )?;
     Ok(PageSetup {
-        orientation: d
-            .get_item("orientation")?
-            .map(|v| v.extract())
-            .transpose()?,
-        paper_size: d.get_item("paper_size")?.map(|v| v.extract()).transpose()?,
+        orientation,
+        paper_size,
         fit_to_page: d
             .get_item("fit_to_page")?
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or(false),
-        fit_to_width: d
-            .get_item("fit_to_width")?
-            .map(|v| v.extract())
-            .transpose()?,
-        fit_to_height: d
-            .get_item("fit_to_height")?
-            .map(|v| v.extract())
-            .transpose()?,
-        scale: d.get_item("scale")?.map(|v| v.extract()).transpose()?,
+        fit_to_width,
+        fit_to_height,
+        scale,
     })
 }
 
@@ -3422,13 +4032,32 @@ pub(crate) fn parse_tables(obj: &Bound<'_, PyAny>) -> PyResult<Vec<TableDef>> {
             .or(d.get_item("ref_")?)
             .ok_or_else(|| PyValueError::new_err("table requires ref"))?
             .extract()?;
-        parse_ref_range_strict(ref_.as_bytes())
+        let (r1, c1, r2, c2) = parse_ref_range_strict(ref_.as_bytes())
             .ok_or_else(|| PyValueError::new_err(format!("invalid table ref {ref_:?}")))?;
+        validate_table_name(&display_name).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let columns: Vec<String> = d
             .get_item("columns")?
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or_default();
+        let width = (c2 - c1 + 1) as usize;
+        if !columns.is_empty() && columns.len() != width {
+            return Err(PyValueError::new_err(format!(
+                "table {:?} ref {ref_:?} spans {width} columns but {} column names were supplied",
+                display_name,
+                columns.len()
+            )));
+        }
+        if out
+            .iter()
+            .any(|existing: &TableDef| ranges_overlap(&existing.ref_, &ref_))
+        {
+            return Err(PyValueError::new_err(format!(
+                "table {:?} overlaps another table on the same sheet",
+                display_name
+            )));
+        }
+        let _ = (r1, r2);
         let style_name = d
             .get_item("style_name")?
             .or(d.get_item("style")?)
@@ -3440,7 +4069,10 @@ pub(crate) fn parse_tables(obj: &Bound<'_, PyAny>) -> PyResult<Vec<TableDef>> {
             .transpose()?
             .unwrap_or(true);
         let flag = |key: &str| -> PyResult<bool> {
-            Ok(d.get_item(key)?.map(|v| v.extract()).transpose()?.unwrap_or(false))
+            Ok(d.get_item(key)?
+                .map(|v| v.extract())
+                .transpose()?
+                .unwrap_or(false))
         };
         out.push(TableDef {
             display_name,
@@ -3461,6 +4093,7 @@ fn parse_comments(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Comment>> {
         .cast::<PyList>()
         .map_err(|_| PyValueError::new_err("comments must be a list"))?;
     let mut out = Vec::new();
+    let mut seen = HashSet::new();
     for item in list.iter() {
         let d = item
             .cast::<PyDict>()
@@ -3471,8 +4104,17 @@ fn parse_comments(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Comment>> {
             .ok_or_else(|| PyValueError::new_err("comment requires ref"))?
             .extract()?;
         match parse_ref_range_strict(ref_.as_bytes()) {
-            Some((r1, c1, r2, c2)) if r1 == r2 && c1 == c2 => {},
-            _ => return Err(PyValueError::new_err(format!("invalid comment ref {ref_:?}"))),
+            Some((r1, c1, r2, c2)) if r1 == r2 && c1 == c2 => {}
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "invalid comment ref {ref_:?}"
+                )));
+            }
+        }
+        if !seen.insert(ref_.to_ascii_uppercase()) {
+            return Err(PyValueError::new_err(format!(
+                "duplicate comment ref {ref_:?}"
+            )));
         }
         let author: String = d
             .get_item("author")?
@@ -3543,7 +4185,9 @@ fn parse_marker(d: &Bound<'_, PyDict>) -> PyResult<(Option<String>, Option<u8>)>
         }
     }
     if size.is_some_and(|v| !(2..=72).contains(&v)) {
-        return Err(PyValueError::new_err("marker size must be between 2 and 72"));
+        return Err(PyValueError::new_err(
+            "marker size must be between 2 and 72",
+        ));
     }
     Ok((symbol, size))
 }
@@ -3553,11 +4197,14 @@ fn parse_marker(d: &Bound<'_, PyDict>) -> PyResult<(Option<String>, Option<u8>)>
 fn parse_series_colour(d: &Bound<'_, PyDict>) -> PyResult<Option<String>> {
     if let Some(v) = d.get_item("colour")?.or(d.get_item("color")?) {
         if let Ok(s) = v.extract::<String>() {
+            validate_hex_color(&s, "series color")?;
             return Ok(Some(s));
         }
         if let Ok(cd) = v.cast::<PyDict>() {
             if let Some(rgb) = cd.get_item("rgb")? {
-                return Ok(Some(rgb.extract()?));
+                let value: String = rgb.extract()?;
+                validate_hex_color(&value, "series color")?;
+                return Ok(Some(value));
             }
         }
         return Err(PyValueError::new_err(
@@ -3568,11 +4215,14 @@ fn parse_series_colour(d: &Bound<'_, PyDict>) -> PyResult<Option<String>> {
         if let Ok(gpd) = gp.cast::<PyDict>() {
             if let Some(sf) = gpd.get_item("solidFill")? {
                 if let Ok(s) = sf.extract::<String>() {
+                    validate_hex_color(&s, "series color")?;
                     return Ok(Some(s));
                 }
                 if let Ok(sfd) = sf.cast::<PyDict>() {
                     if let Some(rgb) = sfd.get_item("rgb")?.or(sfd.get_item("color")?) {
-                        return Ok(Some(rgb.extract()?));
+                        let value: String = rgb.extract()?;
+                        validate_hex_color(&value, "series color")?;
+                        return Ok(Some(value));
                     }
                 }
             }
@@ -3673,6 +4323,7 @@ fn opt_off_pair(d: &Bound<'_, PyDict>, name: &str) -> PyResult<(i64, i64)> {
 
 fn parse_anchor(obj: &Bound<'_, PyAny>) -> PyResult<Anchor> {
     if let Ok(s) = obj.extract::<String>() {
+        validate_single_cell_ref(&s, "anchor")?;
         return Ok(Anchor::OneCell {
             cell: s,
             col_off: 0,
@@ -3690,21 +4341,27 @@ fn parse_anchor(obj: &Bound<'_, PyAny>) -> PyResult<Anchor> {
         .transpose()?
         .unwrap_or_else(|| "oneCell".into());
     match kind.as_str() {
-        "twoCell" | "two_cell" => Ok(Anchor::TwoCell {
-            from_cell: d
+        "twoCell" | "two_cell" => {
+            let from_cell: String = d
                 .get_item("from")?
                 .or(d.get_item("from_cell")?)
                 .ok_or_else(|| PyValueError::new_err("twoCell needs from"))?
-                .extract()?,
-            from_off: opt_off_pair(d, "from_off")?,
-            to_cell: d
+                .extract()?;
+            let to_cell: String = d
                 .get_item("to")?
                 .or(d.get_item("to_cell")?)
                 .ok_or_else(|| PyValueError::new_err("twoCell needs to"))?
-                .extract()?,
-            to_off: opt_off_pair(d, "to_off")?,
-            edit_as: d.get_item("edit_as")?.map(|v| v.extract()).transpose()?,
-        }),
+                .extract()?;
+            validate_single_cell_ref(&from_cell, "anchor from")?;
+            validate_single_cell_ref(&to_cell, "anchor to")?;
+            Ok(Anchor::TwoCell {
+                from_cell,
+                from_off: opt_off_pair(d, "from_off")?,
+                to_cell,
+                to_off: opt_off_pair(d, "to_off")?,
+                edit_as: d.get_item("edit_as")?.map(|v| v.extract()).transpose()?,
+            })
+        }
         "absolute" => Ok(Anchor::Absolute {
             x_emu: opt_emu(d, "x")?,
             y_emu: opt_emu(d, "y")?,
@@ -3719,12 +4376,13 @@ fn parse_anchor(obj: &Bound<'_, PyAny>) -> PyResult<Anchor> {
                 .transpose()?
                 .unwrap_or(2_700_000),
         }),
-        _ => {
+        "oneCell" | "one_cell" => {
             let cell: String = d
                 .get_item("cell")?
                 .map(|v| v.extract())
                 .transpose()?
                 .unwrap_or_else(|| "E15".into());
+            validate_single_cell_ref(&cell, "anchor cell")?;
             let width_cm = d
                 .get_item("width_cm")?
                 .or(d.get_item("width")?)
@@ -3745,6 +4403,9 @@ fn parse_anchor(obj: &Bound<'_, PyAny>) -> PyResult<Anchor> {
                 height_cm,
             })
         }
+        other => Err(PyValueError::new_err(format!(
+            "unknown anchor type {other:?}; expected oneCell, twoCell, or absolute"
+        ))),
     }
 }
 
@@ -3779,8 +4440,12 @@ fn parse_charts(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Chart>> {
         } else {
             Anchor::default()
         };
-        let legend_pos: Option<String> = d.get_item("legend_pos")?.map(|v| v.extract()).transpose()?;
-        if legend_pos.as_deref().is_some_and(|v| !["b", "l", "r", "t", "tr"].contains(&v)) {
+        let legend_pos: Option<String> =
+            d.get_item("legend_pos")?.map(|v| v.extract()).transpose()?;
+        if legend_pos
+            .as_deref()
+            .is_some_and(|v| !["b", "l", "r", "t", "tr"].contains(&v))
+        {
             return Err(PyValueError::new_err("invalid chart legend_pos"));
         }
         let style = d.get_item("style")?.map(|v| v.extract()).transpose()?;
@@ -3813,11 +4478,19 @@ fn png_has_complete_chunks(bytes: &[u8]) -> bool {
     while let Some(header_end) = offset.checked_add(8).filter(|&end| end <= bytes.len()) {
         let len = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         let kind = &bytes[offset + 4..header_end];
-        let Some(end) = header_end.checked_add(len).and_then(|end| end.checked_add(4)).filter(|&end| end <= bytes.len()) else {
+        let Some(end) = header_end
+            .checked_add(len)
+            .and_then(|end| end.checked_add(4))
+            .filter(|&end| end <= bytes.len())
+        else {
             return false;
         };
         if !saw_header {
-            if kind != b"IHDR" || len != 13 || bytes[header_end..header_end + 4] == [0; 4] || bytes[header_end + 4..header_end + 8] == [0; 4] {
+            if kind != b"IHDR"
+                || len != 13
+                || bytes[header_end..header_end + 4] == [0; 4]
+                || bytes[header_end + 4..header_end + 8] == [0; 4]
+            {
                 return false;
             }
             saw_header = true;
@@ -3873,6 +4546,12 @@ fn parse_images(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Image>> {
         if format == ImageFormat::Png && !png_has_complete_chunks(&bytes) {
             return Err(PyValueError::new_err("invalid or truncated PNG image"));
         }
+        if format == ImageFormat::Jpeg && !validate_jpeg(&bytes) {
+            return Err(PyValueError::new_err("invalid or truncated JPEG image"));
+        }
+        if format == ImageFormat::Gif && !validate_gif(&bytes) {
+            return Err(PyValueError::new_err("invalid or truncated GIF image"));
+        }
         let anchor = if let Some(a) = d.get_item("anchor")? {
             if a.is_none() {
                 Anchor::default()
@@ -3904,6 +4583,14 @@ fn parse_defined_names(obj: &Bound<'_, PyAny>) -> PyResult<Vec<DefinedName>> {
             .get_item("name")?
             .ok_or_else(|| PyValueError::new_err("defined name requires name"))?
             .extract()?;
+        validate_defined_name(&name)?;
+        if out.iter().any(|existing: &DefinedName| {
+            existing.local_sheet_id.is_none() && existing.name.eq_ignore_ascii_case(&name)
+        }) {
+            return Err(PyValueError::new_err(format!(
+                "duplicate global defined name {name:?}"
+            )));
+        }
         let value: String = d
             .get_item("value")?
             .or(d.get_item("attr_text")?)
@@ -3942,6 +4629,7 @@ fn parse_chartsheets(obj: &Bound<'_, PyAny>) -> PyResult<Vec<ChartsheetSpec>> {
             .or(d.get_item("title")?)
             .ok_or_else(|| PyValueError::new_err("chartsheet requires name"))?
             .extract()?;
+        validate_sheet_name(&title, &[]).map_err(turbo_err_to_py)?;
         let charts = if let Some(c) = d.get_item("charts")? {
             parse_charts(&c)?
         } else {
@@ -4000,10 +4688,77 @@ fn parse_doc_props(obj: &Bound<'_, PyAny>) -> PyResult<DocProps> {
     Ok(p)
 }
 
+fn validate_structural_index(
+    op: &str,
+    idx: u32,
+    amount: u32,
+    limit: u32,
+    inserting: bool,
+) -> PyResult<()> {
+    if idx == 0 || idx > limit {
+        return Err(PyValueError::new_err(format!(
+            "{op}: idx is 1-based and must be in 1..={limit}; got {idx}"
+        )));
+    }
+    if inserting && amount > 0 && (idx as u64 + amount as u64 - 1) > limit as u64 {
+        return Err(PyValueError::new_err(format!(
+            "{op}: inserting {amount} at {idx} would exceed the Excel grid limit {limit}"
+        )));
+    }
+    Ok(())
+}
+
+fn resolve_iter_bound(value: Option<i64>, default: u32, limit: u32, name: &str) -> PyResult<u32> {
+    let Some(value) = value else {
+        return Ok(default.clamp(1, limit));
+    };
+    if value < 0 {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be non-negative; got {value}"
+        )));
+    }
+    Ok((value.max(1) as u64).min(limit as u64) as u32)
+}
+
+fn validate_workbook_metadata(wb: &Workbook, active_tab: u32) -> PyResult<()> {
+    let total = wb.sheets.len() + wb.chartsheets.len();
+    if active_tab as usize >= total {
+        return Err(PyValueError::new_err(format!(
+            "active_tab {active_tab} is outside the workbook sheet count {total}"
+        )));
+    }
+    let mut names: Vec<String> = wb.sheets.iter().map(|s| s.name.clone()).collect();
+    for chartsheet in &wb.chartsheets {
+        validate_sheet_name(&chartsheet.title, &names).map_err(turbo_err_to_py)?;
+        names.push(chartsheet.title.clone());
+    }
+    for name in &wb.defined_names {
+        if let Some(id) = name.local_sheet_id {
+            if id as usize >= total {
+                return Err(PyValueError::new_err(format!(
+                    "defined name {:?} has local_sheet_id {id}, but the workbook has {total} sheets",
+                    name.name
+                )));
+            }
+        }
+    }
+    if wb.sheets.iter().all(|s| s.state != SheetState::Visible) && wb.chartsheets.is_empty() {
+        return Err(PyValueError::new_err(
+            "workbook must contain at least one visible sheet",
+        ));
+    }
+    Ok(())
+}
+
 fn try_parse_numeric_grid(
     sheet_name: String,
     data_obj: &Bound<'_, PyAny>,
 ) -> PyResult<Option<NumericGrid>> {
+    if data_obj.hasattr("mask")? && data_obj.hasattr("filled")? {
+        return Err(PyValueError::new_err(
+            "masked NumPy arrays are not supported; fill or drop the mask before writing",
+        ));
+    }
     if let Ok(interface) = data_obj.getattr("__array_interface__") {
         if let Ok(dict) = interface.cast::<PyDict>() {
             let shape_obj = dict.get_item("shape")?;
@@ -4030,6 +4785,11 @@ fn try_parse_numeric_grid(
                         }
                         let nrows: usize = shape.get_item(0)?.extract()?;
                         let ncols: usize = shape.get_item(1)?.extract()?;
+                        if nrows > MAX_GRID_ROWS as usize || ncols > MAX_GRID_COLS as usize {
+                            return Err(PyValueError::new_err(format!(
+                                "grid dimensions {nrows}x{ncols} exceed Excel's {MAX_GRID_ROWS}x{MAX_GRID_COLS} limit"
+                            )));
+                        }
                         let ptr_val: usize = data.get_item(0)?.extract()?;
                         if ptr_val != 0 {
                             if let Some(total) = nrows.checked_mul(ncols) {
@@ -4038,7 +4798,9 @@ fn try_parse_numeric_grid(
                                         std::slice::from_raw_parts(ptr_val as *const f64, total)
                                     };
                                     if slice.iter().any(|x| x.is_infinite()) {
-                                        return Err(PyValueError::new_err("grid cannot contain infinity"));
+                                        return Err(PyValueError::new_err(
+                                            "grid cannot contain infinity",
+                                        ));
                                     }
                                     return Ok(Some(NumericGrid {
                                         sheet_name,
@@ -4051,7 +4813,9 @@ fn try_parse_numeric_grid(
                                         std::slice::from_raw_parts(ptr_val as *const f32, total)
                                     };
                                     if slice.iter().any(|x| x.is_infinite()) {
-                                        return Err(PyValueError::new_err("grid cannot contain infinity"));
+                                        return Err(PyValueError::new_err(
+                                            "grid cannot contain infinity",
+                                        ));
                                     }
                                     let f64_values: Vec<f64> =
                                         slice.iter().map(|&x| x as f64).collect();
@@ -4107,7 +4871,8 @@ fn build_workbook_from_py(
     if sheet_list.is_empty() {
         return Err(PyValueError::new_err("sheets must be non-empty"));
     }
-    let normalized_sheets: Vec<_> = sheet_list.iter()
+    let normalized_sheets: Vec<_> = sheet_list
+        .iter()
         .map(|sheet| normalize_sheet_input(&sheet))
         .collect::<PyResult<_>>()?;
 
@@ -4133,7 +4898,9 @@ fn build_workbook_from_py(
             PyValueError::new_err(format!("vba_archive_path '{vap}' cannot be read: {e}"))
         })?;
         let map = crate::turbo::zipmin::ArchiveMap::parse(std::sync::Arc::new(file_bytes))
-            .map_err(|e| PyValueError::new_err(format!("vba_archive_path '{vap}' is not a valid zip: {e}")))?;
+            .map_err(|e| {
+                PyValueError::new_err(format!("vba_archive_path '{vap}' is not a valid zip: {e}"))
+            })?;
         if !map.entry_order.iter().any(|e| e == "xl/vbaProject.bin") {
             return Err(PyValueError::new_err(format!(
                 "vba_archive_path '{vap}' has no xl/vbaProject.bin"
@@ -4152,9 +4919,12 @@ fn build_workbook_from_py(
         }
         let name = opt_str(dict, "name")?.unwrap_or_else(|| "Sheet1".to_string());
 
-        if ["columns", "data", "table", "rows", "rows_iter"].iter().try_fold(false, |found, key| -> PyResult<bool> {
-            Ok(found || dict.get_item(*key)?.is_some_and(|v| !v.is_none()))
-        })? {
+        if ["columns", "data", "table", "rows", "rows_iter"]
+            .iter()
+            .try_fold(false, |found, key| -> PyResult<bool> {
+                Ok(found || dict.get_item(*key)?.is_some_and(|v| !v.is_none()))
+            })?
+        {
             return Err(PyValueError::new_err(
                 "'grid' key is mutually exclusive with rows/rows_iter and columns/data/table",
             ));
@@ -4166,19 +4936,32 @@ fn build_workbook_from_py(
             ));
         }
 
-        // Check eligibility: no styles, merges, CF, DV, freeze_panes attached
-        for key in [
-            "cell_styles",
-            "style_palette",
-            "conditional_formatting",
-            "data_validations",
-            "merged_cells",
-            "freeze_panes",
-        ] {
-            if dict.contains(key)? {
+        // The grid fast path emits only numeric cells. Reject every metadata
+        // key instead of silently dropping it (or leaving orphan parts/names).
+        for (key, value) in dict.iter() {
+            let key: String = key
+                .extract()
+                .map_err(|_| PyValueError::new_err("sheet keys must be strings"))?;
+            if value.is_none() {
+                continue;
+            }
+            if !["name", "grid", "visibility", "state"].contains(&key.as_str()) {
                 return Err(PyValueError::new_err(format!(
                     "'grid' is incompatible with '{key}'; use 'columns' or 'rows' instead"
                 )));
+            }
+        }
+        if let Some(vis) = dict.get_item("visibility")?.or(dict.get_item("state")?) {
+            let value: String = vis.extract()?;
+            let state = SheetState::parse(&value).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "visibility must be visible|hidden|veryHidden; got {value:?}"
+                ))
+            })?;
+            if state != SheetState::Visible {
+                return Err(PyValueError::new_err(
+                    "'grid' cannot write a hidden or veryHidden sheet",
+                ));
             }
         }
 
@@ -4248,10 +5031,28 @@ fn build_workbook_from_py(
             }
         }
         let sheet = parse_sheet_dict(d, &opts)?;
+        for table in &sheet.tables {
+            if table.columns.is_empty() {
+                return Err(PyValueError::new_err(format!(
+                    "table {:?} requires column names in the turbo writer",
+                    table.display_name
+                )));
+            }
+        }
         for (i, table) in sheet.tables.iter().enumerate() {
-            if sheet.tables[..i].iter().chain(wb.sheets.iter().flat_map(|s| s.tables.iter()))
-                .any(|existing| existing.display_name.eq_ignore_ascii_case(&table.display_name)) {
-                return Err(PyValueError::new_err(format!("duplicate table name {:?}", table.display_name)));
+            if sheet.tables[..i]
+                .iter()
+                .chain(wb.sheets.iter().flat_map(|s| s.tables.iter()))
+                .any(|existing| {
+                    existing
+                        .display_name
+                        .eq_ignore_ascii_case(&table.display_name)
+                })
+            {
+                return Err(PyValueError::new_err(format!(
+                    "duplicate table name {:?}",
+                    table.display_name
+                )));
             }
         }
         let existing: Vec<String> = wb.sheets.iter().map(|s| s.name.clone()).collect();
@@ -4261,6 +5062,8 @@ fn build_workbook_from_py(
         }
         wb.sheets.push(sheet);
     }
+
+    validate_workbook_metadata(&wb, active_tab)?;
 
     // Auto-enable STYLES/CF_DV when content requires them
     if wb.needs_style_engine() {
@@ -4357,12 +5160,27 @@ pub fn py_write_excel_turbo(
     recalculate: bool,
     vba_archive_path: Option<&str>,
 ) -> PyResult<()> {
-    let plain = [features, named_styles, props, defined_names, chartsheets, external_links]
-        .iter()
-        .all(|o| o.is_none())
+    let plain = [
+        features,
+        named_styles,
+        props,
+        defined_names,
+        chartsheets,
+        external_links,
+    ]
+    .iter()
+    .all(|o| o.is_none())
         && vba_archive_path.is_none()
         && !(lock_structure || macro_enabled || recalculate);
-    let kw = rowstream::Kw::new(string_mode, emit_cached_values, date1904, date_iso, active_tab, creator, plain);
+    let kw = rowstream::Kw::new(
+        string_mode,
+        emit_cached_values,
+        date1904,
+        date_iso,
+        active_tab,
+        creator,
+        plain,
+    );
     if rowstream::try_write_path(py, sheets, &kw, path)? {
         return Ok(());
     }
@@ -4434,12 +5252,27 @@ pub fn py_write_excel_turbo_stream(
     recalculate: bool,
     vba_archive_path: Option<&str>,
 ) -> PyResult<()> {
-    let plain = [features, named_styles, props, defined_names, chartsheets, external_links]
-        .iter()
-        .all(|o| o.is_none())
+    let plain = [
+        features,
+        named_styles,
+        props,
+        defined_names,
+        chartsheets,
+        external_links,
+    ]
+    .iter()
+    .all(|o| o.is_none())
         && vba_archive_path.is_none()
         && !(lock_structure || macro_enabled || recalculate);
-    let kw = rowstream::Kw::new(string_mode, emit_cached_values, date1904, date_iso, active_tab, creator, plain);
+    let kw = rowstream::Kw::new(
+        string_mode,
+        emit_cached_values,
+        date1904,
+        date_iso,
+        active_tab,
+        creator,
+        plain,
+    );
     if rowstream::try_write_path(py, sheets, &kw, path)? {
         return Ok(());
     }
@@ -4516,12 +5349,27 @@ pub fn py_write_excel_turbo_bytes<'py>(
     recalculate: bool,
     vba_archive_path: Option<&str>,
 ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
-    let plain = [features, named_styles, props, defined_names, chartsheets, external_links]
-        .iter()
-        .all(|o| o.is_none())
+    let plain = [
+        features,
+        named_styles,
+        props,
+        defined_names,
+        chartsheets,
+        external_links,
+    ]
+    .iter()
+    .all(|o| o.is_none())
         && vba_archive_path.is_none()
         && !(lock_structure || macro_enabled || recalculate);
-    let kw = rowstream::Kw::new(string_mode, emit_cached_values, date1904, date_iso, active_tab, creator, plain);
+    let kw = rowstream::Kw::new(
+        string_mode,
+        emit_cached_values,
+        date1904,
+        date_iso,
+        active_tab,
+        creator,
+        plain,
+    );
     if let Some(bytes) = rowstream::try_write_bytes(py, sheets, &kw)? {
         return Ok(pyo3::types::PyBytes::new(py, &bytes));
     }
@@ -4577,7 +5425,8 @@ pub fn py_get_column_letter(col: u32) -> PyResult<String> {
 #[pyfunction(name = "column_index_from_string")]
 pub fn py_column_index_from_string(s: &str) -> PyResult<u32> {
     let trimmed = s.trim();
-    if trimmed.is_empty() || trimmed.len() > 3 || !trimmed.chars().all(|c| c.is_ascii_alphabetic()) {
+    if trimmed.is_empty() || trimmed.len() > 3 || !trimmed.chars().all(|c| c.is_ascii_alphabetic())
+    {
         return Err(PyValueError::new_err(format!(
             "invalid column coordinate string: '{s}'"
         )));
@@ -4631,7 +5480,10 @@ pub fn py_quote_sheetname(name: &str) -> String {
     }
 }
 
-fn original_sheet_locked_for_overlay(ov: &WorkbookOverlay, sheet_name: &str) -> TurboResult<Option<Sheet>> {
+fn original_sheet_locked_for_overlay(
+    ov: &WorkbookOverlay,
+    sheet_name: &str,
+) -> TurboResult<Option<Sheet>> {
     let Some(target) = ov.archive_map.sheet_name_map.get(sheet_name) else {
         return Ok(None);
     };
@@ -4773,7 +5625,10 @@ fn read_cell_py<'py>(
     let data_only = ov.data_only;
     let src = hydrated.and_then(|s| {
         let r = &s.rows[s.rows.binary_search_by(|r| r.row.cmp(&row)).ok()?];
-        r.cells.binary_search_by(|c| c.col.cmp(&col)).ok().map(|i| &r.cells[i])
+        r.cells
+            .binary_search_by(|c| c.col.cmp(&col))
+            .ok()
+            .map(|i| &r.cells[i])
     });
     let modified = ov
         .sheet_overlays
@@ -4786,7 +5641,10 @@ fn read_cell_py<'py>(
         .unwrap_or(&CellValue::Empty);
     let serial = match v {
         CellValue::Number(n) | CellValue::DateSerial(n) => Some(*n),
-        CellValue::Formula { cached: Some(CachedValue::Number(n)), .. } if data_only => Some(*n),
+        CellValue::Formula {
+            cached: Some(CachedValue::Number(n)),
+            ..
+        } if data_only => Some(*n),
         _ => None,
     };
     if let Some(n) = serial {
@@ -4839,7 +5697,14 @@ impl PyCell {
         let hydrated = ov
             .hydrated_sheet(&self.sheet_name)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        read_cell_py(py, &mut ov, &self.sheet_name, hydrated.as_deref(), self.row, self.col)
+        read_cell_py(
+            py,
+            &mut ov,
+            &self.sheet_name,
+            hydrated.as_deref(),
+            self.row,
+            self.col,
+        )
     }
 
     #[setter]
@@ -4858,7 +5723,9 @@ impl PyCell {
 
     #[getter]
     fn font(&self) -> PyFont {
-        let Ok(mut ov) = self.overlay.lock() else { return PyFont::default(); };
+        let Ok(mut ov) = self.overlay.lock() else {
+            return PyFont::default();
+        };
         if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
             if let Some(desc) = so.modified_styles.get(&(self.row, self.col)) {
                 if let Some(ref f) = desc.font {
@@ -4880,8 +5747,14 @@ impl PyCell {
     #[setter]
     fn set_font(&self, val: &Bound<'_, PyAny>) -> PyResult<()> {
         let font_desc = parse_font(val)?;
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov
+            .sheet_overlays
+            .entry(self.sheet_name.clone())
+            .or_default();
         let desc = so.modified_styles.entry((self.row, self.col)).or_default();
         desc.font = Some(font_desc);
         so.is_dirty = true;
@@ -4890,7 +5763,9 @@ impl PyCell {
 
     #[getter]
     fn fill(&self) -> PyPatternFill {
-        let Ok(mut ov) = self.overlay.lock() else { return PyPatternFill::default(); };
+        let Ok(mut ov) = self.overlay.lock() else {
+            return PyPatternFill::default();
+        };
         if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
             if let Some(desc) = so.modified_styles.get(&(self.row, self.col)) {
                 if let Some(ref f) = desc.fill {
@@ -4912,8 +5787,14 @@ impl PyCell {
     #[setter]
     fn set_fill(&self, val: &Bound<'_, PyAny>) -> PyResult<()> {
         let fill_desc = parse_fill(val)?;
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov
+            .sheet_overlays
+            .entry(self.sheet_name.clone())
+            .or_default();
         let desc = so.modified_styles.entry((self.row, self.col)).or_default();
         desc.fill = Some(fill_desc);
         so.is_dirty = true;
@@ -4922,7 +5803,9 @@ impl PyCell {
 
     #[getter]
     fn border(&self) -> PyBorder {
-        let Ok(mut ov) = self.overlay.lock() else { return PyBorder::default(); };
+        let Ok(mut ov) = self.overlay.lock() else {
+            return PyBorder::default();
+        };
         if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
             if let Some(desc) = so.modified_styles.get(&(self.row, self.col)) {
                 if let Some(ref b) = desc.border {
@@ -4944,8 +5827,14 @@ impl PyCell {
     #[setter]
     fn set_border(&self, val: &Bound<'_, PyAny>) -> PyResult<()> {
         let border_desc = parse_border(val)?;
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov
+            .sheet_overlays
+            .entry(self.sheet_name.clone())
+            .or_default();
         let desc = so.modified_styles.entry((self.row, self.col)).or_default();
         desc.border = Some(border_desc);
         so.is_dirty = true;
@@ -4954,7 +5843,9 @@ impl PyCell {
 
     #[getter]
     fn alignment(&self) -> PyAlignment {
-        let Ok(mut ov) = self.overlay.lock() else { return PyAlignment::default(); };
+        let Ok(mut ov) = self.overlay.lock() else {
+            return PyAlignment::default();
+        };
         if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
             if let Some(desc) = so.modified_styles.get(&(self.row, self.col)) {
                 if let Some(ref a) = desc.alignment {
@@ -4976,8 +5867,14 @@ impl PyCell {
     #[setter]
     fn set_alignment(&self, val: &Bound<'_, PyAny>) -> PyResult<()> {
         let align_desc = parse_align(val)?;
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov
+            .sheet_overlays
+            .entry(self.sheet_name.clone())
+            .or_default();
         let desc = so.modified_styles.entry((self.row, self.col)).or_default();
         desc.alignment = Some(align_desc);
         so.is_dirty = true;
@@ -4986,7 +5883,9 @@ impl PyCell {
 
     #[getter]
     fn protection(&self) -> PyProtection {
-        let Ok(mut ov) = self.overlay.lock() else { return PyProtection::default(); };
+        let Ok(mut ov) = self.overlay.lock() else {
+            return PyProtection::default();
+        };
         if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
             if let Some(desc) = so.modified_styles.get(&(self.row, self.col)) {
                 if let Some(ref p) = desc.protection {
@@ -5008,8 +5907,14 @@ impl PyCell {
     #[setter]
     fn set_protection(&self, val: &Bound<'_, PyAny>) -> PyResult<()> {
         let prot_desc = parse_prot(val)?;
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov
+            .sheet_overlays
+            .entry(self.sheet_name.clone())
+            .or_default();
         let desc = so.modified_styles.entry((self.row, self.col)).or_default();
         desc.protection = Some(prot_desc);
         so.is_dirty = true;
@@ -5018,7 +5923,9 @@ impl PyCell {
 
     #[getter]
     fn style(&self) -> Option<String> {
-        let Ok(mut ov) = self.overlay.lock() else { return None; };
+        let Ok(mut ov) = self.overlay.lock() else {
+            return None;
+        };
         if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
             if let Some(desc) = so.modified_styles.get(&(self.row, self.col)) {
                 if let Some(ref ns) = desc.named_style {
@@ -5045,8 +5952,14 @@ impl PyCell {
 
     #[setter]
     fn set_style(&self, name: Option<&str>) -> PyResult<()> {
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov
+            .sheet_overlays
+            .entry(self.sheet_name.clone())
+            .or_default();
         let desc = so.modified_styles.entry((self.row, self.col)).or_default();
         desc.named_style = name.map(|s| s.to_string());
         so.is_dirty = true;
@@ -5057,7 +5970,11 @@ impl PyCell {
     fn offset(&self, row: i64, column: i64) -> PyResult<PyCell> {
         let new_row = self.row as i64 + row;
         let new_col = self.col as i64 + column;
-        if new_row < 1 || new_row > MAX_GRID_ROWS as i64 || new_col < 1 || new_col > MAX_GRID_COLS as i64 {
+        if new_row < 1
+            || new_row > MAX_GRID_ROWS as i64
+            || new_col < 1
+            || new_col > MAX_GRID_COLS as i64
+        {
             return Err(PyValueError::new_err(format!(
                 "offset result ({new_row}, {new_col}) is out of grid (rows 1..={MAX_GRID_ROWS}, cols 1..={MAX_GRID_COLS})"
             )));
@@ -5072,7 +5989,9 @@ impl PyCell {
 
     #[getter]
     fn number_format(&self) -> Option<String> {
-        let Ok(mut ov) = self.overlay.lock() else { return None; };
+        let Ok(mut ov) = self.overlay.lock() else {
+            return None;
+        };
         if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
             if let Some(desc) = so.modified_styles.get(&(self.row, self.col)) {
                 if let Some(ref nf) = desc.num_fmt {
@@ -5097,7 +6016,10 @@ impl PyCell {
             .overlay
             .lock()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let so = ov
+            .sheet_overlays
+            .entry(self.sheet_name.clone())
+            .or_default();
         let desc = so.modified_styles.entry((self.row, self.col)).or_default();
         desc.num_fmt = fmt.map(|s| s.to_string());
         so.is_dirty = true;
@@ -5106,10 +6028,15 @@ impl PyCell {
 
     #[getter]
     fn hyperlink(&self) -> Option<readback::PyHyperlink> {
-        let Ok(mut ov) = self.overlay.lock() else { return None; };
+        let Ok(mut ov) = self.overlay.lock() else {
+            return None;
+        };
         if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
             if let Some(h) = so.hyperlinks.get(&(self.row, self.col)) {
-                return Some(readback::PyHyperlink::from_target(self.coordinate(), h.clone()));
+                return Some(readback::PyHyperlink::from_target(
+                    self.coordinate(),
+                    h.clone(),
+                ));
             }
         }
         let extras = readback::sheet_extras(&mut ov, &self.sheet_name)?;
@@ -5126,8 +6053,14 @@ impl PyCell {
             },
             None => None,
         };
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov
+            .sheet_overlays
+            .entry(self.sheet_name.clone())
+            .or_default();
         if let Some(l) = link {
             so.hyperlinks.insert((self.row, self.col), l);
         } else {
@@ -5139,15 +6072,23 @@ impl PyCell {
 
     #[getter]
     fn comment(&self) -> Option<PyComment> {
-        let Ok(mut ov) = self.overlay.lock() else { return None; };
+        let Ok(mut ov) = self.overlay.lock() else {
+            return None;
+        };
         if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
             if let Some((text, author)) = so.comments.get(&(self.row, self.col)) {
-                return Some(PyComment { text: text.clone(), author: author.clone() });
+                return Some(PyComment {
+                    text: text.clone(),
+                    author: author.clone(),
+                });
             }
         }
         let extras = readback::sheet_extras(&mut ov, &self.sheet_name)?;
         let (text, author) = extras.comments.get(&(self.row, self.col))?;
-        Some(PyComment { text: text.clone(), author: author.clone() })
+        Some(PyComment {
+            text: text.clone(),
+            author: author.clone(),
+        })
     }
 
     #[setter]
@@ -5158,16 +6099,28 @@ impl PyCell {
             let b = c.borrow();
             (b.text.clone(), b.author.clone())
         } else if comment.is_none() {
-            let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+            let mut ov = self
+                .overlay
+                .lock()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let so = ov
+                .sheet_overlays
+                .entry(self.sheet_name.clone())
+                .or_default();
             so.comments.remove(&(self.row, self.col));
             so.is_dirty = true;
             return Ok(());
         } else {
             return Err(PyTypeError::new_err("comment must be str or Comment"));
         };
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov
+            .sheet_overlays
+            .entry(self.sheet_name.clone())
+            .or_default();
         so.comments.insert((self.row, self.col), (text, author));
         so.is_dirty = true;
         Ok(())
@@ -5201,19 +6154,27 @@ impl PySheetRowIter {
         let current = self.cursor;
         self.cursor += 1;
 
-        let mut ov = self.overlay.lock().map_err(|e| {
-            PyValueError::new_err(format!("lock error: {e}"))
-        })?;
-        let hydrated = ov.hydrated_sheet(&self.sheet_name).map_err(|e| {
-            PyValueError::new_err(format!("hydration error: {e}"))
-        })?;
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(format!("lock error: {e}")))?;
+        let hydrated = ov
+            .hydrated_sheet(&self.sheet_name)
+            .map_err(|e| PyValueError::new_err(format!("hydration error: {e}")))?;
 
         if !self.col_major {
             let row = current;
             let mut items = Vec::with_capacity((self.c2.saturating_sub(self.c1) + 1) as usize);
             for col in self.c1..=self.c2 {
                 if self.values_only {
-                    items.push(read_cell_py(py, &mut ov, &self.sheet_name, hydrated.as_deref(), row, col)?);
+                    items.push(read_cell_py(
+                        py,
+                        &mut ov,
+                        &self.sheet_name,
+                        hydrated.as_deref(),
+                        row,
+                        col,
+                    )?);
                 } else {
                     let cell = PyCell {
                         sheet_name: self.sheet_name.clone(),
@@ -5232,7 +6193,14 @@ impl PySheetRowIter {
             let mut items = Vec::with_capacity((self.r2.saturating_sub(self.r1) + 1) as usize);
             for row in self.r1..=self.r2 {
                 if self.values_only {
-                    items.push(read_cell_py(py, &mut ov, &self.sheet_name, hydrated.as_deref(), row, col)?);
+                    items.push(read_cell_py(
+                        py,
+                        &mut ov,
+                        &self.sheet_name,
+                        hydrated.as_deref(),
+                        row,
+                        col,
+                    )?);
                 } else {
                     let cell = PyCell {
                         sheet_name: self.sheet_name.clone(),
@@ -5271,9 +6239,13 @@ impl PyEditableSheet {
             .lock()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let existing = ov.sheet_names();
-        let other_names: Vec<String> = existing.into_iter().filter(|n| n != &self.sheet_name).collect();
+        let other_names: Vec<String> = existing
+            .into_iter()
+            .filter(|n| n != &self.sheet_name)
+            .collect();
         validate_sheet_name(new_title, &other_names).map_err(turbo_err_to_py)?;
-        ov.rename_sheet(&self.sheet_name, new_title).map_err(turbo_err_to_py)?;
+        ov.rename_sheet(&self.sheet_name, new_title)
+            .map_err(turbo_err_to_py)?;
         self.sheet_name = new_title.to_string();
         Ok(())
     }
@@ -5281,7 +6253,9 @@ impl PyEditableSheet {
     // ---- workbook-level sheet settings (logic: turbo/overlay_workbook.rs) ----
     #[getter]
     fn print_area(&self) -> PyResult<Option<String>> {
-        crate::turbo::overlay_workbook::py::with(&self.overlay, |ov| ov.print_area(&self.sheet_name))
+        crate::turbo::overlay_workbook::py::with(&self.overlay, |ov| {
+            ov.print_area(&self.sheet_name)
+        })
     }
     #[setter]
     fn set_print_area(&self, val: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
@@ -5292,7 +6266,9 @@ impl PyEditableSheet {
     }
     #[getter]
     fn print_title_rows(&self) -> PyResult<Option<String>> {
-        crate::turbo::overlay_workbook::py::with(&self.overlay, |ov| Ok(ov.print_titles(&self.sheet_name)?.0))
+        crate::turbo::overlay_workbook::py::with(&self.overlay, |ov| {
+            Ok(ov.print_titles(&self.sheet_name)?.0)
+        })
     }
     #[setter]
     fn set_print_title_rows(&self, val: Option<String>) -> PyResult<()> {
@@ -5302,7 +6278,9 @@ impl PyEditableSheet {
     }
     #[getter]
     fn print_title_cols(&self) -> PyResult<Option<String>> {
-        crate::turbo::overlay_workbook::py::with(&self.overlay, |ov| Ok(ov.print_titles(&self.sheet_name)?.1))
+        crate::turbo::overlay_workbook::py::with(&self.overlay, |ov| {
+            Ok(ov.print_titles(&self.sheet_name)?.1)
+        })
     }
     #[setter]
     fn set_print_title_cols(&self, val: Option<String>) -> PyResult<()> {
@@ -5312,11 +6290,15 @@ impl PyEditableSheet {
     }
     #[getter]
     fn sheet_state(&self) -> PyResult<String> {
-        crate::turbo::overlay_workbook::py::with(&self.overlay, |ov| ov.sheet_state(&self.sheet_name))
+        crate::turbo::overlay_workbook::py::with(&self.overlay, |ov| {
+            ov.sheet_state(&self.sheet_name)
+        })
     }
     #[setter]
     fn set_sheet_state(&self, val: &str) -> PyResult<()> {
-        crate::turbo::overlay_workbook::py::with(&self.overlay, |ov| ov.set_sheet_state(&self.sheet_name, val))
+        crate::turbo::overlay_workbook::py::with(&self.overlay, |ov| {
+            ov.set_sheet_state(&self.sheet_name, val)
+        })
     }
     // ---- end workbook-level sheet settings ----
 
@@ -5368,7 +6350,11 @@ impl PyEditableSheet {
             Some(r) => r,
             None => {
                 let (min_r, max_r, _, _) = self.compute_bounds_raw()?;
-                if min_r == u32::MAX { 1 } else { max_r + 1 }
+                if min_r == u32::MAX {
+                    1
+                } else {
+                    max_r + 1
+                }
             }
         };
         let items: Vec<Bound<'_, PyAny>> = if let Ok(it) = iterable.try_iter() {
@@ -5388,7 +6374,14 @@ impl PyEditableSheet {
         let mut wrote_value = false;
         for (i, item) in items.iter().enumerate() {
             let col = (i + 1) as u32;
-            write_editable(&mut ov, &self.sheet_name, append_row, col, item, Some(&mut style_work))?;
+            write_editable(
+                &mut ov,
+                &self.sheet_name,
+                append_row,
+                col,
+                item,
+                Some(&mut style_work),
+            )?;
             wrote_value |= ov
                 .sheet_overlays
                 .get(&self.sheet_name)
@@ -5397,7 +6390,11 @@ impl PyEditableSheet {
         }
         // Same next-row rule as `compute_bounds_raw`: an all-empty row does not advance.
         if let Some(so) = ov.sheet_overlays.get_mut(&self.sheet_name) {
-            let next = if wrote_value { append_row + 1 } else { append_row };
+            let next = if wrote_value {
+                append_row + 1
+            } else {
+                append_row
+            };
             so.append_hint = Some((next, so.modified_cells.len(), so.ops.len()));
         }
         Ok(())
@@ -5416,7 +6413,14 @@ impl PyEditableSheet {
                 .overlay
                 .lock()
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            write_editable(&mut ov, &self.sheet_name, row, column, v, Some(&mut style_work))?;
+            write_editable(
+                &mut ov,
+                &self.sheet_name,
+                row,
+                column,
+                v,
+                Some(&mut style_work),
+            )?;
         }
         Ok(PyCell {
             sheet_name: self.sheet_name.clone(),
@@ -5429,17 +6433,17 @@ impl PyEditableSheet {
     #[pyo3(signature = (min_row = None, max_row = None, min_col = None, max_col = None, values_only = false))]
     fn iter_rows(
         &self,
-        min_row: Option<u32>,
-        max_row: Option<u32>,
-        min_col: Option<u32>,
-        max_col: Option<u32>,
+        min_row: Option<i64>,
+        max_row: Option<i64>,
+        min_col: Option<i64>,
+        max_col: Option<i64>,
         values_only: bool,
     ) -> PyResult<PySheetRowIter> {
         let (b_min_r, b_max_r, b_min_c, b_max_c) = self.compute_bounds()?;
-        let r1 = min_row.unwrap_or(b_min_r.max(1));
-        let r2 = max_row.unwrap_or(b_max_r.max(r1));
-        let c1 = min_col.unwrap_or(b_min_c.max(1));
-        let c2 = max_col.unwrap_or(b_max_c.max(c1));
+        let r1 = resolve_iter_bound(min_row, b_min_r.max(1), MAX_GRID_ROWS, "min_row")?;
+        let r2 = resolve_iter_bound(max_row, b_max_r.max(r1), MAX_GRID_ROWS, "max_row")?.max(r1);
+        let c1 = resolve_iter_bound(min_col, b_min_c.max(1), MAX_GRID_COLS, "min_col")?;
+        let c2 = resolve_iter_bound(max_col, b_max_c.max(c1), MAX_GRID_COLS, "max_col")?.max(c1);
         Ok(PySheetRowIter {
             sheet_name: self.sheet_name.clone(),
             overlay: Arc::clone(&self.overlay),
@@ -5456,17 +6460,17 @@ impl PyEditableSheet {
     #[pyo3(signature = (min_row = None, max_row = None, min_col = None, max_col = None, values_only = false))]
     fn iter_cols(
         &self,
-        min_row: Option<u32>,
-        max_row: Option<u32>,
-        min_col: Option<u32>,
-        max_col: Option<u32>,
+        min_row: Option<i64>,
+        max_row: Option<i64>,
+        min_col: Option<i64>,
+        max_col: Option<i64>,
         values_only: bool,
     ) -> PyResult<PySheetRowIter> {
         let (b_min_r, b_max_r, b_min_c, b_max_c) = self.compute_bounds()?;
-        let r1 = min_row.unwrap_or(b_min_r.max(1));
-        let r2 = max_row.unwrap_or(b_max_r.max(r1));
-        let c1 = min_col.unwrap_or(b_min_c.max(1));
-        let c2 = max_col.unwrap_or(b_max_c.max(c1));
+        let r1 = resolve_iter_bound(min_row, b_min_r.max(1), MAX_GRID_ROWS, "min_row")?;
+        let r2 = resolve_iter_bound(max_row, b_max_r.max(r1), MAX_GRID_ROWS, "max_row")?.max(r1);
+        let c1 = resolve_iter_bound(min_col, b_min_c.max(1), MAX_GRID_COLS, "min_col")?;
+        let c2 = resolve_iter_bound(max_col, b_max_c.max(c1), MAX_GRID_COLS, "max_col")?.max(c1);
         Ok(PySheetRowIter {
             sheet_name: self.sheet_name.clone(),
             overlay: Arc::clone(&self.overlay),
@@ -5510,41 +6514,25 @@ impl PyEditableSheet {
 
     #[pyo3(name = "insert_rows", signature = (idx, amount = 1))]
     fn py_insert_rows(&self, idx: u32, amount: u32) -> PyResult<()> {
-        if idx == 0 {
-            return Err(PyValueError::new_err(
-                "insert_rows: idx is 1-based and must be >= 1",
-            ));
-        }
+        validate_structural_index("insert_rows", idx, amount, MAX_GRID_ROWS, true)?;
         self.record(|ov| ov.insert_rows(&self.sheet_name, idx, amount))
     }
 
     #[pyo3(name = "delete_rows", signature = (idx, amount = 1))]
     fn py_delete_rows(&self, idx: u32, amount: u32) -> PyResult<()> {
-        if idx == 0 {
-            return Err(PyValueError::new_err(
-                "delete_rows: idx is 1-based and must be >= 1",
-            ));
-        }
+        validate_structural_index("delete_rows", idx, amount, MAX_GRID_ROWS, false)?;
         self.record(|ov| ov.delete_rows(&self.sheet_name, idx, amount))
     }
 
     #[pyo3(name = "insert_cols", signature = (idx, amount = 1))]
     fn py_insert_cols(&self, idx: u32, amount: u32) -> PyResult<()> {
-        if idx == 0 {
-            return Err(PyValueError::new_err(
-                "insert_cols: idx is 1-based and must be >= 1",
-            ));
-        }
+        validate_structural_index("insert_cols", idx, amount, MAX_GRID_COLS, true)?;
         self.record(|ov| ov.insert_cols(&self.sheet_name, idx, amount))
     }
 
     #[pyo3(name = "delete_cols", signature = (idx, amount = 1))]
     fn py_delete_cols(&self, idx: u32, amount: u32) -> PyResult<()> {
-        if idx == 0 {
-            return Err(PyValueError::new_err(
-                "delete_cols: idx is 1-based and must be >= 1",
-            ));
-        }
+        validate_structural_index("delete_cols", idx, amount, MAX_GRID_COLS, false)?;
         self.record(|ov| ov.delete_cols(&self.sheet_name, idx, amount))
     }
 
@@ -5612,16 +6600,26 @@ impl PyEditableSheet {
     ) -> PyResult<()> {
         let (r1, c1, r2, c2) = if let Some(s) = range_string {
             let Some((a, b, c, d)) = parse_ref_range_strict(s.as_bytes()) else {
-                return Err(PyValueError::new_err(format!("invalid merge range string '{s}'")));
+                return Err(PyValueError::new_err(format!(
+                    "invalid merge range string '{s}'"
+                )));
             };
             (a, b, c, d)
-        } else if let (Some(r1), Some(c1), Some(r2), Some(c2)) = (start_row, start_column, end_row, end_column) {
+        } else if let (Some(r1), Some(c1), Some(r2), Some(c2)) =
+            (start_row, start_column, end_row, end_column)
+        {
             (r1, c1, r2, c2)
         } else {
-            return Err(PyValueError::new_err("merge_cells requires either range_string or start_row/start_column/end_row/end_column"));
+            return Err(PyValueError::new_err(
+                "merge_cells requires either range_string or start_row/start_column/end_row/end_column",
+            ));
         };
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
-        ov.merge_cells(&self.sheet_name, r1, c1, r2, c2).map_err(turbo_err_to_py)?;
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        ov.merge_cells(&self.sheet_name, r1, c1, r2, c2)
+            .map_err(turbo_err_to_py)?;
         Ok(())
     }
 
@@ -5636,22 +6634,34 @@ impl PyEditableSheet {
     ) -> PyResult<()> {
         let (r1, c1, r2, c2) = if let Some(s) = range_string {
             let Some((a, b, c, d)) = parse_ref_range_strict(s.as_bytes()) else {
-                return Err(PyValueError::new_err(format!("invalid unmerge range string '{s}'")));
+                return Err(PyValueError::new_err(format!(
+                    "invalid unmerge range string '{s}'"
+                )));
             };
             (a, b, c, d)
-        } else if let (Some(r1), Some(c1), Some(r2), Some(c2)) = (start_row, start_column, end_row, end_column) {
+        } else if let (Some(r1), Some(c1), Some(r2), Some(c2)) =
+            (start_row, start_column, end_row, end_column)
+        {
             (r1, c1, r2, c2)
         } else {
-            return Err(PyValueError::new_err("unmerge_cells requires either range_string or start_row/start_column/end_row/end_column"));
+            return Err(PyValueError::new_err(
+                "unmerge_cells requires either range_string or start_row/start_column/end_row/end_column",
+            ));
         };
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
-        ov.unmerge_cells(&self.sheet_name, r1, c1, r2, c2).map_err(turbo_err_to_py)?;
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        ov.unmerge_cells(&self.sheet_name, r1, c1, r2, c2)
+            .map_err(turbo_err_to_py)?;
         Ok(())
     }
 
     #[getter]
     fn freeze_panes(&self) -> Option<String> {
-        let Ok(ov) = self.overlay.lock() else { return None; };
+        let Ok(ov) = self.overlay.lock() else {
+            return None;
+        };
         crate::turbo::overlay_layout::freeze_panes(&ov, &self.sheet_name)
     }
 
@@ -5690,8 +6700,14 @@ impl PyEditableSheet {
 
     #[setter]
     fn set_freeze_panes(&self, val: Option<&str>) -> PyResult<()> {
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov
+            .sheet_overlays
+            .entry(self.sheet_name.clone())
+            .or_default();
         so.freeze_panes = val.map(|s| s.to_string());
         so.is_dirty = true;
         Ok(())
@@ -5699,14 +6715,24 @@ impl PyEditableSheet {
 
     #[getter]
     fn tab_color(&self) -> Option<String> {
-        let Ok(ov) = self.overlay.lock() else { return None; };
-        ov.sheet_overlays.get(&self.sheet_name).and_then(|so| so.tab_color.clone())
+        let Ok(ov) = self.overlay.lock() else {
+            return None;
+        };
+        ov.sheet_overlays
+            .get(&self.sheet_name)
+            .and_then(|so| so.tab_color.clone())
     }
 
     #[setter]
     fn set_tab_color(&self, val: Option<&str>) -> PyResult<()> {
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov
+            .sheet_overlays
+            .entry(self.sheet_name.clone())
+            .or_default();
         so.tab_color = val.map(|s| s.to_string());
         so.is_dirty = true;
         Ok(())
@@ -5723,8 +6749,14 @@ impl PyEditableSheet {
 
     #[setter]
     fn set_auto_filter(&self, val: Option<&str>) -> PyResult<()> {
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov
+            .sheet_overlays
+            .entry(self.sheet_name.clone())
+            .or_default();
         so.auto_filter = val.map(|s| s.to_string());
         so.is_dirty = true;
         Ok(())
@@ -5732,7 +6764,10 @@ impl PyEditableSheet {
 
     #[getter]
     fn protection<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
             if let Some(ref p) = so.protection {
                 let d = PyDict::new(py);
@@ -5758,7 +6793,9 @@ impl PyEditableSheet {
                 if v.is_none() {
                     None
                 } else {
-                    let d = v.cast::<PyDict>().map_err(|_| PyValueError::new_err("protection must be a dict"))?;
+                    let d = v
+                        .cast::<PyDict>()
+                        .map_err(|_| PyValueError::new_err("protection must be a dict"))?;
                     let sheet = opt_bool(d, "sheet")?.unwrap_or(true);
                     let password = opt_str(d, "password")?;
                     Some(crate::turbo::write::model::SheetProtection {
@@ -5770,8 +6807,14 @@ impl PyEditableSheet {
             }
             None => None,
         };
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov
+            .sheet_overlays
+            .entry(self.sheet_name.clone())
+            .or_default();
         so.protection = prot;
         so.is_dirty = true;
         Ok(())
@@ -5779,7 +6822,10 @@ impl PyEditableSheet {
 
     #[getter]
     fn page_setup<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
             if let Some(ref ps) = so.page_setup {
                 let d = PyDict::new(py);
@@ -5838,8 +6884,14 @@ impl PyEditableSheet {
             }
             None => None,
         };
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov
+            .sheet_overlays
+            .entry(self.sheet_name.clone())
+            .or_default();
         so.page_setup = ps;
         so.is_dirty = true;
         Ok(())
@@ -5848,7 +6900,12 @@ impl PyEditableSheet {
     /// openpyxl `ws.add_chart(chart, "F2")` (kyrax.chart objects).
     #[pyo3(signature = (chart, anchor = None))]
     fn add_chart(&self, chart: &Bound<'_, PyAny>, anchor: Option<&str>) -> PyResult<()> {
-        crate::turbo::overlay_drawings::py::add_chart(&self.overlay, &self.sheet_name, chart, anchor)
+        crate::turbo::overlay_drawings::py::add_chart(
+            &self.overlay,
+            &self.sheet_name,
+            chart,
+            anchor,
+        )
     }
 
     /// openpyxl `ws.add_image(img, "E5")` (kyrax.drawing.image.Image).
@@ -5859,7 +6916,10 @@ impl PyEditableSheet {
 
     #[getter]
     fn data_validations<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let mut list_to_convert: Option<Vec<crate::turbo::write::DataValidation>> = None;
         if let Some(so) = ov.sheet_overlays.get(&self.sheet_name) {
             if !so.data_validations.is_empty() {
@@ -5928,8 +6988,14 @@ impl PyEditableSheet {
             }
             None => Vec::new(),
         };
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let so = ov.sheet_overlays.entry(self.sheet_name.clone()).or_default();
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let so = ov
+            .sheet_overlays
+            .entry(self.sheet_name.clone())
+            .or_default();
         so.data_validations = dvs;
         so.is_dirty = true;
         Ok(())
@@ -5954,9 +7020,14 @@ impl PyEditableSheet {
         let mut idx = 0;
         {
             let this = slf.borrow();
-            let mut ov = this.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let mut ov = this
+                .overlay
+                .lock()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
             for v in parsed {
-                idx = ov.add_data_validation(&this.sheet_name, v).map_err(turbo_err_to_py)?;
+                idx = ov
+                    .add_data_validation(&this.sheet_name, v)
+                    .map_err(turbo_err_to_py)?;
             }
         }
         if dv.hasattr("_kx_bound")? {
@@ -5969,7 +7040,10 @@ impl PyEditableSheet {
     fn _kx_set_data_validation(&self, idx: usize, dv: &Bound<'_, PyAny>) -> PyResult<()> {
         let spec = crate::turbo::overlay_cf_tables::py::spec_of(dv)?;
         let parsed = parse_data_validations(PyList::new(dv.py(), [spec])?.as_any())?;
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         for v in parsed {
             ov.set_data_validation(&self.sheet_name, idx, v);
         }
@@ -5980,7 +7054,10 @@ impl PyEditableSheet {
     fn add_table(&self, table: &Bound<'_, PyAny>) -> PyResult<()> {
         let spec = crate::turbo::overlay_cf_tables::py::spec_of(table)?;
         let parsed = parse_tables(PyList::new(table.py(), [spec])?.as_any())?;
-        let mut ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         for t in parsed {
             ov.add_table(&self.sheet_name, t).map_err(turbo_err_to_py)?;
         }
@@ -5991,7 +7068,10 @@ impl PyEditableSheet {
     /// `ws.tables` is dict-like keyed by name).
     #[getter]
     fn tables<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let ov = self.overlay.lock().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ov = self
+            .overlay
+            .lock()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let d = PyDict::new(py);
         for (name, r) in ov.sheet_tables(&self.sheet_name).map_err(turbo_err_to_py)? {
             d.set_item(name, r)?;
@@ -5999,7 +7079,11 @@ impl PyEditableSheet {
         Ok(d)
     }
 
-    fn __getitem__<'py>(&self, py: Python<'py>, key: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    fn __getitem__<'py>(
+        &self,
+        py: Python<'py>,
+        key: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         use pyo3::types::PySlice;
         use pyo3::IntoPyObjectExt;
         let (r1, c1, r2, c2) = parse_sheet_key_bounds(key)?;
@@ -6075,7 +7159,9 @@ fn parse_sheet_key_bounds(key: &Bound<'_, PyAny>) -> PyResult<(u32, u32, u32, u3
         if !step_obj.is_none() {
             if let Ok(step_val) = step_obj.extract::<isize>() {
                 if step_val != 1 {
-                    return Err(PyValueError::new_err("slice step != 1 is not supported in sheet indexing"));
+                    return Err(PyValueError::new_err(
+                        "slice step != 1 is not supported in sheet indexing",
+                    ));
                 }
             }
         }
@@ -6088,10 +7174,14 @@ fn parse_sheet_key_bounds(key: &Bound<'_, PyAny>) -> PyResult<(u32, u32, u32, u3
             PyValueError::new_err("slice stop must be a cell coordinate string (e.g. 'C5')")
         })?;
         let Some((r1, c1, _, _)) = parse_ref_range_strict(start_str.as_bytes()) else {
-            return Err(PyValueError::new_err(format!("invalid slice start '{start_str}'")));
+            return Err(PyValueError::new_err(format!(
+                "invalid slice start '{start_str}'"
+            )));
         };
         let Some((_, _, r2, c2)) = parse_ref_range_strict(stop_str.as_bytes()) else {
-            return Err(PyValueError::new_err(format!("invalid slice stop '{stop_str}'")));
+            return Err(PyValueError::new_err(format!(
+                "invalid slice stop '{stop_str}'"
+            )));
         };
         return Ok((r1, c1, r2, c2));
     }
@@ -6103,7 +7193,9 @@ fn parse_sheet_key_bounds(key: &Bound<'_, PyAny>) -> PyResult<(u32, u32, u32, u3
         };
         return Ok((r1, c1, r2, c2));
     }
-    Err(PyTypeError::new_err("sheet key must be a coordinate string or slice"))
+    Err(PyTypeError::new_err(
+        "sheet key must be a coordinate string or slice",
+    ))
 }
 
 impl PyEditableSheet {
@@ -6213,7 +7305,11 @@ impl PyEditableSheet {
 }
 
 /// Convert a `CellValue` to the Python scalar returned by `ws[key]`.
-fn cell_value_to_py<'py>(py: Python<'py>, v: &CellValue, data_only: bool) -> PyResult<Bound<'py, PyAny>> {
+fn cell_value_to_py<'py>(
+    py: Python<'py>,
+    v: &CellValue,
+    data_only: bool,
+) -> PyResult<Bound<'py, PyAny>> {
     use pyo3::IntoPyObjectExt;
     Ok(match v {
         CellValue::Empty => py.None().into_bound(py),
@@ -6386,7 +7482,8 @@ impl PyEditableWorkbook {
                     names.len()
                 )));
             }
-            self.active_idx.store(idx, std::sync::atomic::Ordering::Relaxed);
+            self.active_idx
+                .store(idx, std::sync::atomic::Ordering::Relaxed);
             return Ok(());
         }
         let target_name = if let Ok(s) = target.extract::<String>() {
@@ -6394,10 +7491,13 @@ impl PyEditableWorkbook {
         } else if let Ok(ws) = target.cast::<PyEditableSheet>() {
             ws.borrow().sheet_name.clone()
         } else {
-            return Err(PyTypeError::new_err("active sheet must be integer index, sheet name, or EditableSheet"));
+            return Err(PyTypeError::new_err(
+                "active sheet must be integer index, sheet name, or EditableSheet",
+            ));
         };
         if let Some(pos) = names.iter().position(|n| n == &target_name) {
-            self.active_idx.store(pos, std::sync::atomic::Ordering::Relaxed);
+            self.active_idx
+                .store(pos, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         } else {
             Err(pyo3::exceptions::PyKeyError::new_err(format!(
@@ -6429,7 +7529,8 @@ impl PyEditableWorkbook {
                 }
             }
         };
-        ov.create_sheet(&final_title, index).map_err(turbo_err_to_py)?;
+        ov.create_sheet(&final_title, index)
+            .map_err(turbo_err_to_py)?;
         Ok(PyEditableSheet {
             sheet_name: final_title,
             overlay: Arc::clone(&self.overlay),
@@ -6443,7 +7544,9 @@ impl PyEditableWorkbook {
         } else if let Ok(ws) = worksheet_or_name.cast::<PyEditableSheet>() {
             ws.borrow().sheet_name.clone()
         } else {
-            return Err(PyTypeError::new_err("remove expects sheet name or EditableSheet"));
+            return Err(PyTypeError::new_err(
+                "remove expects sheet name or EditableSheet",
+            ));
         };
         let mut ov = self
             .overlay
@@ -6456,7 +7559,9 @@ impl PyEditableWorkbook {
             )));
         }
         if names.len() <= 1 {
-            return Err(PyValueError::new_err("cannot remove the only worksheet in workbook"));
+            return Err(PyValueError::new_err(
+                "cannot remove the only worksheet in workbook",
+            ));
         }
         ov.delete_sheet(&name).map_err(turbo_err_to_py)?;
         Ok(())
@@ -6474,7 +7579,9 @@ impl PyEditableWorkbook {
             )));
         }
         if names.len() <= 1 {
-            return Err(PyValueError::new_err("cannot remove the only worksheet in workbook"));
+            return Err(PyValueError::new_err(
+                "cannot remove the only worksheet in workbook",
+            ));
         }
         ov.delete_sheet(sheet_name).map_err(turbo_err_to_py)?;
         Ok(())
@@ -6486,7 +7593,9 @@ impl PyEditableWorkbook {
         } else if let Ok(ws) = source.cast::<PyEditableSheet>() {
             ws.borrow().sheet_name.clone()
         } else {
-            return Err(PyTypeError::new_err("copy_worksheet expects sheet name or EditableSheet"));
+            return Err(PyTypeError::new_err(
+                "copy_worksheet expects sheet name or EditableSheet",
+            ));
         };
         let mut ov = self
             .overlay
@@ -6516,17 +7625,22 @@ impl PyEditableWorkbook {
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let src_overlay = ov.sheet_overlays.get(&src_name).cloned();
 
-        ov.create_sheet(&copy_title, None).map_err(turbo_err_to_py)?;
+        ov.create_sheet(&copy_title, None)
+            .map_err(turbo_err_to_py)?;
 
         let dest_overlay = ov.sheet_overlays.entry(copy_title.clone()).or_default();
         if let Some(sheet) = orig {
             for row in sheet.rows {
                 for cell in row.cells {
                     if !matches!(cell.value, CellValue::Empty) {
-                        dest_overlay.modified_cells.insert((row.row, cell.col), cell.value);
+                        dest_overlay
+                            .modified_cells
+                            .insert((row.row, cell.col), cell.value);
                     }
                     if let Some(desc) = cell.style_desc {
-                        dest_overlay.modified_styles.insert((row.row, cell.col), *desc);
+                        dest_overlay
+                            .modified_styles
+                            .insert((row.row, cell.col), *desc);
                     }
                 }
             }
@@ -6557,7 +7671,9 @@ impl PyEditableWorkbook {
         } else if let Ok(ws) = worksheet_or_name.cast::<PyEditableSheet>() {
             ws.borrow().sheet_name.clone()
         } else {
-            return Err(PyTypeError::new_err("move_sheet expects sheet name or EditableSheet"));
+            return Err(PyTypeError::new_err(
+                "move_sheet expects sheet name or EditableSheet",
+            ));
         };
         let mut ov = self
             .overlay
@@ -6600,10 +7716,15 @@ impl PyEditableWorkbook {
     // ---- workbook-level conveniences (logic: turbo/overlay_workbook.rs) ----
     #[getter]
     fn defined_names(&self) -> crate::turbo::overlay_workbook::py::PyDefinedNameDict {
-        crate::turbo::overlay_workbook::py::PyDefinedNameDict { overlay: Arc::clone(&self.overlay) }
+        crate::turbo::overlay_workbook::py::PyDefinedNameDict {
+            overlay: Arc::clone(&self.overlay),
+        }
     }
     #[getter]
-    fn properties(&self, py: Python<'_>) -> PyResult<crate::turbo::overlay_workbook::py::PyDocumentProperties> {
+    fn properties(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<crate::turbo::overlay_workbook::py::PyDocumentProperties> {
         crate::turbo::overlay_workbook::py::document_properties(py, &self.overlay)
     }
     fn get_sheet_by_name(&self, name: &str) -> PyResult<PyEditableSheet> {
@@ -6641,7 +7762,10 @@ impl PyEditableWorkbook {
     fn save(&self, py: Python<'_>, target: &Bound<'_, PyAny>) -> PyResult<()> {
         let is_path = if let Ok(path) = target.extract::<String>() {
             Some(path)
-        } else if let Ok(path) = target.call_method0("__fspath__").and_then(|f| f.extract::<String>()) {
+        } else if let Ok(path) = target
+            .call_method0("__fspath__")
+            .and_then(|f| f.extract::<String>())
+        {
             Some(path)
         } else {
             None
@@ -6695,7 +7819,10 @@ pub fn py_edit_excel(py: Python<'_>, path: &str, data_only: bool) -> PyResult<Py
 /// `edit_excel` over in-memory xlsx bytes (`load_workbook(BytesIO)`).
 #[pyfunction(name = "edit_excel_bytes")]
 #[pyo3(signature = (data, data_only=false))]
-pub fn py_edit_excel_bytes(data: &Bound<'_, PyBytes>, data_only: bool) -> PyResult<PyEditableWorkbook> {
+pub fn py_edit_excel_bytes(
+    data: &Bound<'_, PyBytes>,
+    data_only: bool,
+) -> PyResult<PyEditableWorkbook> {
     let archive_map =
         ArchiveMap::parse(Arc::new(data.as_bytes().to_vec())).map_err(turbo_err_to_py)?;
     let mut overlay = WorkbookOverlay::new(archive_map);

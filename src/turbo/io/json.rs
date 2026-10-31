@@ -80,8 +80,8 @@ use arrow_array::{
 };
 
 use crate::turbo::error::{TurboError, TurboResult};
-use crate::turbo::write::{Cell, CellValue, Row, Sheet, Workbook, save_workbook};
-use crate::turbo::{Features, StyleTable, TurboSheet, list_sheet_names, read_workbook_turbo_sheet};
+use crate::turbo::write::{save_workbook, Cell, CellValue, Row, Sheet, Workbook};
+use crate::turbo::{list_sheet_names, read_workbook_turbo_sheet, Features, StyleTable, TurboSheet};
 
 // ----------------------------------------------------------------------------
 // Public surface
@@ -1095,6 +1095,11 @@ fn parse_object_keys(b: &[u8], i: usize) -> Result<(usize, Vec<String>), JsonErr
             });
         }
         let (n, key) = parse_string(b, j)?;
+        if keys.iter().any(|existing| existing == &key) {
+            return Err(JsonErr::Format(format!(
+                "duplicate JSON object key {key:?}"
+            )));
+        }
         keys.push(key);
         j += n;
         j = skip_ws(b, j);
@@ -1165,6 +1170,11 @@ fn parse_object_full(b: &[u8], i: usize) -> Result<(usize, Vec<(String, JVal)>),
             return Err(JsonErr::NeedMore);
         }
         let (n, val) = parse_value(b, j)?;
+        if out.iter().any(|(existing, _)| existing == &key) {
+            return Err(JsonErr::Format(format!(
+                "duplicate JSON object key {key:?}"
+            )));
+        }
         out.push((key, val));
         j += n;
         j = skip_ws(b, j);
@@ -1306,7 +1316,11 @@ fn skip_ws_in_reader<R: Read>(r: &mut ChunkReader<R>) -> TurboResult<()> {
         let n = {
             let s = r.slice();
             let i = skip_ws(s, 0);
-            if i < s.len() { Some(i) } else { None }
+            if i < s.len() {
+                Some(i)
+            } else {
+                None
+            }
         };
         match n {
             Some(i) => {
@@ -1318,6 +1332,29 @@ fn skip_ws_in_reader<R: Read>(r: &mut ChunkReader<R>) -> TurboResult<()> {
                     return Err(truncated());
                 }
             }
+        }
+    }
+}
+
+/// Skip trailing whitespace and require EOF. Used after a complete top-level
+/// JSON document so `[{"a":1}] trailing` is rejected instead of silently
+/// ignoring the remainder.
+fn require_eof<R: Read>(r: &mut ChunkReader<R>) -> TurboResult<()> {
+    loop {
+        let ws = {
+            let s = r.slice();
+            skip_ws(s, 0)
+        };
+        if ws > 0 {
+            r.advance(ws);
+        }
+        if !r.slice().is_empty() {
+            return Err(TurboError::Format(
+                "trailing content after JSON document".into(),
+            ));
+        }
+        if !r.fill()? {
+            return Ok(());
         }
     }
 }
@@ -1375,7 +1412,7 @@ fn for_each_records_element<R: Read, T, F: FnMut(T) -> TurboResult<()>>(
         };
         if is_end {
             r.advance(1);
-            return Ok(());
+            return require_eof(r);
         }
         let (n, val) = retry_parse(r, &parse)?;
         f(val)?;
@@ -1398,7 +1435,11 @@ fn for_each_records_element<R: Read, T, F: FnMut(T) -> TurboResult<()>>(
         };
         r.advance(1);
         if is_end {
-            return Ok(());
+            return require_eof(r);
+        }
+        skip_ws_in_reader(r)?;
+        if r.slice().first() == Some(&b']') {
+            return Err(TurboError::Format("trailing comma in JSON array".into()));
         }
     }
 }
@@ -1623,6 +1664,11 @@ fn read_columns_into_sheet_from<R: BufRead>(sheet: &mut Sheet, r: R) -> TurboRes
         }
         let (n, key) = retry_parse(&mut r, |b| parse_string(b, 0))?;
         r.advance(n);
+        if keys.iter().any(|existing| existing == &key) {
+            return Err(TurboError::Format(format!(
+                "duplicate JSON column key {key:?}"
+            )));
+        }
         keys.push(key);
         expect_char(&mut r, b':')?;
         expect_char(&mut r, b'[')?;
@@ -1686,7 +1732,14 @@ fn read_columns_into_sheet_from<R: BufRead>(sheet: &mut Sheet, r: R) -> TurboRes
         };
         r.advance(1);
         if is_end {
+            require_eof(&mut r)?;
             break;
+        }
+        skip_ws_in_reader(&mut r)?;
+        if r.slice().first() == Some(&b'}') {
+            return Err(TurboError::Format(
+                "trailing comma in JSON columns object".into(),
+            ));
         }
     }
 
@@ -1732,6 +1785,17 @@ mod tests {
 
     fn json_out() -> JsonOut<Vec<u8>> {
         JsonOut::new(Vec::new())
+    }
+
+    #[test]
+    fn records_require_eof_after_whitespace() {
+        let ok = b"[{\"a\":1}]   \n\t";
+        assert_eq!(
+            discover_records_keys_from(Cursor::new(ok)).unwrap(),
+            vec!["a".to_string()]
+        );
+        let bad = b"[{\"a\":1}] trailing";
+        assert!(discover_records_keys_from(Cursor::new(bad)).is_err());
     }
 
     #[test]
@@ -1850,9 +1914,7 @@ mod tests {
     fn interchange_high_priority_regressions() {
         let raw = b"340282366920938463463374607431768211456";
         let (_, value) = parse_number(raw, 0, true).unwrap();
-        assert!(
-            matches!(value, Some(JVal::Str(ref s)) if s == std::str::from_utf8(raw).unwrap())
-        );
+        assert!(matches!(value, Some(JVal::Str(ref s)) if s == std::str::from_utf8(raw).unwrap()));
         assert!(parse_number(b"1e309", 0, true).is_err());
         assert!(parse_number(b"-1e309", 0, true).is_err());
         assert!(matches!(
@@ -1861,13 +1923,29 @@ mod tests {
 
         let opts = JsonOptions::default();
         assert!(json_to_sheet_from(&b"[]"[..], "unused.xlsx", "Bad/Name", &opts).is_err());
-        assert!(json_to_sheet("nonexistent.json", "unused.xlsx", "Bad/Name", &opts)
-            .unwrap_err().to_string().contains("sheet name"));
+        assert!(
+            json_to_sheet("nonexistent.json", "unused.xlsx", "Bad/Name", &opts)
+                .unwrap_err()
+                .to_string()
+                .contains("sheet name")
+        );
         let csv_opts = super::super::csv::CsvOptions::default();
-        assert!(super::super::csv::csv_bytes_to_sheet(b"a\n", "unused.xlsx", "Bad/Name", &csv_opts)
-            .is_err());
-        assert!(super::super::csv::csv_to_sheet("nonexistent.csv", "unused.xlsx", "Bad/Name", &csv_opts)
-            .unwrap_err().to_string().contains("sheet name"));
+        assert!(super::super::csv::csv_bytes_to_sheet(
+            b"a\n",
+            "unused.xlsx",
+            "Bad/Name",
+            &csv_opts
+        )
+        .is_err());
+        assert!(super::super::csv::csv_to_sheet(
+            "nonexistent.csv",
+            "unused.xlsx",
+            "Bad/Name",
+            &csv_opts
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("sheet name"));
     }
 
     #[test]

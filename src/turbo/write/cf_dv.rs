@@ -140,6 +140,8 @@ pub enum CfRuleKind {
 pub struct CfRule {
     pub kind: CfRuleKind,
     pub priority: u32,
+    /// True when the caller supplied an explicit priority that must be kept.
+    pub priority_explicit: bool,
     /// Filled at emit time via StyleEngine.
     pub dxf_id: Option<u32>,
 }

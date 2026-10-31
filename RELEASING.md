@@ -66,7 +66,6 @@ gh secret set PYPI_API_TOKEN
 |----------|------|---------|--------------|
 | **CI** | `.github/workflows/CI.yml` | every push to `main` + every PR | Lint, type-check, run the test suite across OSes/Python versions, and verify wheels/sdist build. **Never publishes.** |
 | **Release** | `.github/workflows/release.yml` | pushing a `v*` **tag**, or manual "Run workflow" | Builds all platform wheels + sdist, uploads them to **PyPI**, and creates a GitHub Release. |
-| **Docs** | `.github/workflows/docs.yml` | manual only | Builds and deploys versioned docs to a `gh-pages` site. Disabled from auto-running until GitHub Pages is set up. |
 
 **Key point:** publishing to PyPI **only** happens when a version tag (`vX.Y.Z`)
 is pushed. Ordinary commits and pushes to `main` run tests but never publish.

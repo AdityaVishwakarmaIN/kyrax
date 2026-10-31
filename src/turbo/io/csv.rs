@@ -75,9 +75,9 @@ use arrow_array::{
 };
 
 use crate::turbo::error::{TurboError, TurboResult};
-use crate::turbo::write::{Cell, CellValue, Row, Workbook, save_workbook};
+use crate::turbo::write::{save_workbook, Cell, CellValue, Row, Workbook};
 use crate::turbo::{
-    Features, TurboSheet, TurboWorkbook, list_sheet_names, read_workbook_turbo_sheet,
+    list_sheet_names, read_workbook_turbo_sheet, Features, TurboSheet, TurboWorkbook,
 };
 
 /// Conversion options shared by both directions.
@@ -866,12 +866,16 @@ fn build_workbook<R: Read>(
                         None
                     }
                 } else {
-                    Some(CellValue::Str(
-                        String::from_utf8_lossy(&f.bytes).into_owned(),
-                    ))
+                    let text = std::str::from_utf8(&f.bytes).map_err(|_| {
+                        TurboError::Format(format!(
+                            "CSV field is not valid UTF-8 at row {row_num}, column {}",
+                            i + 1
+                        ))
+                    })?;
+                    Some(CellValue::Str(text.to_string()))
                 }
             } else {
-                field_to_cell(f, opts.infer_types)
+                field_to_cell(f, opts.infer_types)?
             };
             if let Some(v) = v {
                 row.cells.push(Cell::new(col, v));
@@ -888,28 +892,22 @@ fn build_workbook<R: Read>(
     Ok(wb)
 }
 
-fn field_to_cell(f: &RawField, infer: bool) -> Option<CellValue> {
+fn field_to_cell(f: &RawField, infer: bool) -> TurboResult<Option<CellValue>> {
     if f.bytes.is_empty() {
-        return if f.was_quoted {
+        return Ok(if f.was_quoted {
             Some(CellValue::Str(String::new()))
         } else {
             None
-        };
+        });
     }
-    let s = match std::str::from_utf8(&f.bytes) {
-        Ok(s) => s,
-        Err(_) => {
-            return Some(CellValue::Str(
-                String::from_utf8_lossy(&f.bytes).into_owned(),
-            ));
-        }
-    };
+    let s = std::str::from_utf8(&f.bytes)
+        .map_err(|_| TurboError::Format("CSV field is not valid UTF-8".into()))?;
     if infer {
         if let Some(x) = infer_number(s) {
-            return Some(CellValue::Number(x));
+            return Ok(Some(CellValue::Number(x)));
         }
     }
-    Some(CellValue::Str(s.to_string()))
+    Ok(Some(CellValue::Str(s.to_string())))
 }
 
 /// Documented, exact numeric inference (leading-zero-safe, precision-safe).
@@ -972,5 +970,9 @@ fn infer_number(s: &str) -> Option<f64> {
         return None;
     }
     let v = fast_float2::parse::<f64, _>(s).ok()?;
-    if v.is_finite() { Some(v) } else { None }
+    if v.is_finite() {
+        Some(v)
+    } else {
+        None
+    }
 }

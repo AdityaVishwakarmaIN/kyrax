@@ -39,7 +39,7 @@ use crate::turbo::decode::decode_bytes;
 use crate::turbo::formula::letters_to_index;
 use crate::turbo::mutate::{attr_value_span, shifted_col, shifted_row};
 use crate::turbo::overlay::find_element;
-use crate::turbo::refshift::{Axis, shift_refs};
+use crate::turbo::refshift::{shift_refs, Axis};
 use crate::turbo::write::xml::col_letters;
 
 /// How a range reacts when its leading edge (first row/col) falls inside the
@@ -219,7 +219,8 @@ pub fn fixup_table_part_xml<'a>(
             // Column definitions must match the table width. Until they can be
             // updated, refuse edits that change that width.
             if (delta > 0 && at > c0 && at <= c1)
-                || (delta < 0 && (at as u64) <= c1 as u64
+                || (delta < 0
+                    && (at as u64) <= c1 as u64
                     && (at as u64 + delta.unsigned_abs()) > c0 as u64)
             {
                 return None;
@@ -430,7 +431,11 @@ fn fixup_sheet_view(header: &[u8], axis: Axis, at: u32, delta: i64) -> Option<Ve
         buf = n;
         changed = true;
     }
-    if changed { Some(buf) } else { None }
+    if changed {
+        Some(buf)
+    } else {
+        None
+    }
 }
 
 /// A selection element carries both `activeCell` and `sqref`; rewrite both in
@@ -611,8 +616,43 @@ fn fixup_auto_filter(tail: &[u8], axis: Axis, at: u32, delta: i64) -> Option<Vec
 // Sheet tail: dataValidations, conditionalFormatting
 // ----------------------------------------------------------------------------
 
+fn count_data_validation_elements(xml: &[u8]) -> usize {
+    let needle = b"<dataValidation";
+    let mut count = 0usize;
+    let mut pos = 0usize;
+    while let Some(rel) = memchr::memmem::find(&xml[pos..], needle) {
+        let start = pos + rel;
+        let after = start + needle.len();
+        match xml.get(after) {
+            Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') | Some(b'>') | Some(b'/') => {
+                count += 1;
+            }
+            _ => {}
+        }
+        pos = after;
+    }
+    count
+}
+
+fn update_data_validation_count(xml: &mut Vec<u8>) {
+    let count = count_data_validation_elements(xml);
+    let Some(start) = memchr::memmem::find(xml, b"<dataValidations") else {
+        return;
+    };
+    let Some(gt) = memchr::memchr(b'>', &xml[start..]) else {
+        return;
+    };
+    let tag_end = start + gt;
+    let Some((vs, ve)) = attr_value_span(&xml[start..=tag_end], b"count") else {
+        return;
+    };
+    let (vs, ve) = (start + vs, start + ve);
+    let mut replacement = count.to_string().into_bytes();
+    xml.splice(vs..ve, replacement.drain(..));
+}
+
 fn fixup_data_validations(tail: &[u8], axis: Axis, at: u32, delta: i64) -> Option<Vec<u8>> {
-    rewrite_elements(tail, b"dataValidation", &mut |elem| {
+    let result = rewrite_elements(tail, b"dataValidation", &mut |elem| {
         let tag_end = memchr::memchr(b'>', elem).unwrap_or(elem.len());
         let tag = &elem[..=tag_end];
 
@@ -623,7 +663,7 @@ fn fixup_data_validations(tail: &[u8], axis: Axis, at: u32, delta: i64) -> Optio
         // sqref is a space-separated list of ranges.
         if let Some((vs, ve)) = attr_value_span(tag, b"sqref") {
             let val = &tag[vs..ve];
-            match shift_multi_ref(val, axis, at, delta, BandPolicy::Drop, true) {
+            match shift_multi_ref(val, axis, at, delta, BandPolicy::Clamp, true) {
                 Some(shifted) if shifted.is_empty() => drop_element = true,
                 Some(shifted) if shifted != val => {
                     let mut t = Vec::with_capacity(new_elem.len() + shifted.len());
@@ -652,6 +692,10 @@ fn fixup_data_validations(tail: &[u8], axis: Axis, at: u32, delta: i64) -> Optio
         } else {
             ElemEdit::Keep
         }
+    });
+    result.map(|mut out| {
+        update_data_validation_count(&mut out);
+        out
     })
 }
 
@@ -665,7 +709,7 @@ fn fixup_conditional_formatting(tail: &[u8], axis: Axis, at: u32, delta: i64) ->
         // sqref on the block's open tag; empty -> drop the whole block.
         if let Some((vs, ve)) = attr_value_span(tag, b"sqref") {
             let val = &tag[vs..ve];
-            match shift_multi_ref(val, axis, at, delta, BandPolicy::Drop, true) {
+            match shift_multi_ref(val, axis, at, delta, BandPolicy::Clamp, true) {
                 Some(shifted) if shifted.is_empty() => return ElemEdit::Drop,
                 Some(shifted) if shifted != val => {
                     let mut t = Vec::with_capacity(out.len() + shifted.len());
@@ -707,7 +751,7 @@ fn fixup_conditional_formatting(tail: &[u8], axis: Axis, at: u32, delta: i64) ->
         }
         for (ts, te) in spans.into_iter().rev() {
             if let Ok(s) = std::str::from_utf8(&out[ts..te]) {
-                if let Cow::Owned(ns) = shift_refs(s, axis, at, delta) {
+                if let Some(ns) = shift_formula_text(s, axis, at, delta) {
                     let mut t = Vec::with_capacity(out.len() + ns.len());
                     t.extend_from_slice(&out[..ts]);
                     t.extend_from_slice(ns.as_bytes());
@@ -724,6 +768,30 @@ fn fixup_conditional_formatting(tail: &[u8], axis: Axis, at: u32, delta: i64) ->
             ElemEdit::Keep
         }
     })
+}
+
+/// Shift a formula body. Pure A1 ranges (the common DV list source and CF
+/// expression) use range-aware clamping so absolute references keep their `$`
+/// markers; complex formulas fall back to the token-level refshift.
+pub(crate) fn shift_formula_text(s: &str, axis: Axis, at: u32, delta: i64) -> Option<String> {
+    let (prefix, core) = match s.strip_prefix('=') {
+        Some(rest) => ("=", rest.trim()),
+        None => ("", s.trim()),
+    };
+    if core.is_empty() {
+        return None;
+    }
+    if parse_a1_range(core.as_bytes()).is_some() {
+        return match shift_a1_range(core.as_bytes(), axis, at, delta, BandPolicy::Clamp) {
+            RangeShift::Unchanged => None,
+            RangeShift::Dropped => Some(format!("{prefix}#REF!")),
+            RangeShift::Changed(v) => Some(format!("{prefix}{}", String::from_utf8_lossy(&v))),
+        };
+    }
+    match shift_refs(s, axis, at, delta) {
+        Cow::Borrowed(_) => None,
+        Cow::Owned(ns) => Some(ns),
+    }
 }
 
 /// Shift one `<formula1>` / `<formula2>` child's TEXT via refshift.
@@ -750,9 +818,9 @@ fn shift_child_formula(
     let close_at = memchr::memmem::find(&elem[gt..], close.as_bytes())? + gt;
     let text = &elem[gt + 1..close_at];
     let s = std::str::from_utf8(text).ok()?;
-    match shift_refs(s, axis, at, delta) {
-        Cow::Borrowed(_) => None,
-        Cow::Owned(ns) => {
+    match shift_formula_text(s, axis, at, delta) {
+        None => None,
+        Some(ns) => {
             let mut out = Vec::with_capacity(elem.len() + ns.len());
             out.extend_from_slice(&elem[..=gt]);
             out.extend_from_slice(ns.as_bytes());
@@ -1488,7 +1556,7 @@ fn shift_multi_ref(
 }
 
 pub(crate) fn shift_pending_ref(value: &str, axis: Axis, at: u32, delta: i64) -> String {
-    shift_multi_ref(value.as_bytes(), axis, at, delta, BandPolicy::Drop, true)
+    shift_multi_ref(value.as_bytes(), axis, at, delta, BandPolicy::Clamp, true)
         .map(|v| String::from_utf8(v).expect("A1 references remain UTF-8"))
         .unwrap_or_else(|| value.to_string())
 }
@@ -1572,7 +1640,11 @@ fn rewrite_elements(
         return None;
     }
     out.extend_from_slice(&xml[last..]);
-    if changed { Some(out) } else { None }
+    if changed {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 /// Rewrite one attribute of an element's open tag through `shift`.
@@ -1852,6 +1924,60 @@ mod tests {
     }
 
     #[test]
+    fn dv_partial_delete_clamps_row_and_column_edges() {
+        let x = sheet(
+            "",
+            r#"<dataValidations count="1"><dataValidation type="list" sqref="A2:A5 B2:D5"><formula1>=A2</formula1></dataValidation></dataValidations>"#,
+        );
+        let rows = fix_sheet(&x, Axis::Row, 2, -1);
+        assert!(rows.contains(r#"sqref="A2:A4 B2:D4""#), "{rows}");
+        let cols = fix_sheet(&x, Axis::Col, 2, -1);
+        assert!(cols.contains(r#"sqref="A2:A5 B2:C5""#), "{cols}");
+    }
+
+    #[test]
+    fn dv_count_handles_newline_formatted_tags() {
+        let x = sheet(
+            "",
+            "<dataValidations count=\"9\"><dataValidation\n type=\"list\" sqref=\"A2\"><formula1>=A2</formula1></dataValidation><dataValidation type=\"list\" sqref=\"B2\"><formula1>=B2</formula1></dataValidation></dataValidations>",
+        );
+        let out = fix_sheet(&x, Axis::Row, 2, -1);
+        assert!(out.contains(r#"<dataValidations count="0">"#), "{out}");
+    }
+
+    #[test]
+    fn dv_formula_pure_range_keeps_absolute_markers() {
+        let x = sheet(
+            "",
+            r#"<dataValidations count="1"><dataValidation type="list" sqref="A1"><formula1>=$F$1:$F$10</formula1></dataValidation></dataValidations>"#,
+        );
+        let out = fix_sheet(&x, Axis::Row, 2, -1);
+        assert!(out.contains(r#"<formula1>=$F$1:$F$9</formula1>"#), "{out}");
+    }
+
+    #[test]
+    fn dv_multi_area_partial_delete_keeps_survivors() {
+        let x = sheet(
+            "",
+            r#"<dataValidations count="1"><dataValidation type="list" sqref="A2:A5 C2:C5"><formula1>=A2</formula1></dataValidation></dataValidations>"#,
+        );
+        let out = fix_sheet(&x, Axis::Row, 2, -1);
+        assert!(out.contains(r#"sqref="A2:A4 C2:C4""#), "{out}");
+    }
+
+    #[test]
+    fn cf_partial_delete_clamps_row_and_column_edges() {
+        let x = sheet(
+            "",
+            r#"<conditionalFormatting sqref="B2:B5 D2:F5"><cfRule type="expression" priority="1"><formula>B2&gt;0</formula></cfRule></conditionalFormatting>"#,
+        );
+        let rows = fix_sheet(&x, Axis::Row, 2, -1);
+        assert!(rows.contains(r#"sqref="B2:B4 D2:F4""#), "{rows}");
+        let cols = fix_sheet(&x, Axis::Col, 2, -1);
+        assert!(cols.contains(r#"sqref="C2:E5""#), "{cols}");
+    }
+
+    #[test]
     fn dv_sqref_single_cell_inside_band_drops() {
         let x = sheet(
             "",
@@ -1898,7 +2024,7 @@ mod tests {
         );
         let out = fix_sheet(&x, Axis::Row, 2, -2);
         assert!(
-            out.contains(r#"<conditionalFormatting sqref="A1:A8">"#),
+            out.contains(r#"<conditionalFormatting sqref="A1:A8 B2:C2">"#),
             "{out}"
         );
         assert!(out.contains(r#"<formula>AND($A1>5,B1)</formula>"#), "{out}");

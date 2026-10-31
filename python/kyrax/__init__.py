@@ -1206,7 +1206,8 @@ class TurboReader:
             charts, images, pivots, vba}.
             Values are always included; unrequested features are not computed.
             ``comments`` also loads threaded comments + persons.
-        :param header_row: 0-based header row index (default 0), or None for headerless data.
+        :param header_row: Only ``0`` (default) and ``None`` are supported by
+            the turbo reader; other values raise ``ValueError``.
         """
         return TurboSheet(self._reader.load_sheet(idx_or_name, features=features, header_row=header_row))
 

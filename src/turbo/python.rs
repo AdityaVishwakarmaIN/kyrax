@@ -3,29 +3,28 @@
 use std::sync::{Arc, OnceLock};
 
 use arrow_array::{
-    Array, ArrayRef, RecordBatch, UInt32Array,
     builder::{StringBuilder, StringDictionaryBuilder, UInt32Builder},
     types::Int32Type,
+    Array, ArrayRef, RecordBatch, UInt32Array,
 };
 use pyo3::{
-    Bound, PyAny, PyResult, Python,
     exceptions::PyValueError,
     prelude::*,
     types::{PyBool, PyDict, PyFloat, PyList, PyString, PyTuple},
+    Bound, PyAny, PyResult, Python,
 };
 
 use super::{
-    ActivePane, Alignment, AutoFilterMeta, Border, CKind, CellError, CellRange, CfRuleRec,
-    ChartAnchor, ChartMeta, ColDim, Color, DataValidationRec, DefinedName, Features, Fill, Font,
-    FormulaColumn, HeaderFooterMeta, Hyperlink, ImageMeta, LinkTarget, NameKind, NamedStyleRec,
-    PageMarginsMeta, PageSetupMeta, Pane, PaneState, Person, PivotTableMeta, PrintOptionsMeta,
-    Protection, ReadImageAnchor, ReadImageMarker, RowDim, Scope, SheetComments, SheetFormat,
-    SheetKind, SheetProtectionMeta, SheetState, SheetViewMeta, Side, StyleTable, Table,
-    ThreadedComment, TurboError, VbaProject, WorkbookProps, a1,
-    list_sheet_names_and_active_tab_with_password, range_a1,
-    read_workbook_turbo_sheet_with_options,
+    a1, list_sheet_names_and_active_tab_with_password, range_a1,
+    read_workbook_turbo_sheet_with_options, ActivePane, Alignment, AutoFilterMeta, Border, CKind,
+    CellError, CellRange, CfRuleRec, ChartAnchor, ChartMeta, ColDim, Color, DataValidationRec,
+    DefinedName, Features, Fill, Font, FormulaColumn, HeaderFooterMeta, Hyperlink, ImageMeta,
+    LinkTarget, NameKind, NamedStyleRec, PageMarginsMeta, PageSetupMeta, Pane, PaneState, Person,
+    PivotTableMeta, PrintOptionsMeta, Protection, ReadImageAnchor, ReadImageMarker, RowDim, Scope,
+    SheetComments, SheetFormat, SheetKind, SheetProtectionMeta, SheetState, SheetViewMeta, Side,
+    StyleTable, Table, ThreadedComment, TurboError, VbaProject, WorkbookProps,
 };
-use crate::error::{KyraxError, KyraxErrorKind, py_errors::IntoPyResult};
+use crate::error::{py_errors::IntoPyResult, KyraxError, KyraxErrorKind};
 use crate::turbo::error::TurboResult;
 
 // ---------------------------------------------------------------------------
@@ -1382,7 +1381,8 @@ impl PyTurboReader {
     ///
     /// `features` is `"values"` (default), `"all"`, or a list of feature names.
     /// Values are always included.
-    /// `header_row`: row index of the header (default: 0). `None` means no header (row 1 is data).
+    /// `header_row`: only `0` (default) and `None` are supported. `None` means
+    /// no header (row 1 is data); any other value raises `ValueError`.
     #[pyo3(signature = (idx_or_name, *, features = None, header_row = Some(0)))]
     fn load_sheet(
         &mut self,

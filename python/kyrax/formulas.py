@@ -75,13 +75,16 @@ def recalculate(sheets: list[dict[str, Any]]) -> bytes:
 
 
 def dependencies(formula: str) -> list[str]:
-    """The cell references ``formula`` reads, as sorted, deduplicated A1
-    strings.
+    """The static cell references ``formula`` reads, as sorted, deduplicated
+    A1 strings. Sheet names are quoted when Excel requires it.
+
+    Dynamic references such as ``INDIRECT`` and ``OFFSET`` cannot be enumerated
+    statically and are not included.
 
     >>> dependencies('=SUM(A1:B2)+C5')
     ['A1:B2', 'C5']
-    >>> dependencies('=XLOOKUP(A1, B:B, C2:C5)')
-    ['A1', 'B:B', 'C2:C5']
+    >>> dependencies("='My Sheet'!A1")
+    ["'My Sheet'!A1"]
     """
     return _dependencies(formula)
 

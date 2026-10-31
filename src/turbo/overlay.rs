@@ -16,7 +16,7 @@ use crate::turbo::mutate::{
 use crate::turbo::refshift::Axis;
 use crate::turbo::scan::parse_ref_range_strict;
 use crate::turbo::structural::{
-    RelKind, parse_rels, parse_workbook_pivot_caches, resolve_zip_path,
+    parse_rels, parse_workbook_pivot_caches, resolve_zip_path, RelKind,
 };
 use crate::turbo::write::model::{
     CachedValue, Cell, CellValue, FormulaKind, PageMargins, PrintOptions, Row, Sheet, SstBuilder,
@@ -158,28 +158,59 @@ impl SheetOverlay {
         fn destination(pos: (u32, u32), op: &SheetOp) -> Result<Option<(u32, u32)>, ()> {
             let (r, c) = pos;
             let shift = |v: u32, at: u32, amount: u32, insert: bool| -> Option<i64> {
-                if v < at { Some(v as i64) }
-                else if insert { Some(v as i64 + amount as i64) }
-                else if (v as u64) < at as u64 + amount as u64 { None }
-                else { Some(v as i64 - amount as i64) }
+                if v < at {
+                    Some(v as i64)
+                } else if insert {
+                    Some(v as i64 + amount as i64)
+                } else if (v as u64) < at as u64 + amount as u64 {
+                    None
+                } else {
+                    Some(v as i64 - amount as i64)
+                }
             };
             let pair = match *op {
-                SheetOp::InsertRows { at, amount } => shift(r, at, amount, true).map(|v| (v, c as i64)),
-                SheetOp::DeleteRows { at, amount } => shift(r, at, amount, false).map(|v| (v, c as i64)),
-                SheetOp::InsertCols { at, amount } => shift(c, at, amount, true).map(|v| (r as i64, v)),
-                SheetOp::DeleteCols { at, amount } => shift(c, at, amount, false).map(|v| (r as i64, v)),
-                SheetOp::MoveRange { r1, c1, r2, c2, rows, cols, .. } => {
+                SheetOp::InsertRows { at, amount } => {
+                    shift(r, at, amount, true).map(|v| (v, c as i64))
+                }
+                SheetOp::DeleteRows { at, amount } => {
+                    shift(r, at, amount, false).map(|v| (v, c as i64))
+                }
+                SheetOp::InsertCols { at, amount } => {
+                    shift(c, at, amount, true).map(|v| (r as i64, v))
+                }
+                SheetOp::DeleteCols { at, amount } => {
+                    shift(c, at, amount, false).map(|v| (r as i64, v))
+                }
+                SheetOp::MoveRange {
+                    r1,
+                    c1,
+                    r2,
+                    c2,
+                    rows,
+                    cols,
+                    ..
+                } => {
                     if r >= r1 && r <= r2 && c >= c1 && c <= c2 {
-                        Some(((r as i64).saturating_add(rows), (c as i64).saturating_add(cols)))
-                    } else if (r as i64) >= (r1 as i64).saturating_add(rows) && (r as i64) <= (r2 as i64).saturating_add(rows)
-                        && (c as i64) >= (c1 as i64).saturating_add(cols) && (c as i64) <= (c2 as i64).saturating_add(cols) {
+                        Some((
+                            (r as i64).saturating_add(rows),
+                            (c as i64).saturating_add(cols),
+                        ))
+                    } else if (r as i64) >= (r1 as i64).saturating_add(rows)
+                        && (r as i64) <= (r2 as i64).saturating_add(rows)
+                        && (c as i64) >= (c1 as i64).saturating_add(cols)
+                        && (c as i64) <= (c2 as i64).saturating_add(cols)
+                    {
                         None
-                    } else { Some((r as i64, c as i64)) }
+                    } else {
+                        Some((r as i64, c as i64))
+                    }
                 }
             };
             match pair {
                 None => Ok(None),
-                Some((r, c)) if (1..=1_048_576).contains(&r) && (1..=16_384).contains(&c) => Ok(Some((r as u32, c as u32))),
+                Some((r, c)) if (1..=1_048_576).contains(&r) && (1..=16_384).contains(&c) => {
+                    Ok(Some((r as u32, c as u32)))
+                }
                 _ => Err(()),
             }
         }
@@ -187,17 +218,35 @@ impl SheetOverlay {
         for (pos, mut value) in std::mem::take(&mut self.modified_cells) {
             match destination(pos, op) {
                 Ok(Some(target)) => {
-                    if let SheetOp::MoveRange { r1, c1, r2, c2, rows, cols, translate: true } = *op {
+                    if let SheetOp::MoveRange {
+                        r1,
+                        c1,
+                        r2,
+                        c2,
+                        rows,
+                        cols,
+                        translate: true,
+                    } = *op
+                    {
                         if pos.0 >= r1 && pos.0 <= r2 && pos.1 >= c1 && pos.1 <= c2 {
-                            if let CellValue::Formula { ref mut text, ref mut cached, .. } = value {
-                                *text = crate::turbo::formula::translate_body(text, rows as i32, cols as i32);
+                            if let CellValue::Formula {
+                                ref mut text,
+                                ref mut cached,
+                                ..
+                            } = value
+                            {
+                                *text = crate::turbo::formula::translate_body(
+                                    text,
+                                    rows as i32,
+                                    cols as i32,
+                                );
                                 *cached = None;
                             }
                         }
                     }
                     cells.insert(target, value);
                 }
-                Ok(None) => {},
+                Ok(None) => {}
                 Err(()) => self.invalid_pending_shift = true,
             }
         }
@@ -205,8 +254,10 @@ impl SheetOverlay {
         let mut styles = AHashMap::default();
         for (pos, style) in std::mem::take(&mut self.modified_styles) {
             match destination(pos, op) {
-                Ok(Some(target)) => { styles.insert(target, style); },
-                Ok(None) => {},
+                Ok(Some(target)) => {
+                    styles.insert(target, style);
+                }
+                Ok(None) => {}
                 Err(()) => self.invalid_pending_shift = true,
             }
         }
@@ -217,7 +268,9 @@ impl SheetOverlay {
                 let mut shifted = AHashMap::default();
                 for (pos, value) in std::mem::take(&mut self.$field) {
                     match destination(pos, op) {
-                        Ok(Some(target)) => { shifted.insert(target, value); }
+                        Ok(Some(target)) => {
+                            shifted.insert(target, value);
+                        }
                         Ok(None) => {}
                         Err(()) => self.invalid_pending_shift = true,
                     }
@@ -230,11 +283,25 @@ impl SheetOverlay {
 
         let shift_ref = |value: &str| -> String {
             match *op {
-                SheetOp::MoveRange { r1, c1, r2, c2, rows, cols, .. } => {
-                    crate::turbo::mutate::shift_sqref_move(value.as_bytes(), r1, c1, r2, c2, rows, cols)
-                        .map(|v| String::from_utf8(v).expect("A1 references remain UTF-8"))
-                        .unwrap_or_else(|| value.to_string())
-                }
+                SheetOp::MoveRange {
+                    r1,
+                    c1,
+                    r2,
+                    c2,
+                    rows,
+                    cols,
+                    ..
+                } => crate::turbo::mutate::shift_sqref_move(
+                    value.as_bytes(),
+                    r1,
+                    c1,
+                    r2,
+                    c2,
+                    rows,
+                    cols,
+                )
+                .map(|v| String::from_utf8(v).expect("A1 references remain UTF-8"))
+                .unwrap_or_else(|| value.to_string()),
                 _ => crate::turbo::fixup::shift_pending_ref(value, op.axis(), op.at(), op.delta()),
             }
         };
@@ -248,10 +315,12 @@ impl SheetOverlay {
         self.merges.retain(|m| !m.is_empty());
         self.deleted_merges = std::mem::take(&mut self.deleted_merges)
             .into_iter()
-            .map(|merge| if matches!(op, SheetOp::MoveRange { .. }) {
-                shift_ref(&merge)
-            } else {
-                crate::turbo::fixup::shift_pending_merge(&merge, op.axis(), op.at(), op.delta())
+            .map(|merge| {
+                if matches!(op, SheetOp::MoveRange { .. }) {
+                    shift_ref(&merge)
+                } else {
+                    crate::turbo::fixup::shift_pending_merge(&merge, op.axis(), op.at(), op.delta())
+                }
             })
             .filter(|merge| !merge.is_empty())
             .collect();
@@ -260,7 +329,14 @@ impl SheetOverlay {
             dv.sqref = shift_ref(&dv.sqref);
             if !matches!(op, SheetOp::MoveRange { .. }) {
                 for formula in [&mut dv.formula1, &mut dv.formula2].into_iter().flatten() {
-                    *formula = crate::turbo::refshift::shift_refs(formula, op.axis(), op.at(), op.delta()).into_owned();
+                    if let Some(shifted) = crate::turbo::fixup::shift_formula_text(
+                        formula,
+                        op.axis(),
+                        op.at(),
+                        op.delta(),
+                    ) {
+                        *formula = shifted;
+                    }
                 }
             }
         }
@@ -271,16 +347,28 @@ impl SheetOverlay {
                 use crate::turbo::write::CfRuleKind::*;
                 for rule in &mut cf.rules {
                     let formulas = match &mut rule.kind {
-                        CellIs { formulas, .. } | Expression { formulas, .. }
-                        | ContainsText { formulas, .. } | NotContainsText { formulas, .. }
-                        | BeginsWith { formulas, .. } | EndsWith { formulas, .. }
-                        | ContainsBlanks { formulas, .. } | NotContainsBlanks { formulas, .. }
-                        | ContainsErrors { formulas, .. } | NotContainsErrors { formulas, .. }
+                        CellIs { formulas, .. }
+                        | Expression { formulas, .. }
+                        | ContainsText { formulas, .. }
+                        | NotContainsText { formulas, .. }
+                        | BeginsWith { formulas, .. }
+                        | EndsWith { formulas, .. }
+                        | ContainsBlanks { formulas, .. }
+                        | NotContainsBlanks { formulas, .. }
+                        | ContainsErrors { formulas, .. }
+                        | NotContainsErrors { formulas, .. }
                         | TimePeriod { formulas, .. } => formulas,
                         _ => continue,
                     };
                     for formula in formulas {
-                        *formula = crate::turbo::refshift::shift_refs(formula, op.axis(), op.at(), op.delta()).into_owned();
+                        if let Some(shifted) = crate::turbo::fixup::shift_formula_text(
+                            formula,
+                            op.axis(),
+                            op.at(),
+                            op.delta(),
+                        ) {
+                            *formula = shifted;
+                        }
                     }
                 }
             }
@@ -290,7 +378,9 @@ impl SheetOverlay {
             let mut rows = BTreeMap::new();
             for (row, layout) in std::mem::take(&mut self.layout.rows) {
                 match destination((row, 1), op) {
-                    Ok(Some((target, _))) => { rows.insert(target, layout); }
+                    Ok(Some((target, _))) => {
+                        rows.insert(target, layout);
+                    }
                     Ok(None) => {}
                     Err(()) => self.invalid_pending_shift = true,
                 }
@@ -1461,7 +1551,11 @@ impl WorkbookOverlay {
         let mut pivot_cache_map: Option<std::collections::HashMap<u32, String>> = None;
         let mut workbook_bytes: Option<Vec<u8>> = rewritten_parts.remove("xl/workbook.xml");
         let mut workbook_modified = workbook_bytes.is_some();
-        self.apply_wb_level(workbook_modified, &mut workbook_bytes, &mut workbook_modified)?;
+        self.apply_wb_level(
+            workbook_modified,
+            &mut workbook_bytes,
+            &mut workbook_modified,
+        )?;
 
         let formula_affected = self
             .sheet_overlays
@@ -1503,18 +1597,30 @@ impl WorkbookOverlay {
 
             let mut sheet_xml: Option<Vec<u8>> = original_xml;
             if overlay.invalid_pending_shift {
-                return Err(TurboError::Refused(format!("cannot shift pending cells in sheet '{}': worksheet grid limit exceeded", sheet_name)));
+                return Err(TurboError::Refused(format!(
+                    "cannot shift pending cells in sheet '{}': worksheet grid limit exceeded",
+                    sheet_name
+                )));
             }
             if overlay.structural_edit_after_pending_table {
-                return Err(TurboError::Refused(format!("cannot perform structural edits after adding a table in sheet '{}'", sheet_name)));
+                return Err(TurboError::Refused(format!(
+                    "cannot perform structural edits after adding a table in sheet '{}'",
+                    sheet_name
+                )));
             }
             if !overlay.ops.is_empty() {
                 let (dir, file) = entry_name.rsplit_once('/').unwrap_or(("", &entry_name));
-                if let Some(rels) = inflate_entry(&self.archive_map, &format!("{dir}/_rels/{file}.rels"))? {
-                    if parse_rels(&rels).values().any(|r| r.kind == RelKind::Comments) {
+                if let Some(rels) =
+                    inflate_entry(&self.archive_map, &format!("{dir}/_rels/{file}.rels"))?
+                {
+                    if parse_rels(&rels)
+                        .values()
+                        .any(|r| r.kind == RelKind::Comments)
+                    {
                         return Err(TurboError::Refused(format!(
                             "cannot {} in sheet '{}': structural edits of existing comments are not supported",
-                            overlay.ops[0].human(), sheet_name
+                            overlay.ops[0].human(),
+                            sheet_name
                         )));
                     }
                 }
@@ -1524,10 +1630,13 @@ impl WorkbookOverlay {
                         let mut sst = SstBuilder::new();
                         write_worksheet(&Sheet::new(sheet_name), false, false, &mut sst)
                     }
-                    None => return Err(TurboError::Refused(format!(
-                        "cannot {} in sheet '{}': the sheet has no source XML to splice",
-                        overlay.ops[0].human(), sheet_name
-                    ))),
+                    None => {
+                        return Err(TurboError::Refused(format!(
+                            "cannot {} in sheet '{}': the sheet has no source XML to splice",
+                            overlay.ops[0].human(),
+                            sheet_name
+                        )));
+                    }
                 };
                 let table_parts = sheet_table_parts(&self.archive_map, &entry_name, &buf);
 
@@ -1536,13 +1645,26 @@ impl WorkbookOverlay {
                         apply_mutate(&buf, op).ok_or_else(|| refuse_sheet_op(sheet_name, op))?;
                     buf = mutated.into_owned();
 
-                    if let SheetOp::MoveRange { r1, c1, r2, c2, rows, cols, .. } = *op {
+                    if let SheetOp::MoveRange {
+                        r1,
+                        c1,
+                        r2,
+                        c2,
+                        rows,
+                        cols,
+                        ..
+                    } = *op
+                    {
                         if rows == 0 && cols == 0 {
                             continue;
                         }
                         let src = (r1.min(r2), c1.min(c2), r1.max(r2), c1.max(c2));
-                        let dst = ((src.0 as i64 + rows) as u32, (src.1 as i64 + cols) as u32,
-                                   (src.2 as i64 + rows) as u32, (src.3 as i64 + cols) as u32);
+                        let dst = (
+                            (src.0 as i64 + rows) as u32,
+                            (src.1 as i64 + cols) as u32,
+                            (src.2 as i64 + rows) as u32,
+                            (src.3 as i64 + cols) as u32,
+                        );
                         for tp in &table_parts {
                             let xml = match table_edit.get(tp) {
                                 Some(xml) => Some(xml.clone()),
@@ -1554,10 +1676,13 @@ impl WorkbookOverlay {
                                 let reference = extract_xml_attr(&x[start..=end], b"ref")?;
                                 parse_ref_range_strict(reference.as_bytes())
                             });
-                            if bounds.map_or(true, |b| rects_intersect(b, src) || rects_intersect(b, dst)) {
+                            if bounds.map_or(true, |b| {
+                                rects_intersect(b, src) || rects_intersect(b, dst)
+                            }) {
                                 return Err(TurboError::Refused(format!(
                                     "cannot {} in sheet '{}': moving ranges that intersect existing tables is not supported",
-                                    op.human(), sheet_name
+                                    op.human(),
+                                    sheet_name
                                 )));
                             }
                         }
@@ -1895,8 +2020,7 @@ impl WorkbookOverlay {
                 }
                 merged.extend(overlay.comments.iter().map(|(k, v)| (*k, v.clone())));
                 let mut comments_vec: Vec<crate::turbo::write::model::Comment> = Vec::new();
-                let mut comm_items: Vec<(&(u32, u32), &(String, String))> =
-                    merged.iter().collect();
+                let mut comm_items: Vec<(&(u32, u32), &(String, String))> = merged.iter().collect();
                 comm_items.sort_by_key(|item| *item.0);
                 for (&(r, c), (text, author)) in comm_items {
                     let ref_str = crate::turbo::range_a1(&crate::turbo::CellRange {
@@ -2479,7 +2603,11 @@ fn strip_formula_cached_values(xml: &[u8]) -> Option<Vec<u8>> {
 
 /// Resolve the ZIP entry paths of every table part owned by `sheet_entry`,
 /// following the sheet's `tableParts` rids through its rels part.
-pub(crate) fn sheet_table_parts(map: &ArchiveMap, sheet_entry: &str, sheet_xml: &[u8]) -> Vec<String> {
+pub(crate) fn sheet_table_parts(
+    map: &ArchiveMap,
+    sheet_entry: &str,
+    sheet_xml: &[u8],
+) -> Vec<String> {
     let tail = match memchr::memmem::find(sheet_xml, b"</sheetData>") {
         Some(p) => &sheet_xml[p + b"</sheetData>".len()..],
         None => sheet_xml,
@@ -3140,14 +3268,17 @@ fn kept_hyperlinks(xml: &[u8], replaced: &AHashSet<String>) -> String {
     let Some(start) = find_element(xml, b"hyperlinks", 0) else {
         return out;
     };
-    let end = memchr::memmem::find(&xml[start..], b"</hyperlinks>").map_or(xml.len(), |p| start + p);
+    let end =
+        memchr::memmem::find(&xml[start..], b"</hyperlinks>").map_or(xml.len(), |p| start + p);
     let block = String::from_utf8_lossy(&xml[start..end]);
     let mut rest = &block[..];
     while let Some(p) = rest.find("<hyperlink ") {
         let el = &rest[p..];
-        let Some(close) = el.find("/>").map(|e| e + 2).or_else(|| {
-            el.find("</hyperlink>").map(|e| e + "</hyperlink>".len())
-        }) else {
+        let Some(close) = el
+            .find("/>")
+            .map(|e| e + 2)
+            .or_else(|| el.find("</hyperlink>").map(|e| e + "</hyperlink>".len()))
+        else {
             break;
         };
         let tag = &el[..close];
@@ -3728,7 +3859,11 @@ fn parse_a1_ref(s: &str) -> Option<(u32, u32)> {
         i += 1;
     }
     let row: u32 = std::str::from_utf8(&bytes[i..]).ok()?.parse().ok()?;
-    if row == 0 { None } else { Some((row, col)) }
+    if row == 0 {
+        None
+    } else {
+        Some((row, col))
+    }
 }
 
 pub fn hydrate_sheet_from_xml(
@@ -4127,7 +4262,11 @@ fn col_from_ref_bytes(bytes: &[u8]) -> Option<usize> {
         let val = (b.to_ascii_uppercase() - b'A' + 1) as usize;
         idx = idx * 26 + val;
     }
-    if idx == 0 { None } else { Some(idx - 1) }
+    if idx == 0 {
+        None
+    } else {
+        Some(idx - 1)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4280,19 +4419,70 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn pending_dv_cf_partial_delete_clamps() {
+        let mut so = SheetOverlay::default();
+        so.data_validations
+            .push(crate::turbo::write::DataValidation {
+                type_: None,
+                operator: None,
+                formula1: Some("A2".into()),
+                formula2: None,
+                sqref: "A2:A5".into(),
+                allow_blank: false,
+                show_error_message: false,
+                show_input_message: false,
+                show_drop_down: false,
+                error_title: None,
+                error_style: None,
+                ime_mode: None,
+                error: None,
+                prompt_title: None,
+                prompt: None,
+            });
+        so.cf_new.push(crate::turbo::write::ConditionalFormatting {
+            sqref: "B2:B5".into(),
+            rules: vec![],
+        });
+        so.delete_rows(2, 1);
+        assert_eq!(so.data_validations[0].sqref, "A2:A4");
+        assert_eq!(so.cf_new[0].sqref, "B2:B4");
+    }
+
+    #[test]
     fn pending_metadata_follows_structural_edits() {
         let mut so = SheetOverlay::default();
         so.merge_cells(2, 1, 2, 2);
         so.hyperlinks.insert((2, 1), "https://example.com".into());
         so.comments.insert((2, 1), ("note".into(), "author".into()));
-        so.layout.rows.insert(2, crate::turbo::overlay_layout::RowLayout { height: Some(37.0), hidden: false });
-        so.data_validations.push(crate::turbo::write::DataValidation {
-            type_: None, operator: None, formula1: Some("A2".into()), formula2: None,
-            sqref: "A2".into(), allow_blank: false, show_error_message: false,
-            show_input_message: false, show_drop_down: false, error_title: None,
-            error_style: None, ime_mode: None, error: None, prompt_title: None, prompt: None,
+        so.layout.rows.insert(
+            2,
+            crate::turbo::overlay_layout::RowLayout {
+                height: Some(37.0),
+                hidden: false,
+            },
+        );
+        so.data_validations
+            .push(crate::turbo::write::DataValidation {
+                type_: None,
+                operator: None,
+                formula1: Some("A2".into()),
+                formula2: None,
+                sqref: "A2".into(),
+                allow_blank: false,
+                show_error_message: false,
+                show_input_message: false,
+                show_drop_down: false,
+                error_title: None,
+                error_style: None,
+                ime_mode: None,
+                error: None,
+                prompt_title: None,
+                prompt: None,
+            });
+        so.cf_new.push(crate::turbo::write::ConditionalFormatting {
+            sqref: "A2".into(),
+            rules: vec![],
         });
-        so.cf_new.push(crate::turbo::write::ConditionalFormatting { sqref: "A2".into(), rules: vec![] });
         so.insert_rows(2, 1);
         assert_eq!(so.merges, ["A3:B3"]);
         assert!(so.hyperlinks.contains_key(&(3, 1)));

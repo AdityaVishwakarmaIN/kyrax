@@ -2,6 +2,11 @@
 
 Delegates worksheet reading to kyrax and parsing to pandas, and writing to
 write_excel_turbo.
+
+Error cells are surfaced as their Excel error-code strings (for example
+``#DIV/0!``), so pandas cannot distinguish a real error cell from a literal
+string with the same text. Use the turbo ``cell_errors()`` API when that
+distinction matters.
 """
 
 from __future__ import annotations
@@ -10,24 +15,30 @@ import os
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    import pandas as pd
+    pass
 
 from . import (
-    _TurboReader, read_excel_turbo, read_excel_turbo_iter_rows,
-    write_excel_turbo, write_excel_turbo_bytes,
+    _stage_workbook_source,
+    _TurboReader,
+    read_excel_turbo,
+    read_excel_turbo_iter_rows,
+    write_excel_turbo_bytes,
 )
 
 try:
     from pandas.io.excel._base import BaseExcelReader, ExcelWriter
 except ImportError:
+
     class BaseExcelReader:  # type: ignore[no-redef]
         """Fallback base when pandas is not installed."""
+
         def __init__(self, filepath_or_buffer: Any, storage_options: Any = None) -> None:
             self.handles = None
             self.book = None
 
     class ExcelWriter:  # type: ignore[no-redef]
         """Fallback base when pandas is not installed."""
+
         def __init__(
             self,
             path: Any,
@@ -58,25 +69,27 @@ class KyraxExcelReader(BaseExcelReader):
     ) -> None:
         self.engine_kwargs = engine_kwargs or {}
         self._path: str | None = None
+        self._staged: Any = None
         if isinstance(filepath_or_buffer, (str, os.PathLike)):
             self._path = str(filepath_or_buffer)
-        elif hasattr(filepath_or_buffer, "name") and isinstance(filepath_or_buffer.name, str):
-            self._path = filepath_or_buffer.name
 
-        super().__init__(filepath_or_buffer, storage_options=storage_options, engine_kwargs=engine_kwargs)
+        super().__init__(
+            filepath_or_buffer, storage_options=storage_options, engine_kwargs=engine_kwargs
+        )
 
     def load_workbook(self, filepath_or_buffer: Any, engine_kwargs: Any = None) -> Any:
-        path = None
         if isinstance(filepath_or_buffer, (str, os.PathLike)):
             path = str(filepath_or_buffer)
-        elif hasattr(filepath_or_buffer, "name") and isinstance(filepath_or_buffer.name, str):
-            path = filepath_or_buffer.name
         elif self._path is not None:
             path = self._path
+        else:
+            # A file-like object may carry a misleading ``.name`` (BytesIO often
+            # does). Stage the bytes we can actually read instead of trusting it.
+            self._staged = _stage_workbook_source(filepath_or_buffer)
+            path = self._staged.name
+            self._path = path
 
-        if path is not None:
-            return read_excel_turbo(path)
-        raise ValueError("kyrax engine requires a seekable file path")
+        return read_excel_turbo(path)
 
     @property
     def sheet_names(self) -> list[str]:
@@ -104,7 +117,9 @@ class KyraxExcelReader(BaseExcelReader):
             data = []
             for row in rows:
                 values = list(row)
-                while values and (values[-1] is None or values[-1] == ""):
+                # Keep explicit empty strings: pandas distinguishes them from
+                # absent cells when na_filter=False. Only trim trailing blanks.
+                while values and values[-1] is None:
                     values.pop()
                 data.append(values)
             while data and not data[-1]:
@@ -114,7 +129,12 @@ class KyraxExcelReader(BaseExcelReader):
             rows.close()
 
     def close(self) -> None:
-        pass
+        try:
+            super().close()
+        finally:
+            if self._staged is not None:
+                self._staged.close()
+                self._staged = None
 
 
 class KyraxExcelWriter(ExcelWriter):
@@ -198,7 +218,11 @@ class KyraxExcelWriter(ExcelWriter):
         data = write_excel_turbo_bytes(sheets_data)
 
         handles = getattr(self, "_handles", None)
-        target = getattr(handles, "handle", None) if handles is not None else getattr(self, "_path", None)
+        target = (
+            getattr(handles, "handle", None)
+            if handles is not None
+            else getattr(self, "_path", None)
+        )
         if hasattr(target, "write"):
             target.write(data)
         elif isinstance(target, (str, os.PathLike)):
@@ -217,6 +241,7 @@ def register() -> None:
     try:
         import pandas.io.excel._base as pd_base
         import pandas.io.excel._util as pd_util
+
         if hasattr(pd_base, "ExcelFile") and hasattr(pd_base.ExcelFile, "_engines"):
             pd_base.ExcelFile._engines["kyrax"] = KyraxExcelReader
         if hasattr(pd_util, "_writers"):
@@ -226,4 +251,3 @@ def register() -> None:
 
 
 register()
-

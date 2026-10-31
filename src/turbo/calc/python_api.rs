@@ -16,14 +16,14 @@
 //!     dicts and returns the recalculated workbook bytes (identical to passing
 //!     `recalculate=True` to `write_excel_turbo_bytes`).
 
-use pyo3::IntoPyObject;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
+use pyo3::IntoPyObject;
 
 use crate::turbo::calc::ast::{Expr, RefCore, RefExpr};
 use crate::turbo::calc::eval::eval;
-use crate::turbo::calc::functions::{CellResolver, FuncCtx, registry};
+use crate::turbo::calc::functions::{registry, CellResolver, FuncCtx};
 use crate::turbo::calc::parser::parse_formula;
 use crate::turbo::calc::value::{CalcError, CalcValue};
 use std::collections::HashMap;
@@ -99,10 +99,14 @@ fn py_to_calc_value(obj: &Bound<'_, PyAny>) -> PyResult<CalcValue> {
     }
     if let Ok(f) = obj.extract::<f64>() {
         if !f.is_finite() {
-            return Err(PyValueError::new_err("formula context cannot contain NaN or infinity"));
+            return Err(PyValueError::new_err(
+                "formula context cannot contain NaN or infinity",
+            ));
         }
         if obj.is_instance_of::<pyo3::types::PyInt>() && !obj.eq(f)? {
-            return Err(PyValueError::new_err("formula context integer cannot be represented exactly; convert explicitly"));
+            return Err(PyValueError::new_err(
+                "formula context integer cannot be represented exactly; convert explicitly",
+            ));
         }
         return Ok(CalcValue::Number(f));
     }
@@ -746,15 +750,29 @@ fn collect_refs(expr: &Expr, out: &mut Vec<String>) {
     }
 }
 
+fn quote_sheetname_if_needed(name: &str) -> String {
+    let simple = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        && !name.chars().next().is_some_and(|c| c.is_ascii_digit());
+    if simple {
+        name.to_string()
+    } else {
+        format!("'{}'", name.replace('\'', "''"))
+    }
+}
+
 fn collect_ref(re: &RefExpr, out: &mut Vec<String>) {
     match re {
         RefExpr::Local(core) => push_core(core, None, out),
         RefExpr::Sheet { name, inner } => push_core(inner, Some(name), out),
         RefExpr::Sheet3D { from, to, inner } => {
-            push_core(inner, Some(&format!("{from}:{to}")), out)
+            let combined = format!("{from}:{to}");
+            push_core(inner, Some(&combined), out)
         }
         RefExpr::Name { name, sheet } => match sheet {
-            Some(s) => out.push(format!("{s}!{name}")),
+            Some(s) => out.push(format!("{}!{name}", quote_sheetname_if_needed(s))),
             None => out.push(name.clone()),
         },
         RefExpr::Table(t) => out.push(format!("#{}", t.name)),
@@ -764,7 +782,7 @@ fn collect_ref(re: &RefExpr, out: &mut Vec<String>) {
 
 fn push_core(core: &RefCore, sheet: Option<&str>, out: &mut Vec<String>) {
     let qualified = |a1: String| match sheet {
-        Some(s) => format!("{s}!{a1}"),
+        Some(s) => format!("{}!{a1}", quote_sheetname_if_needed(s)),
         None => a1,
     };
     match core {

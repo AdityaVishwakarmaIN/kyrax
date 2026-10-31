@@ -3632,6 +3632,7 @@ mod tests {
                     stop_if_true: None,
                 },
                 priority: 1,
+                priority_explicit: false,
                 dxf_id: None,
             }],
         });

@@ -8,15 +8,16 @@
 //! allocates ids/parts/rels and splices the results into the saved package.
 
 use ahash::AHashMap;
+use std::collections::HashSet;
 
 use crate::turbo::error::{TurboError, TurboResult};
 use crate::turbo::overlay::{
-    WorkbookOverlay, extract_xml_attr, find_element, inflate_entry, sheet_table_parts,
-    splice_tail_control,
+    extract_xml_attr, find_element, inflate_entry, sheet_table_parts, splice_tail_control,
+    WorkbookOverlay,
 };
 use crate::turbo::scan::parse_ref_range_strict;
 use crate::turbo::write::{
-    CellValue, ConditionalFormatting, DataValidation, RichRun, StyleEngine, TableDef, write_table,
+    write_table, CellValue, ConditionalFormatting, DataValidation, RichRun, StyleEngine, TableDef,
 };
 use crate::turbo::zipmin::ArchiveMap;
 
@@ -129,7 +130,7 @@ fn scan_existing_tables(map: &ArchiveMap) -> TurboResult<Vec<ExistingTable>> {
     Ok(out)
 }
 
-fn ranges_overlap(a: &str, b: &str) -> bool {
+pub(crate) fn ranges_overlap(a: &str, b: &str) -> bool {
     match (
         parse_ref_range_strict(a.as_bytes()),
         parse_ref_range_strict(b.as_bytes()),
@@ -143,7 +144,7 @@ fn ranges_overlap(a: &str, b: &str) -> bool {
 
 /// Excel's table-name rules (subset): starts with a letter, `_` or `\`; the
 /// rest letters, digits, `_` or `.`; no spaces; not a cell reference.
-fn validate_table_name(name: &str) -> TurboResult<()> {
+pub(crate) fn validate_table_name(name: &str) -> TurboResult<()> {
     let mut chars = name.chars();
     let ok_first = matches!(chars.next(), Some(c) if c.is_alphabetic() || c == '_' || c == '\\');
     let ok_rest = chars.all(|c| c.is_alphanumeric() || c == '_' || c == '.');
@@ -183,7 +184,11 @@ fn header_text(v: &CellValue) -> Option<String> {
             .collect(),
         CellValue::Formula { .. } => return None,
     };
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 impl WorkbookOverlay {
@@ -356,7 +361,10 @@ pub(crate) fn prepare_tables(ov: &mut WorkbookOverlay) -> TurboResult<()> {
         let stored = |r: u32, c: u32| -> Option<CellValue> {
             let sheet = hydrated.as_ref()?;
             let row = sheet.rows.iter().find(|row| row.row == r)?;
-            row.cells.iter().find(|cell| cell.col == c).map(|cell| cell.value.clone())
+            row.cells
+                .iter()
+                .find(|cell| cell.col == c)
+                .map(|cell| cell.value.clone())
         };
         let Some(so) = ov.sheet_overlays.get_mut(&name) else {
             continue;
@@ -444,10 +452,15 @@ pub(crate) fn patch_styles_dxfs(styles: Vec<u8>, add: Option<&DxfAddition>) -> V
             }
         }
         None => {
-            let at = [&b"<tableStyles"[..], b"<colors", b"<extLst", b"</styleSheet>"]
-                .iter()
-                .find_map(|a| memchr::memmem::find(&styles, a))
-                .unwrap_or(styles.len());
+            let at = [
+                &b"<tableStyles"[..],
+                b"<colors",
+                b"<extLst",
+                b"</styleSheet>",
+            ]
+            .iter()
+            .find_map(|a| memchr::memmem::find(&styles, a))
+            .unwrap_or(styles.len());
             (at, at)
         }
     };
@@ -522,7 +535,13 @@ fn splice_table_parts(xml: &mut Vec<u8>, new_rids: &[String]) {
         block.extend_from_slice(p);
     }
     block.extend_from_slice(b"</tableParts>");
-    splice_tail_control(xml, NO_TAG, &block, TABLE_PARTS_PREDECESSORS, b"</worksheet>");
+    splice_tail_control(
+        xml,
+        NO_TAG,
+        &block,
+        TABLE_PARTS_PREDECESSORS,
+        b"</worksheet>",
+    );
 }
 
 /// Save hook: splice queued CF blocks and table parts into the rendered
@@ -538,8 +557,7 @@ pub(crate) fn apply_cf_tables(
         .sheet_overlays
         .iter()
         .filter(|(n, so)| {
-            (!so.cf_new.is_empty() || !so.tables_new.is_empty())
-                && !ov.deleted_sheets.contains(*n)
+            (!so.cf_new.is_empty() || !so.tables_new.is_empty()) && !ov.deleted_sheets.contains(*n)
         })
         .map(|(n, _)| n)
         .collect();
@@ -586,18 +604,34 @@ pub(crate) fn apply_cf_tables(
         };
 
         if !so.cf_new.is_empty() {
-            let mut priority = crate::turbo::meta::scan_conditional_formatting(&xml)
+            let existing = crate::turbo::meta::scan_conditional_formatting(&xml);
+            let mut used: HashSet<u32> = existing
                 .iter()
                 .map(|r| r.priority.max(0) as u32)
-                .max()
-                .unwrap_or(0);
+                .filter(|p| *p > 0)
+                .collect();
+            let mut priority = used.iter().copied().max().unwrap_or(0);
             let mut block = Vec::new();
             for cf in &so.cf_new {
                 let mut cf = cf.clone();
                 cf.register_dxfs(&mut dxf_engine);
                 for rule in &mut cf.rules {
-                    priority += 1;
-                    rule.priority = priority;
+                    if rule.priority_explicit {
+                        if !used.insert(rule.priority) {
+                            return Err(TurboError::Refused(format!(
+                                "duplicate conditional formatting priority {}",
+                                rule.priority
+                            )));
+                        }
+                        priority = priority.max(rule.priority);
+                    } else {
+                        priority += 1;
+                        while used.contains(&priority) {
+                            priority += 1;
+                        }
+                        used.insert(priority);
+                        rule.priority = priority;
+                    }
                     if let Some(id) = rule.dxf_id.as_mut() {
                         *id += base_dxf;
                     }
@@ -700,7 +734,9 @@ pub(crate) mod py {
         }
     }
 
-    fn lock(ov: &Arc<Mutex<WorkbookOverlay>>) -> PyResult<std::sync::MutexGuard<'_, WorkbookOverlay>> {
+    fn lock(
+        ov: &Arc<Mutex<WorkbookOverlay>>,
+    ) -> PyResult<std::sync::MutexGuard<'_, WorkbookOverlay>> {
         ov.lock().map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
@@ -752,7 +788,10 @@ pub(crate) mod py {
         }
 
         fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-            self._summary(py)?.as_any().try_iter().map(|it| it.into_any())
+            self._summary(py)?
+                .as_any()
+                .try_iter()
+                .map(|it| it.into_any())
         }
     }
 }
@@ -767,9 +806,12 @@ mod tests {
             xml: b"<dxf><font><b/></font></dxf>".to_vec(),
             count: 1,
         };
-        let s = b"<styleSheet><cellStyles/><dxfs count=\"1\"><dxf/></dxfs><tableStyles/></styleSheet>".to_vec();
+        let s =
+            b"<styleSheet><cellStyles/><dxfs count=\"1\"><dxf/></dxfs><tableStyles/></styleSheet>"
+                .to_vec();
         let out = String::from_utf8(patch_styles_dxfs(s, Some(&add))).unwrap();
-        assert!(out.contains("<dxfs count=\"2\"><dxf/><dxf><font><b/></font></dxf></dxfs><tableStyles/>"));
+        assert!(out
+            .contains("<dxfs count=\"2\"><dxf/><dxf><font><b/></font></dxf></dxfs><tableStyles/>"));
         let s = b"<styleSheet><cellStyles/><tableStyles/></styleSheet>".to_vec();
         let out = String::from_utf8(patch_styles_dxfs(s, Some(&add))).unwrap();
         assert!(out.contains("<cellStyles/><dxfs count=\"1\"><dxf>"));
@@ -781,7 +823,8 @@ mod tests {
         splice_table_parts(&mut x, &["rId2".to_string()]);
         let s = String::from_utf8(x).unwrap();
         assert!(s.contains("<pageMargins/><tableParts count=\"2\"><tablePart r:id=\"rId1\"/><tablePart r:id=\"rId2\"/></tableParts></worksheet>"));
-        let mut x = b"<worksheet><sheetData/><drawing r:id=\"rId1\"/><extLst/></worksheet>".to_vec();
+        let mut x =
+            b"<worksheet><sheetData/><drawing r:id=\"rId1\"/><extLst/></worksheet>".to_vec();
         splice_table_parts(&mut x, &["rId2".to_string()]);
         let s = String::from_utf8(x).unwrap();
         assert!(s.contains("<drawing r:id=\"rId1\"/><tableParts count=\"1\"><tablePart r:id=\"rId2\"/></tableParts><extLst/>"));

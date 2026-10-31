@@ -85,6 +85,8 @@ class Rule:
 
     def _kx_spec(self) -> dict[str, Any]:
         spec: dict[str, Any] = {"type": self.type}
+        if self.priority is not None:
+            spec["priority"] = self.priority
         for key in ("operator", "text", "timePeriod", "rank", "percent", "bottom",
                     "aboveAverage", "equalAverage", "stdDev", "stopIfTrue"):
             val = getattr(self, key)

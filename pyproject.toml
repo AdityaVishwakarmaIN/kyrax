@@ -10,7 +10,7 @@ license = { file = "LICENSE" }
 authors = [{ name = "Aditya Vishwakarma", email = "aditya.vishwakarma@vertexconsulting.in" }]
 requires-python = ">=3.10"
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 4 - Beta",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Rust",

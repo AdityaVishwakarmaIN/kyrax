@@ -121,9 +121,9 @@ pub fn validate_sheet_name(
     }
     const INVALID_CHARS: [char; 7] = [':', '\\', '/', '?', '*', '[', ']'];
     for c in name.chars() {
-        if INVALID_CHARS.contains(&c) {
+        if INVALID_CHARS.contains(&c) || c.is_control() {
             return Err(crate::turbo::error::TurboError::Format(format!(
-                "sheet name \"{name}\" contains invalid character '{c}'"
+                "sheet name \"{name}\" contains invalid character {c:?}"
             )));
         }
     }

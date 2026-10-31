@@ -28,7 +28,7 @@ ROWS_ALL = [
     [1.5, -0.0, 1e300, float("nan"), float("inf"), float("-inf")],
     [True, False, None, "", " lead", "trail "],
     ["#N/A", "#DIV/0!", "=SUM(A1:A2)", "+1", "-1", "@x"],
-    ["a<b>&\"c'", "tab\there", "new\nline", "unié中\U0001f600", "\x01ctl", "dup"],
+    ["a<b>&\"c'", "tab\there", "new\nline", "unié中\U0001f600", "ctl", "dup"],
     [dt.datetime(2024, 2, 29, 13, 45, 59), dt.datetime(2024, 1, 1), dt.date(2024, 3, 1), dt.datetime(1899, 12, 30, 1)],
     [dt.datetime(2024, 1, 1, 0, 0, 0, 500000), dt.date(1900, 1, 1), dt.date(1900, 3, 1), dt.date(2999, 12, 31)],
     [],
@@ -215,6 +215,12 @@ def test_ineligible_kwargs_unchanged(entry, tmp_path):
     assert _parts(_write(entry, tmp_path, extra)) == _parts(
         _write("bytes", tmp_path, _model(extra))
     )
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_illegal_control_character_rejected(entry, tmp_path):
+    with pytest.raises(ValueError, match="control character"):
+        _write(entry, tmp_path, [{"name": "S", "rows": [["a\x01b"]]}])
 
 
 @pytest.mark.parametrize("entry", ENTRIES)

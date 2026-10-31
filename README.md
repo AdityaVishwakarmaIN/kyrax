@@ -1,17 +1,14 @@
 # `kyrax`
 
-[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://adityamukherjee-99.github.io/kyrax/)
-
 A fast excel file reader for Python and Rust.
 
 Docs:
- * Python (local: `make doc-serve`)
+ * Python API types: [`python/kyrax/_kyrax.pyi`](./python/kyrax/_kyrax.pyi)
  * Rust (local: `cargo doc --open -p kyrax`)
 
 ## Stability
 
-The Python library is considered production-ready. The API is mostly stable, and we avoid breaking changes as much as
-possible.
+The Python API is mostly stable, and we avoid breaking changes as much as possible.
 
 > ⚠️ The free-threaded build is still considered experimental
 
@@ -227,7 +224,7 @@ individual rows are limited to 16 MiB each.
 - **Byte-preserving edit mode** - edit cells while keeping original untouched XML parts, macros, and styles byte-for-byte intact.
 - **Standalone formula evaluation** - evaluate formulas, track dependencies, and recalculate spreadsheets with `kyrax.formulas`.
 - **Validation & repair** - inspect corrupted spreadsheets and fix repairable findings with `validate_excel` and `repair_excel`.
-- **High performance** - 100% Rust core with zero feature logic in Python.
+- **High performance** - Rust core with Python bindings and thin adapters.
 
 ## Contributing & Development
 
@@ -276,7 +273,6 @@ make install-prod # install with release build (benchmarking)
 make test         # to run the tests
 make lint         # to run the linter
 make format       # to format python and rust code
-make doc-serve    # to serve the documentation locally
 ```
 
 ### Useful Resources
